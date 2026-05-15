@@ -1,0 +1,10 @@
+{
+  "node": "relay",
+  "role": "server",
+  "services": [
+    {
+      "name": "udp-main",
+      "target": "127.0.0.1:51820"
+    }
+  ]
+}

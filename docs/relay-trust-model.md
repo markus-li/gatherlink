@@ -1,0 +1,34 @@
+# Relay Trust Model
+
+## Purpose
+
+Gatherlink needs a clear model for what relays can and cannot see/do.
+
+## Relay visibility
+
+Depending on mode, relays may see source endpoint metadata, destination peer
+metadata, timing, packet sizes, carrier/profile used, and service IDs if not
+hidden inside the envelope.
+
+Relays should not see plaintext virtual UDP payloads.
+
+## End-to-end payloads
+
+Payloads such as WireGuard are already encrypted by their own protocol.
+Gatherlink transport envelope should still authenticate and protect Gatherlink
+frames.
+
+## Relay authority
+
+Relays may be authorized to forward traffic, report metrics, participate in peer
+failover, and act as exit/site-gateway for configured services. Relays must not
+silently rewrite service intent.
+
+## Hosted relays
+
+Hosted relays require tenant isolation, key lifecycle, audit events, rate limits,
+abuse controls, and monitoring.
+
+## Self-hosted relays
+
+Self-hosted relays should be first-class and not artificially limited.

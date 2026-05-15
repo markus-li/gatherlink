@@ -1,0 +1,1 @@
+"""Gatherlink sinks package."""

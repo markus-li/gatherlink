@@ -1,0 +1,14 @@
+{
+  "node": "client",
+  "peer": "relay",
+  "paths": [
+    { "name": "wan1", "interface": "eth1" }
+  ],
+  "services": [
+    {
+      "name": "udp-main",
+      "listen": "127.0.0.1:55180",
+      "target": "127.0.0.1:51820"
+    }
+  ]
+}
