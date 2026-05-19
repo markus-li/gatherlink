@@ -6,7 +6,9 @@
 use std::net::SocketAddr;
 
 use gatherlink_dataplane::engine::{ForwardOutcome, ReapplyOutcome};
-use gatherlink_dataplane::runtime_config::{CorePathConfig, PathSchedulerState, SchedulerConfig, SchedulerMode};
+use gatherlink_dataplane::runtime_config::{
+    CorePathConfig, PathSchedulerPrimitives, PathSchedulerState, SchedulerConfig, SchedulerMode,
+};
 use gatherlink_dataplane::udp_service::UdpServiceConfig;
 use pyo3::prelude::*;
 
@@ -76,7 +78,22 @@ pub struct PyPathConfig {
 impl PyPathConfig {
     /// Create a compiled path config from explicit wire ids and an encoded-frame MTU.
     #[new]
-    #[pyo3(signature = (path_id, mtu, route_id = 0, busy = false, enabled = true, state = "active", weight = 1))]
+    #[pyo3(signature = (
+        path_id,
+        mtu,
+        route_id = 0,
+        busy = false,
+        enabled = true,
+        state = "active",
+        weight = 1,
+        tx_capacity_bps = None,
+        rx_capacity_bps = None,
+        latency_us = None,
+        loss_ppm = 0,
+        reorder_hold_us = 0,
+        max_in_flight_packets = 0,
+        max_in_flight_bytes = 0,
+    ))]
     pub fn new(
         path_id: u16,
         mtu: usize,
@@ -85,14 +102,31 @@ impl PyPathConfig {
         enabled: bool,
         state: &str,
         weight: u16,
+        tx_capacity_bps: Option<u64>,
+        rx_capacity_bps: Option<u64>,
+        latency_us: Option<u32>,
+        loss_ppm: u32,
+        reorder_hold_us: u32,
+        max_in_flight_packets: u16,
+        max_in_flight_bytes: u32,
     ) -> PyResult<Self> {
         let state = if busy {
             PathSchedulerState::Busy
         } else {
             parse_path_scheduler_state(state)?
         };
-        let inner = CorePathConfig::new_with_scheduler(path_id, route_id, mtu, enabled, state, weight)
-            .map_err(udp_error_to_py)?;
+        let primitives = PathSchedulerPrimitives::new(
+            tx_capacity_bps,
+            rx_capacity_bps,
+            latency_us,
+            loss_ppm,
+            reorder_hold_us,
+            max_in_flight_packets,
+            max_in_flight_bytes,
+        );
+        let inner =
+            CorePathConfig::new_with_scheduler_primitives(path_id, route_id, mtu, enabled, state, weight, primitives)
+                .map_err(udp_error_to_py)?;
         Ok(Self { inner })
     }
 
@@ -122,6 +156,34 @@ impl PyPathConfig {
 
     pub fn weight(&self) -> u16 {
         self.inner.weight()
+    }
+
+    pub fn tx_capacity_bps(&self) -> Option<u64> {
+        self.inner.primitives().tx_capacity_bps()
+    }
+
+    pub fn rx_capacity_bps(&self) -> Option<u64> {
+        self.inner.primitives().rx_capacity_bps()
+    }
+
+    pub fn latency_us(&self) -> Option<u32> {
+        self.inner.primitives().latency_us()
+    }
+
+    pub fn loss_ppm(&self) -> u32 {
+        self.inner.primitives().loss_ppm()
+    }
+
+    pub fn reorder_hold_us(&self) -> u32 {
+        self.inner.primitives().reorder_hold_us()
+    }
+
+    pub fn max_in_flight_packets(&self) -> u16 {
+        self.inner.primitives().max_in_flight_packets()
+    }
+
+    pub fn max_in_flight_bytes(&self) -> u32 {
+        self.inner.primitives().max_in_flight_bytes()
     }
 }
 

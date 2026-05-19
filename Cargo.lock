@@ -34,6 +34,7 @@ name = "gatherlink-pybindings"
 version = "0.1.0"
 dependencies = [
  "gatherlink-dataplane",
+ "gatherlink-protocol",
  "pyo3",
 ]
 

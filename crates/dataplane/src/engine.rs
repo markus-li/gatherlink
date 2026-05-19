@@ -7,11 +7,14 @@
 use std::fmt;
 use std::net::SocketAddr;
 
+use gatherlink_protocol::control::ControlPayload;
 use gatherlink_protocol::errors::ProtocolError;
 use gatherlink_protocol::frame::{Frame, FrameKind, V1_HEADER_LEN};
 
 use crate::fragmentation::{fragment_datagram, FragmentReassembly};
+use crate::metrics::{DataplaneMetrics, MetricsSnapshot};
 use crate::runtime_config::{CorePathConfig, CoreRuntimeConfig, SchedulerMode};
+use crate::scheduler::all_paths::AllPathSelector;
 use crate::scheduler::weighted_rr::WeightedRoundRobin;
 use crate::udp_service::{UdpServiceError, UserlandUdpService};
 
@@ -23,6 +26,7 @@ pub struct CoreDataplane {
     scheduler: WeightedRoundRobin,
     next_sequence: u64,
     next_datagram_id: u32,
+    metrics: DataplaneMetrics,
 }
 
 impl CoreDataplane {
@@ -41,6 +45,7 @@ impl CoreDataplane {
             scheduler: compile_scheduler(config.scheduler().mode(), config.paths()),
             next_sequence: 1,
             next_datagram_id: 1,
+            metrics: DataplaneMetrics::new(config.paths()),
         })
     }
 
@@ -89,6 +94,7 @@ impl CoreDataplane {
         self.services = services;
         self.paths = config.paths().to_vec();
         self.scheduler = compile_scheduler(config.scheduler().mode(), config.paths());
+        self.metrics.reconcile_paths(config.paths());
         Ok(outcome)
     }
 
@@ -100,6 +106,92 @@ impl CoreDataplane {
     /// Return the compiled paths Rust can use for frame production.
     pub fn paths(&self) -> &[CorePathConfig] {
         &self.paths
+    }
+
+    /// Return Rust-owned telemetry counters for service status and monitoring.
+    pub fn metrics_snapshot(&self) -> MetricsSnapshot {
+        self.metrics.snapshot()
+    }
+
+    /// Record telemetry for a received remote data frame.
+    ///
+    /// Python still owns what to do with this fact. Rust only updates the same counters the production receive loop
+    /// will eventually maintain directly.
+    pub fn observe_received_data_frame(&mut self, service_id: u64, path_id: u16, sequence: u64, payload_len: usize) {
+        self.metrics.record_receive(service_id, path_id, sequence, payload_len);
+    }
+
+    /// Record a received control metaband payload parsed by the protocol crate.
+    pub fn observe_received_control_payload(&mut self, payload: &ControlPayload, frame_bytes: usize) {
+        self.metrics.record_control_received(payload, frame_bytes);
+    }
+
+    /// Record a received control metaband payload on a specific path.
+    pub fn observe_received_control_payload_on_path(
+        &mut self,
+        path_id: u16,
+        payload: &ControlPayload,
+        frame_bytes: usize,
+    ) {
+        self.metrics
+            .record_control_received_on_path(path_id, payload, frame_bytes);
+    }
+
+    /// Record a sent control metaband payload parsed by the protocol crate.
+    pub fn observe_sent_control_payload(&mut self, payload: &ControlPayload, frame_bytes: usize) {
+        self.metrics.record_control_sent(payload, frame_bytes);
+    }
+
+    /// Record a sent control metaband payload on a specific path.
+    pub fn observe_sent_control_payload_on_path(&mut self, path_id: u16, payload: &ControlPayload, frame_bytes: usize) {
+        self.metrics.record_control_sent_on_path(path_id, payload, frame_bytes);
+    }
+
+    /// Build duplicate control frames for every eligible path.
+    ///
+    /// Control duplication is deliberately separate from ordinary data scheduling:
+    /// every returned frame carries the same sequence and payload bytes, while
+    /// the frame path id identifies the transport path that carried the copy.
+    pub fn duplicate_control_payload_for_all_paths(
+        &mut self,
+        service_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<Vec<ControlTransmitPlan>, DataplaneError> {
+        let path_indices = AllPathSelector::select_path_indices(&self.paths, payload.len());
+        if path_indices.is_empty() {
+            return Err(DataplaneError::NoPathAvailable);
+        }
+
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        let mut plans = Vec::with_capacity(path_indices.len());
+        for path_index in path_indices {
+            let path = &self.paths[path_index];
+            let frame = Frame::control(
+                0,
+                service_id,
+                path.path_id(),
+                path.route_id(),
+                sequence,
+                payload.clone(),
+            )?;
+            let encoded = frame.encode()?;
+            if encoded.len() > path.mtu() {
+                return Err(DataplaneError::FrameExceedsPathMtu {
+                    path_id: path.path_id(),
+                    frame_len: encoded.len(),
+                    mtu: path.mtu(),
+                });
+            }
+            plans.push(ControlTransmitPlan {
+                path_id: path.path_id(),
+                route_id: path.route_id(),
+                sequence,
+                frame_len: encoded.len(),
+                payload_len: payload.len(),
+            });
+        }
+        Ok(plans)
     }
 
     /// Receive one local UDP datagram, pass it through the v1 data-frame
@@ -201,6 +293,9 @@ impl CoreDataplane {
                         batch_count: 0,
                         fragment_count: plan.fragment_count.saturating_sub(1),
                     });
+                    if let Some(outcome) = outcomes.last() {
+                        self.metrics.record_forward(outcome);
+                    }
                 }
                 FrameKind::Batch => {
                     let payloads = decoded.batch_payloads()?;
@@ -221,6 +316,9 @@ impl CoreDataplane {
                             batch_count: payloads.len(),
                             fragment_count: 0,
                         });
+                        if let Some(outcome) = outcomes.last() {
+                            self.metrics.record_forward(outcome);
+                        }
                     }
                 }
                 FrameKind::Control => return Err(DataplaneError::UnexpectedFrameKind),
@@ -384,6 +482,16 @@ pub struct ForwardOutcome {
     pub frame_count: usize,
     pub batch_count: usize,
     pub fragment_count: usize,
+}
+
+/// Planned duplicate control frame for one path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlTransmitPlan {
+    pub path_id: u16,
+    pub route_id: u16,
+    pub sequence: u64,
+    pub frame_len: usize,
+    pub payload_len: usize,
 }
 
 /// Dataplane execution errors.

@@ -50,3 +50,24 @@ Rust should not parse user config, discover links, score carriers, explain path
 choices, or own failover policy. It should execute the scheduler state, count
 what happened, and report enough structured diagnostics for Python to explain
 the behavior.
+
+## Queues and UDP
+
+Gatherlink should keep a small bounded local scheduler queue. The queue exists
+to smooth short scheduler decisions and preserve FIFO ordering while the runtime
+chooses among currently eligible paths. It is not a reliability mechanism for
+UDP.
+
+Normal UDP payloads remain best-effort:
+
+- if a path is temporarily busy and another eligible path has capacity, the
+  queued packet may be redistributed FIFO-style to that path
+- if the queue is full or the packet age exceeds policy, Gatherlink drops the
+  packet, increments explicit Gatherlink drop counters, and emits diagnostics
+- Gatherlink does not retransmit ordinary UDP packets unless a future service
+  mode explicitly requests reliability
+
+This keeps real-time UDP honest. Loss recovery belongs to the application or
+upper protocol that chose UDP. Gatherlink's job is to make drops, queue depth,
+queue age, path latency, and receiver missing-packet facts visible enough for
+Python policy to adjust path weights or disable bad paths.

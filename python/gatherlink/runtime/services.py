@@ -260,6 +260,7 @@ class ServiceIpcServer:
         *,
         status: Callable[[], dict[str, Any]],
         stop: Callable[[], None],
+        commands: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] | None = None,
     ) -> None:
         if record.ipc_socket is None:
             raise ValueError("process service records must define ipc_socket")
@@ -267,6 +268,7 @@ class ServiceIpcServer:
         self.socket_path = record.ipc_socket
         self._status = status
         self._stop = stop
+        self._commands = commands or {}
         self._closed = Event()
         self._thread: Thread | None = None
         self._server: socket.socket | None = None
@@ -301,9 +303,24 @@ class ServiceIpcServer:
                 continue
             except OSError:
                 break
-            with client:
-                response = self._handle_request(_read_ipc_request(client))
-                client.sendall((json.dumps(response, sort_keys=True) + "\n").encode("utf-8"))
+            Thread(
+                target=self._handle_client,
+                args=(client,),
+                name=f"{self.record.name}-ipc-client",
+                daemon=True,
+            ).start()
+
+    def _handle_client(self, client: socket.socket) -> None:
+        """
+        Serve one IPC client without blocking the listener.
+
+        Some service commands intentionally run for seconds, such as lab reverse
+        traffic generation. Status and stop requests must still work while those
+        commands are in progress, so each accepted connection gets a tiny worker.
+        """
+        with client:
+            response = self._handle_request(_read_ipc_request(client))
+            client.sendall((json.dumps(response, sort_keys=True) + "\n").encode("utf-8"))
 
     def _handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         command = request.get("command")
@@ -312,10 +329,22 @@ class ServiceIpcServer:
         if command == "stop":
             self._stop()
             return {"ok": True, "service": self.record.name, "status": "stopping"}
+        if isinstance(command, str) and command in self._commands:
+            try:
+                result = self._commands[command](request)
+            except Exception as exc:
+                return {"ok": False, "error": str(exc)}
+            return {"ok": True, "service": self.record.name, "result": result}
         return {"ok": False, "error": f"unknown command: {command}"}
 
 
-def request_service(service: ServiceRecord, command: str, *, timeout_seconds: float = 2.0) -> dict[str, Any]:
+def request_service(
+    service: ServiceRecord,
+    command: str,
+    *,
+    timeout_seconds: float = 2.0,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Send one IPC command to a process-managed service."""
     if service.ipc_socket is None:
         raise ServiceIpcError(f"{service.name} does not expose an IPC socket")
@@ -323,7 +352,8 @@ def request_service(service: ServiceRecord, command: str, *, timeout_seconds: fl
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(timeout_seconds)
             client.connect(str(service.ipc_socket))
-            client.sendall((json.dumps({"command": command}, sort_keys=True) + "\n").encode("utf-8"))
+            request = {"command": command, **(payload or {})}
+            client.sendall((json.dumps(request, sort_keys=True) + "\n").encode("utf-8"))
             raw_response = _read_ipc_response(client)
     except OSError as exc:
         raise ServiceIpcError(f"{service.name} IPC failed: {exc}") from exc

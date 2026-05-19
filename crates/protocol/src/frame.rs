@@ -280,6 +280,35 @@ impl Frame {
         })
     }
 
+    /// Build a control metaband frame.
+    ///
+    /// Control payloads carry telemetry and future safe state changes without
+    /// increasing the fixed data header. They may be batched or sent sparsely by
+    /// higher layers.
+    pub fn control(
+        session_id: SessionId,
+        service_id: ServiceId,
+        path_id: PathId,
+        route_id: RouteId,
+        sequence: SequenceNumber,
+        payload: Vec<u8>,
+    ) -> Result<Self, ProtocolError> {
+        let header = FrameHeader::new(
+            FrameKind::Control,
+            session_id,
+            service_id,
+            path_id,
+            route_id,
+            sequence,
+            payload.len(),
+        )?;
+        Ok(Self {
+            header,
+            extensions: Vec::new(),
+            payload,
+        })
+    }
+
     /// Build one data-frame fragment for a virtual UDP payload that does not fit one path MTU.
     pub fn fragment(
         session_id: SessionId,

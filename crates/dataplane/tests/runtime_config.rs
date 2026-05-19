@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 
-use gatherlink_dataplane::runtime_config::{CorePathConfig, CoreRuntimeConfig};
+use gatherlink_dataplane::runtime_config::{
+    CorePathConfig, CoreRuntimeConfig, PathSchedulerPrimitives, PathSchedulerState,
+};
 use gatherlink_dataplane::udp_service::{UdpServiceConfig, UdpServiceError};
 use gatherlink_protocol::frame::{FRAGMENT_EXTENSION_LEN, V1_HEADER_LEN};
 
@@ -49,6 +51,31 @@ fn rejects_path_mtu_that_cannot_carry_a_fragment() {
     let err = CorePathConfig::new(7, 0, V1_HEADER_LEN + FRAGMENT_EXTENSION_LEN, false).unwrap_err();
 
     assert!(matches!(err, UdpServiceError::PathMtuTooSmall { path_id: 7, .. }));
+}
+
+#[test]
+fn accepts_compiled_scheduler_primitives() {
+    let primitives = PathSchedulerPrimitives::new(
+        Some(3_000_000),
+        Some(1_500_000),
+        Some(12_000),
+        25_000,
+        150_000,
+        64,
+        524_288,
+    );
+    let path =
+        CorePathConfig::new_with_scheduler_primitives(9, 1, 1200, true, PathSchedulerState::Active, 3, primitives)
+            .unwrap();
+
+    assert_eq!(path.weight(), 3);
+    assert_eq!(path.primitives().tx_capacity_bps(), Some(3_000_000));
+    assert_eq!(path.primitives().rx_capacity_bps(), Some(1_500_000));
+    assert_eq!(path.primitives().latency_us(), Some(12_000));
+    assert_eq!(path.primitives().loss_ppm(), 25_000);
+    assert_eq!(path.primitives().reorder_hold_us(), 150_000);
+    assert_eq!(path.primitives().max_in_flight_packets(), 64);
+    assert_eq!(path.primitives().max_in_flight_bytes(), 524_288);
 }
 
 #[test]

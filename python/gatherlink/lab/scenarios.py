@@ -26,6 +26,8 @@ LabScenarioKind = Literal[
 ]
 LabPlanStatus = Literal["supported", "not_implemented"]
 LabShapeSide = Literal["local", "remote", "both"]
+DEFAULT_REORDER_MAX_HOLD = "150ms"
+DEFAULT_REORDER_MIN_HOLD = "2ms"
 
 
 class LabShapeConfig(GatherlinkBaseModel):
@@ -36,6 +38,7 @@ class LabShapeConfig(GatherlinkBaseModel):
     jitter: str | None = None
     loss: str | None = None
     reorder: str | None = None
+    limit: int | None = None
     mtu: int | None = None
     state: Literal["up", "down"] | None = None
     blackhole: bool = False
@@ -50,6 +53,7 @@ class LabPathConfig(GatherlinkBaseModel):
     client_address: str
     server_address: str
     subnet: str
+    default_max_speed: str | None = None
     shape: LabShapeConfig = Field(default_factory=LabShapeConfig)
 
 
@@ -72,6 +76,13 @@ class LabTrafficConfig(GatherlinkBaseModel):
     bandwidth: str | None = None
 
 
+class LabReorderPolicyConfig(GatherlinkBaseModel):
+    """Python-owned reorder policy for one node pair."""
+
+    node_pair: str
+    max_hold: str = DEFAULT_REORDER_MAX_HOLD
+
+
 class LabScenarioConfig(GatherlinkBaseModel):
     """
     Declarative lab scenario config.
@@ -90,7 +101,9 @@ class LabScenarioConfig(GatherlinkBaseModel):
     nodes: list[LabNodeConfig] = Field(default_factory=list)
     paths: list[LabPathConfig] = Field(default_factory=list)
     traffic: LabTrafficConfig
+    reorder_policies: list[LabReorderPolicyConfig] = Field(default_factory=list)
     profiles: dict[str, dict[str, LabShapeConfig]] = Field(default_factory=dict)
+    network_modes: dict[str, LabNetworkModeConfig] = Field(default_factory=dict)
     future_features: list[str] = Field(default_factory=list)
 
 
@@ -108,6 +121,13 @@ class LabShapeProfileConfig(GatherlinkBaseModel):
 
     schema_version: int = 1
     name: str
+    description: str | None = None
+    targets: list[LabShapeTargetConfig] = Field(default_factory=list)
+
+
+class LabNetworkModeConfig(GatherlinkBaseModel):
+    """Named lab network behavior made from one or more shaping targets."""
+
     description: str | None = None
     targets: list[LabShapeTargetConfig] = Field(default_factory=list)
 
@@ -186,6 +206,16 @@ def plan_lab_scenario(config: LabScenarioConfig) -> LabPlan:
             action="run_builtin_udp_traffic_check",
             status="supported",
             details=config.traffic.export_dict(),
+        ),
+        LabPlanStep(
+            order=70,
+            action="compile_reorder_policy",
+            status="supported",
+            details={
+                "default_max_hold": DEFAULT_REORDER_MAX_HOLD,
+                "default_minimum_hold": DEFAULT_REORDER_MIN_HOLD,
+                "node_pairs": [policy.export_dict() for policy in config.reorder_policies],
+            },
         ),
     ]
     steps.extend(_future_feature_steps(config, first_order=100))

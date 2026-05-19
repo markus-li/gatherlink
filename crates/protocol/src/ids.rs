@@ -16,5 +16,9 @@ pub type PathId = u16;
 /// Reserved route/transit identifier for future explicit overlay plans.
 pub type RouteId = u16;
 
-/// Per-session or per-service sequence number, depending on future policy.
+/// Global per-session/service packet sequence number.
+///
+/// Data frames keep this sequence global so receivers can detect cross-path
+/// missing, duplicate, and out-of-order arrivals. Per-path attribution is
+/// reported over the control metaband instead of adding fixed data-header bytes.
 pub type SequenceNumber = u64;

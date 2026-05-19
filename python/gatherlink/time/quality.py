@@ -14,5 +14,6 @@ logger = get_logger(__name__)
 
 # File-specific TODO:
 # - Combine system NTP, direct NTP, tunnel NTP, peer exchange, and GPS quality signals.
-# - Maintain internal time confidence and offset estimate.
+# - Maintain internal time confidence and peer-relative offset estimates from Gatherlink control metadata.
+# - Keep sink-authoritative internal sync separate from privileged system clock corrections.
 # - Do not make dataplane correctness depend on wall-clock sync.

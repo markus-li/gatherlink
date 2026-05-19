@@ -11,4 +11,5 @@ extension-module = ["pyo3/extension-module"]
 
 [dependencies]
 gatherlink-dataplane = { path = "../dataplane" }
+gatherlink-protocol = { path = "../protocol" }
 pyo3 = { version = "0.22", features = ["auto-initialize"] }

@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from gatherlink.config.errors import ConfigValidationError
 from gatherlink.config.validation import validate_config_file
+from gatherlink.control import MONITOR_CONTROL_REQUEST_REFRESH_SECONDS, MONITOR_CONTROL_REQUEST_TTL_SECONDS
 from gatherlink.lab.scenarios import load_lab_scenario_file
 from gatherlink.runtime.services import (
     ServiceIpcError,
@@ -32,6 +33,8 @@ from gatherlink.runtime.services import (
 app = typer.Typer(help="List managed services and attach to their logs.")
 AttachMode = Literal["raw", "aggregate"]
 CONTEXT_WIDTH = 48
+CTRL_WIDTH = 64
+DETAIL_CTRL_WIDTH = 120
 
 
 @app.command("list")
@@ -180,7 +183,8 @@ def _print_log(path: Path, *, follow: bool, tail: int) -> None:
 
 
 def _print_aggregate(services: list[ServiceRecord], *, interval: float, once: bool) -> None:
-    previous: dict[str, tuple[float, int]] = {}
+    previous: dict[str, tuple[float, int, int]] = {}
+    next_cadence_request_at: dict[str, float] = {}
     human_units = True
     speed_bits = True
     decimal_units = False
@@ -189,10 +193,13 @@ def _print_aggregate(services: list[ServiceRecord], *, interval: float, once: bo
             rows = []
             now = time.monotonic()
             for service in services:
+                if not once and now >= next_cadence_request_at.get(service.name, 0.0):
+                    _request_monitor_control_cadence(service)
+                    next_cadence_request_at[service.name] = now + MONITOR_CONTROL_REQUEST_REFRESH_SECONDS
                 service_rows = _aggregate_rows_for_service(service, previous=previous, now=now)
                 rows.extend(service_rows)
                 for row in service_rows:
-                    previous[str(row["row_key"])] = (now, row["bytes"])
+                    previous[str(row["row_key"])] = (now, int(row["tx_bytes"]), int(row["rx_bytes"]))
 
             output = _render_aggregate_rows(
                 rows,
@@ -224,10 +231,27 @@ def _print_aggregate(services: list[ServiceRecord], *, interval: float, once: bo
                 time.sleep(0.05)
 
 
+def _request_monitor_control_cadence(service: ServiceRecord) -> None:
+    """Ask a service to temporarily publish higher-rate control metadata for diagnostics."""
+    if service.manager == "systemd":
+        return
+    try:
+        request_service(
+            service,
+            "control-cadence",
+            payload={"profile": "monitor", "ttl_seconds": MONITOR_CONTROL_REQUEST_TTL_SECONDS},
+        )
+    except ServiceIpcError:
+        # Older or narrower services may not implement the optional diagnostics
+        # command yet. Monitoring counters should still work from their normal
+        # status payload instead of making observability all-or-nothing.
+        return
+
+
 def _aggregate_rows_for_service(
     service: ServiceRecord,
     *,
-    previous: dict[str, tuple[float, int]],
+    previous: dict[str, tuple[float, int, int]],
     now: float,
 ) -> list[dict[str, object]]:
     if service.manager == "systemd":
@@ -236,12 +260,22 @@ def _aggregate_rows_for_service(
                 "row_key": service.name,
                 "service": service.name,
                 "state": "systemd",
-                "packets": 0,
-                "bytes": 0,
-                "speed_bytes_per_second": "not_reported",
+                "tx_packets": 0,
+                "tx_bytes": 0,
+                "tx_speed_bytes_per_second": "not_reported",
+                "rx_packets": 0,
+                "rx_bytes": 0,
+                "rx_speed_bytes_per_second": "not_reported",
                 "missed": "not_reported",
                 "reordered": "not_reported",
                 "reorder_needed": "not_reported",
+                "row_type": "service",
+                "parent": "",
+                "path": "",
+                "control_metadata": {},
+                "system_time": _short_wall_now(),
+                "gatherlink_time": "-",
+                "ntp": "-",
                 "extra": service.systemd_unit or "",
             }
         ]
@@ -253,28 +287,40 @@ def _aggregate_rows_for_service(
                 "row_key": service.name,
                 "service": service.name,
                 "state": "ipc_error",
-                "packets": 0,
-                "bytes": 0,
-                "speed_bytes_per_second": "not_reported",
+                "tx_packets": 0,
+                "tx_bytes": 0,
+                "tx_speed_bytes_per_second": "not_reported",
+                "rx_packets": 0,
+                "rx_bytes": 0,
+                "rx_speed_bytes_per_second": "not_reported",
                 "missed": "not_reported",
                 "reordered": "not_reported",
                 "reorder_needed": "not_reported",
+                "row_type": "service",
+                "parent": "",
+                "path": "",
+                "control_metadata": {},
+                "system_time": _short_wall_now(),
+                "gatherlink_time": "-",
+                "ntp": "-",
                 "extra": str(exc),
             }
         ]
 
-    total_bytes = int(status.get("bytes", 0))
     service_row = _row_from_status(
         row_key=service.name,
         name=service.name,
         state="running" if status.get("running", service.is_running()) else "stopped",
-        packets=int(status.get("packets", 0)),
-        total_bytes=total_bytes,
         status=status,
         previous=previous.get(service.name),
         now=now,
         extra=_status_context(status),
     )
+    service_row["row_type"] = "service"
+    service_row["parent"] = ""
+    service_row["path"] = ""
+    control_metadata = status.get("control_metadata")
+    service_row["control_metadata"] = control_metadata if isinstance(control_metadata, dict) else {}
     rows = [service_row]
     path_stats = status.get("path_stats", {})
     if isinstance(path_stats, dict):
@@ -282,19 +328,20 @@ def _aggregate_rows_for_service(
             if not isinstance(path_status, dict):
                 continue
             path_key = f"{service.name}::{path_name}"
-            rows.append(
-                _row_from_status(
-                    row_key=path_key,
-                    name=f"  path:{path_name}",
-                    state="path",
-                    packets=int(path_status.get("packets", 0)),
-                    total_bytes=int(path_status.get("bytes", 0)),
-                    status=path_status,
-                    previous=previous.get(path_key),
-                    now=now,
-                    extra=f"parent={service.name}",
-                )
+            path_row = _row_from_status(
+                row_key=path_key,
+                name=f"  path:{path_name}",
+                state="path",
+                status=path_status,
+                previous=previous.get(path_key),
+                now=now,
+                extra=f"parent={service.name}",
             )
+            path_row["row_type"] = "path"
+            path_row["parent"] = service.name
+            path_row["path"] = str(path_name)
+            path_row["control_metadata"] = control_metadata if isinstance(control_metadata, dict) else {}
+            rows.append(path_row)
     return rows
 
 
@@ -303,31 +350,50 @@ def _row_from_status(
     row_key: str,
     name: str,
     state: str,
-    packets: int,
-    total_bytes: int,
     status: dict[str, object],
-    previous: tuple[float, int] | None,
+    previous: tuple[float, int, int] | None,
     now: float,
     extra: str,
 ) -> dict[str, object]:
-    if "current_speed_bps" in status:
-        speed_bytes_per_second: int | str = int(status["current_speed_bps"])
+    tx_packets, tx_bytes, rx_packets, rx_bytes = _directional_counters(status)
+    if "current_tx_speed_bps" in status:
+        tx_speed_bytes_per_second: int | str = int(status["current_tx_speed_bps"])
+    elif "current_speed_bps" in status:
+        tx_speed_bytes_per_second = int(status["current_speed_bps"])
     elif previous is None:
-        speed_bytes_per_second = 0
+        tx_speed_bytes_per_second = 0
     else:
         elapsed = max(now - previous[0], 0.001)
-        speed_bytes_per_second = int((total_bytes - previous[1]) / elapsed)
-    # TODO(rust-stats): Populate these from Rust dataplane status once the Rust side reports loss and reorder metrics.
+        tx_speed_bytes_per_second = int((tx_bytes - previous[1]) / elapsed)
+    if "current_rx_speed_bps" in status:
+        rx_speed_bytes_per_second: int | str = int(status["current_rx_speed_bps"])
+    elif previous is None:
+        rx_speed_bytes_per_second = 0
+    else:
+        elapsed = max(now - previous[0], 0.001)
+        rx_speed_bytes_per_second = int((rx_bytes - previous[2]) / elapsed)
+    # Rust-backed and lab services both report this status shape. Python keeps the monitor generic so future
+    # schedulers can consume the same real counters without special-casing the service implementation.
     return {
         "row_key": row_key,
         "service": name,
         "state": state,
-        "packets": packets,
-        "bytes": total_bytes,
-        "speed_bytes_per_second": speed_bytes_per_second,
+        "tx_packets": tx_packets,
+        "tx_bytes": tx_bytes,
+        "tx_speed_bytes_per_second": tx_speed_bytes_per_second,
+        "rx_packets": rx_packets,
+        "rx_bytes": rx_bytes,
+        "rx_speed_bytes_per_second": rx_speed_bytes_per_second,
         "missed": status.get("missed_packets", "not_reported"),
         "reordered": status.get("reordered_packets", "not_reported"),
         "reorder_needed": status.get("packets_needing_reorder", "not_reported"),
+        "row_type": "service",
+        "parent": "",
+        "path": "",
+        "control_metadata": status.get("control_metadata") if isinstance(status.get("control_metadata"), dict) else {},
+        "system_time": _system_time_context(status.get("control_metadata")),
+        "gatherlink_time": _gatherlink_time_context(status.get("control_metadata")),
+        "ntp": _ntp_context(status.get("control_metadata")),
         "extra": extra,
     }
 
@@ -341,15 +407,36 @@ def _render_aggregate_rows(
     decimal_units: bool,
     interactive: bool,
 ) -> str:
-    headers = ["service", "state", "pkts", "bytes", "speed", "miss", "ooo", "reord", "context"]
+    headers = [
+        "service",
+        "state",
+        "txp",
+        "txB",
+        "tx/s",
+        "rxp",
+        "rxB",
+        "rx/s",
+        "miss",
+        "ooo",
+        "reord",
+        "context",
+    ]
     rendered_rows = [
         [
             str(row["service"]),
             str(row["state"]),
-            str(row["packets"]),
-            _format_bytes(int(row["bytes"]), human_units=human_units, decimal_units=decimal_units),
+            str(row["tx_packets"]),
+            _format_bytes(int(row["tx_bytes"]), human_units=human_units, decimal_units=decimal_units),
             _format_rate(
-                row["speed_bytes_per_second"],
+                row["tx_speed_bytes_per_second"],
+                human_units=human_units,
+                speed_bits=speed_bits,
+                decimal_units=decimal_units,
+            ),
+            str(row["rx_packets"]),
+            _format_bytes(int(row["rx_bytes"]), human_units=human_units, decimal_units=decimal_units),
+            _format_rate(
+                row["rx_speed_bytes_per_second"],
                 human_units=human_units,
                 speed_bits=speed_bits,
                 decimal_units=decimal_units,
@@ -375,13 +462,106 @@ def _render_aggregate_rows(
     lines.append(" ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
     lines.append(" ".join("-" * width for width in widths))
     lines.extend(" ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)) for row in rendered_rows)
+    service_control = _render_service_control_rows(rows)
+    if service_control:
+        lines.append("")
+        lines.extend(service_control)
+    path_control = _render_path_control_rows(rows)
+    if path_control:
+        lines.append("")
+        lines.extend(path_control)
     lines.append("")
     lines.extend(_aggregate_legend())
     return "\n".join(lines) + "\n"
 
 
+def _render_service_control_rows(rows: list[dict[str, object]]) -> list[str]:
+    service_rows = [row for row in rows if row.get("row_type") == "service"]
+    if not service_rows:
+        return []
+    headers = ["service", "sys", "gl", "ntp", "ctx", "crx", "clock", "paths", "lat", "last"]
+    rendered_rows = [
+        _service_control_cells(row)
+        for row in service_rows
+    ]
+    return _render_named_table("service time/control", headers, rendered_rows)
+
+
+def _service_control_cells(row: dict[str, object]) -> list[str]:
+    metadata = row.get("control_metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    return [
+        str(row["service"]),
+        str(row["system_time"]),
+        str(row["gatherlink_time"]),
+        str(row["ntp"]),
+        _control_counter_summary(metadata.get("sent")),
+        _control_counter_summary(metadata.get("received")),
+        _truncate(_internal_clock_context(metadata.get("internal_clock")) or "-", 36),
+        str(metadata.get("path_metadata_count", 0) or 0),
+        str(metadata.get("path_latency_count", 0) or 0),
+        _control_last_time(metadata),
+    ]
+
+
+def _render_path_control_rows(rows: list[dict[str, object]]) -> list[str]:
+    path_rows = [row for row in rows if row.get("row_type") == "path" and row.get("control_metadata")]
+    if not path_rows:
+        return []
+    headers = ["service", "path", "ctx", "crx", "cap", "lat"]
+    rendered_rows = [
+        _path_control_cells(row)
+        for row in path_rows
+    ]
+    return _render_named_table("path control", headers, rendered_rows)
+
+
+def _path_control_cells(row: dict[str, object]) -> list[str]:
+    metadata = row.get("control_metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    path_name = str(row.get("path") or str(row["service"]).removeprefix("  path:"))
+    tx, rx = _path_control_counters(metadata, path_name)
+    return [
+        str(row.get("parent") or ""),
+        path_name,
+        tx,
+        rx,
+        _path_capacity_only_context(metadata, path_name),
+        _path_latency_context(metadata, path_name),
+    ]
+
+
+def _render_named_table(title: str, headers: list[str], rows: list[list[str]]) -> list[str]:
+    widths = [
+        max(len(headers[index]), *(len(row[index]) for row in rows)) if rows else len(header)
+        for index, header in enumerate(headers)
+    ]
+    lines = [title]
+    lines.append(" ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    lines.append(" ".join("-" * width for width in widths))
+    lines.extend(" ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)) for row in rows)
+    return lines
+
+
 def _compact_counter(value: object) -> str:
     return "-" if value == "not_reported" else str(value)
+
+
+def _directional_counters(status: dict[str, object]) -> tuple[int, int, int, int]:
+    """Return local-view TX/RX counters from either explicit or legacy status fields."""
+    tx_packets = int(status.get("tx_packets", status.get("packets", 0)) or 0)
+    tx_bytes = int(status.get("tx_bytes", status.get("bytes", 0)) or 0)
+    rx_packets = int(status.get("rx_packets", status.get("reply_packets", 0)) or 0)
+    rx_bytes = int(status.get("rx_bytes", status.get("reply_bytes", 0)) or 0)
+    if "listen" in status and "tx_bytes" not in status and "rx_bytes" not in status:
+        # Legacy sink statuses reported received traffic as `bytes`. New lab
+        # workers publish explicit directions, but this fallback keeps older
+        # running services readable while they are being restarted.
+        tx_packets = int(status.get("reply_packets", 0) or 0)
+        tx_bytes = int(status.get("reply_bytes", 0) or 0)
+        rx_packets = int(status.get("packets", 0) or 0)
+        rx_bytes = int(status.get("bytes", 0) or 0)
+    return tx_packets, tx_bytes, rx_packets, rx_bytes
 
 
 def _format_bytes(value: int, *, human_units: bool, decimal_units: bool) -> str:
@@ -444,6 +624,320 @@ def _status_context(status: dict[str, object]) -> str:
     return ""
 
 
+def _control_metadata_context(control_metadata: object) -> str:
+    if not isinstance(control_metadata, dict):
+        return "not_reported"
+    sent = control_metadata.get("sent")
+    received = control_metadata.get("received")
+    path_metadata_count = int(control_metadata.get("path_metadata_count", 0) or 0)
+    path_latency_count = int(control_metadata.get("path_latency_count", 0) or 0)
+    path_control_count = int(control_metadata.get("path_control_count", 0) or 0)
+    parts = []
+    if isinstance(sent, dict) and int(sent.get("frames", 0) or 0) > 0:
+        parts.append(
+            f"tx={sent.get('frames', 0)}/{_format_bytes(int(sent.get('bytes', 0) or 0), human_units=True, decimal_units=False)}"
+        )
+    if isinstance(received, dict) and int(received.get("frames", 0) or 0) > 0:
+        parts.append(
+            f"rx={received.get('frames', 0)}/{_format_bytes(int(received.get('bytes', 0) or 0), human_units=True, decimal_units=False)}"
+        )
+    clock = _internal_clock_context(control_metadata.get("internal_clock"))
+    if clock:
+        parts.append(clock)
+    if path_metadata_count:
+        parts.append(f"paths={path_metadata_count}")
+    if path_control_count:
+        parts.append(f"pctrl={path_control_count}")
+    if path_latency_count:
+        parts.append(f"lat={path_latency_count}")
+    last_at = None
+    if isinstance(received, dict):
+        last_at = received.get("last_at")
+    if not last_at and isinstance(sent, dict):
+        last_at = sent.get("last_at")
+    if isinstance(last_at, str) and last_at:
+        parts.append(f"last={_short_time(last_at)}")
+    return " ".join(parts) if parts else "not_reported"
+
+
+def _control_last_time(control_metadata: dict[str, object]) -> str:
+    sent = control_metadata.get("sent")
+    received = control_metadata.get("received")
+    last_at = received.get("last_at") if isinstance(received, dict) else None
+    if not last_at and isinstance(sent, dict):
+        last_at = sent.get("last_at")
+    return _short_time(last_at) if isinstance(last_at, str) and last_at else "-"
+
+
+def _system_time_context(control_metadata: object) -> str:
+    sink_time = _sink_time_dict(control_metadata)
+    value = sink_time.get("system_unix_us") if sink_time else None
+    return _format_unix_us(int(value)) if value is not None else _short_wall_now()
+
+
+def _gatherlink_time_context(control_metadata: object) -> str:
+    sink_time = _sink_time_dict(control_metadata)
+    if not sink_time:
+        return "-"
+    value = sink_time.get("gatherlink_unix_us")
+    sent = sink_time.get("sink_sent_unix_us")
+    received = sink_time.get("received_at")
+    if value is None:
+        return "-"
+    parts = [_format_unix_us(int(value))]
+    if sent is not None:
+        parts.append(f"sent={_format_time_only_unix_us(int(sent))}")
+    if isinstance(received, str) and received:
+        parts.append(f"rx={_short_time(received)}")
+    return " ".join(parts)
+
+
+def _ntp_context(control_metadata: object) -> str:
+    sink_time = _sink_time_dict(control_metadata)
+    if not sink_time:
+        return "-"
+    state = sink_time.get("ntp_state") or "unknown"
+    source = sink_time.get("ntp_source")
+    source_type = sink_time.get("ntp_source_type")
+    if isinstance(source, str) and source:
+        if isinstance(source_type, str) and source_type and source_type != "ntp":
+            return f"{state}/{source_type}:{source}"
+        return f"{state}/{source}"
+    return str(state)
+
+
+def _sink_time_dict(control_metadata: object) -> dict[str, object] | None:
+    if not isinstance(control_metadata, dict):
+        return None
+    sink_time = control_metadata.get("sink_time")
+    return sink_time if isinstance(sink_time, dict) else None
+
+
+def _path_capacity_summary(path_capacity: object) -> str:
+    if not isinstance(path_capacity, dict) or not path_capacity:
+        return "0"
+    samples = []
+    for path_name, capacity in list(path_capacity.items())[:2]:
+        if not isinstance(capacity, dict):
+            continue
+        tx_bps = capacity.get("tx_bps")
+        rx_bps = capacity.get("rx_bps")
+        pieces = []
+        if tx_bps is not None:
+            pieces.append(f"tx{_format_compact_bps(int(tx_bps))}")
+        if rx_bps is not None:
+            pieces.append(f"rx{_format_compact_bps(int(rx_bps))}")
+        if pieces:
+            samples.append(f"{path_name}:{'/'.join(pieces)}")
+    remaining = len(path_capacity) - len(samples)
+    suffix = f"+{remaining}" if remaining > 0 else ""
+    return ",".join(samples) + suffix if samples else str(len(path_capacity))
+
+
+def _internal_clock_context(internal_clock: object) -> str:
+    if not isinstance(internal_clock, dict):
+        return ""
+    role = internal_clock.get("role")
+    offset_us = internal_clock.get("offset_us")
+    mean_offset_us = internal_clock.get("mean_offset_us")
+    rtt_us = internal_clock.get("rtt_us")
+    samples = internal_clock.get("samples")
+    if role == "sink-authoritative":
+        return "clk=sink"
+    if offset_us is None and rtt_us is None:
+        return ""
+    offset = _format_signed_latency_pair(
+        int(offset_us) if offset_us is not None else None,
+        int(mean_offset_us) if mean_offset_us is not None else None,
+    )
+    rtt = _format_latency_us(int(rtt_us)) if rtt_us is not None else "-"
+    sample_text = f" n={samples}" if samples else ""
+    return f"clk=off{offset} rtt={rtt}{sample_text}"
+
+
+def _path_control_context(control_metadata: object, path_name: str) -> str:
+    if not isinstance(control_metadata, dict):
+        return "not_reported"
+    pieces = []
+    path_control = control_metadata.get("path_control")
+    if isinstance(path_control, dict):
+        control = path_control.get(path_name)
+        if isinstance(control, dict):
+            tx = _control_counter_summary(control.get("tx"))
+            rx = _control_counter_summary(control.get("rx"))
+            if tx != "-":
+                pieces.append(f"ctx={tx}")
+            if rx != "-":
+                pieces.append(f"crx={rx}")
+    capacity = _path_capacity_context(control_metadata, path_name)
+    if capacity != "not_reported":
+        pieces.append(capacity)
+    return " ".join(pieces) if pieces else "not_reported"
+
+
+def _path_control_counters(control_metadata: dict[str, object], path_name: str) -> tuple[str, str]:
+    path_control = control_metadata.get("path_control")
+    if not isinstance(path_control, dict):
+        return "-", "-"
+    control = path_control.get(path_name)
+    if not isinstance(control, dict):
+        return "-", "-"
+    return _control_counter_summary(control.get("tx")), _control_counter_summary(control.get("rx"))
+
+
+def _control_counter_summary(counter: object) -> str:
+    if not isinstance(counter, dict) or int(counter.get("frames", 0) or 0) == 0:
+        return "-"
+    frames = int(counter.get("frames", 0) or 0)
+    bytes_seen = int(counter.get("bytes", 0) or 0)
+    return f"{frames}/{_format_bytes(bytes_seen, human_units=True, decimal_units=False)}"
+
+
+def _path_capacity_context(control_metadata: object, path_name: str) -> str:
+    if not isinstance(control_metadata, dict):
+        return "not_reported"
+    path_capacity = control_metadata.get("path_capacity")
+    if not isinstance(path_capacity, dict):
+        return "not_reported"
+    capacity = path_capacity.get(path_name)
+    if not isinstance(capacity, dict):
+        return "not_reported"
+    tx_bps = capacity.get("tx_bps")
+    rx_bps = capacity.get("rx_bps")
+    tx = _format_compact_bps(int(tx_bps)) if tx_bps is not None else "-"
+    rx = _format_compact_bps(int(rx_bps)) if rx_bps is not None else "-"
+    latency = _path_latency_for(control_metadata, path_name)
+    if latency is None:
+        return f"tx={tx} rx={rx}"
+    return f"tx={tx} rx={rx} tl={_latency_pair(latency, 'tx')} rl={_latency_pair(latency, 'rx')}"
+
+
+def _path_capacity_only_context(control_metadata: dict[str, object], path_name: str) -> str:
+    path_capacity = control_metadata.get("path_capacity")
+    if not isinstance(path_capacity, dict):
+        return "-"
+    capacity = path_capacity.get(path_name)
+    if not isinstance(capacity, dict):
+        return "-"
+    tx_bps = capacity.get("tx_bps")
+    rx_bps = capacity.get("rx_bps")
+    tx = _format_compact_bps(int(tx_bps)) if tx_bps is not None else "-"
+    rx = _format_compact_bps(int(rx_bps)) if rx_bps is not None else "-"
+    return f"tx={tx} rx={rx}"
+
+
+def _path_latency_context(control_metadata: dict[str, object], path_name: str) -> str:
+    latency = _path_latency_for(control_metadata, path_name)
+    if latency is None:
+        return "-"
+    return f"tl={_latency_pair(latency, 'tx')} rl={_latency_pair(latency, 'rx')}"
+
+
+def _path_latency_for(control_metadata: dict[str, object], path_name: str) -> dict[str, object] | None:
+    path_latency = control_metadata.get("path_latency")
+    if not isinstance(path_latency, dict):
+        return None
+    latency = path_latency.get(path_name)
+    return latency if isinstance(latency, dict) else None
+
+
+def _latency_pair(latency: dict[str, object], direction: str) -> str:
+    current = latency.get(f"{direction}_current_us")
+    mean = latency.get(f"{direction}_mean_us")
+    return _format_latency_pair(int(current) if current is not None else None, int(mean) if mean is not None else None)
+
+
+def _format_latency_pair(current_us: int | None, mean_us: int | None) -> str:
+    if current_us is None and mean_us is None:
+        return "-/-"
+    if current_us is None:
+        return f"-/{_format_latency_us(mean_us)}"
+    if mean_us is None:
+        return f"{_format_latency_us(current_us)}/-"
+    unit = _shared_latency_unit(current_us, mean_us)
+    return f"{_format_latency_value(current_us, unit)}/{_format_latency_value(mean_us, unit)}{unit}"
+
+
+def _format_signed_latency_pair(current_us: int | None, mean_us: int | None) -> str:
+    if current_us is None and mean_us is None:
+        return "-"
+    if mean_us is None:
+        return _format_signed_latency_us(current_us or 0)
+    if current_us is None:
+        return f"-/{_format_signed_latency_us(mean_us)}"
+    unit = _shared_latency_unit(current_us, mean_us)
+    return f"{_format_signed_latency_value(current_us, unit)}/{_format_signed_latency_value(mean_us, unit)}{unit}"
+
+
+def _format_latency_us(value: int) -> str:
+    if value < 1000:
+        return f"{value}us"
+    if value < 1_000_000:
+        return f"{value / 1000:.1f}ms"
+    return f"{value / 1_000_000:.2f}s"
+
+
+def _format_signed_latency_us(value: int) -> str:
+    sign = "+" if value >= 0 else "-"
+    return sign + _format_latency_us(abs(value))
+
+
+def _shared_latency_unit(left_us: int, right_us: int) -> str:
+    largest = max(abs(left_us), abs(right_us))
+    if largest < 1000:
+        return "us"
+    if largest < 1_000_000:
+        return "ms"
+    return "s"
+
+
+def _format_latency_value(value_us: int, unit: str) -> str:
+    if unit == "us":
+        return str(value_us)
+    if unit == "ms":
+        return f"{value_us / 1000:.1f}"
+    return f"{value_us / 1_000_000:.2f}"
+
+
+def _format_signed_latency_value(value_us: int, unit: str) -> str:
+    sign = "+" if value_us >= 0 else "-"
+    return sign + _format_latency_value(abs(value_us), unit)
+
+
+def _format_compact_bps(value: int) -> str:
+    amount = float(value)
+    unit = "b"
+    for unit in ["b", "Kb", "Mb", "Gb", "Tb"]:
+        if abs(amount) < 1000 or unit == "Tb":
+            break
+        amount /= 1000
+    if unit == "b":
+        return f"{int(amount)}{unit}"
+    return f"{amount:.1f}{unit}"
+
+
+def _short_time(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return value
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone()
+    return parsed.strftime("%H:%M:%S")
+
+
+def _short_wall_now() -> str:
+    return datetime.now().strftime("%H:%M:%S")
+
+
+def _format_unix_us(value: int) -> str:
+    return datetime.fromtimestamp(value / 1_000_000).strftime("%H:%M:%S.%f")[:-3]
+
+
+def _format_time_only_unix_us(value: int) -> str:
+    return _format_unix_us(value)
+
+
 def _truncate(value: str, width: int) -> str:
     if len(value) <= width:
         return value
@@ -453,15 +947,24 @@ def _truncate(value: str, width: int) -> str:
 def _aggregate_legend() -> list[str]:
     return [
         "legend: - means the running service/dataplane has not reported that counter yet",
-        "  service registered service name",
-        "  state   service lifecycle reported by IPC, systemd, or ipc_error",
-        "  pkts    packets observed since service start",
-        "  bytes   payload data since service start; press m to toggle binary/decimal human units",
-        "  speed   sampled rate; b toggles bit/s vs byte/s, m toggles Kibit/Mibit vs Kbit/Mbit",
-        "  miss    missed packets",
-        "  ooo     out-of-order packets",
-        "  reord   packets that required reorder buffering",
-        "  context service-specific context such as target, listen, latest payload, or systemd unit",
+        "  service  registered service name; indented path rows are per transport path",
+        "  state    service lifecycle reported by IPC, systemd, ipc_error, or path for path rows",
+        "  txp/rxp  packets transmitted/received from this service or path's local point of view",
+        "  txB/rxB  payload bytes transmitted/received; press m to toggle binary/decimal human units",
+        "  tx/s rx/s sampled rates; b toggles bit/s vs byte/s, m toggles Kibit/Mibit vs Kbit/Mbit",
+        "  miss     missed packets; lab path rows include qdisc drops and receiver missing-sequence facts",
+        "  ooo      out-of-order packets observed by the receiver",
+        "  reord    packets that required reorder buffering",
+        "  context  service-specific context such as target, listen, latest payload, or systemd unit",
+        "  sys      local wall time reported by that service process",
+        "  gl       Gatherlink time derived from latest sink-authoritative control metadata",
+        "  ntp      sink-side NTP state, with source shown as state/source when direct NTP is active",
+        "  ctx/crx  control metaband frames/bytes transmitted/received; aggregate in service table, per path below",
+        "  clock    internal monotonic clock role, offset, mean offset, RTT, and sample count",
+        "  paths    number of path-id/name mappings learned through control metadata",
+        "  cap      directional path capacity metadata; tx/rx are from the row's local point of view",
+        "  lat      directional latency metadata; current/mean pairs use tx and rx local point of view",
+        "  last     latest control send/receive activity time for that service",
     ]
 
 

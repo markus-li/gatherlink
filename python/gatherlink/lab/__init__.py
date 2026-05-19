@@ -8,9 +8,11 @@ from gatherlink.lab.runtime import (
     ShapeApplyResult,
     UdpReceiveResult,
     UdpSendResult,
+    apply_lab_network_mode,
     apply_lab_profile,
     apply_lab_shape,
     apply_lab_shape_profile,
+    apply_lab_sink_view_rates,
     cleanup_lab_runtime,
     clear_lab_shape,
     inspect_lab_interfaces,
@@ -27,6 +29,7 @@ from gatherlink.lab.runtime import (
     stop_lab_service,
 )
 from gatherlink.lab.scenarios import (
+    LabNetworkModeConfig,
     LabPathConfig,
     LabPlan,
     LabPlanStep,
@@ -42,6 +45,7 @@ from gatherlink.lab.scenarios import (
 
 __all__ = [
     "LabCleanupResult",
+    "LabNetworkModeConfig",
     "LabPathConfig",
     "LabPlan",
     "LabPlanStep",
@@ -56,9 +60,11 @@ __all__ = [
     "ShapeApplyResult",
     "UdpReceiveResult",
     "UdpSendResult",
+    "apply_lab_network_mode",
     "apply_lab_profile",
     "apply_lab_shape",
     "apply_lab_shape_profile",
+    "apply_lab_sink_view_rates",
     "cleanup_lab_runtime",
     "clear_lab_shape",
     "inspect_lab_interfaces",

@@ -37,6 +37,14 @@ carrier discovery, peer failover/failback, session-aware migration, scheduler po
 DNS helper, diagnostics, hooks, time quality, bootstrap resolution, helper orchestration, and
 future overlay path planning.
 
+Python also owns control metaband policy: which sparse telemetry/control facts
+are sent, how often they are sent, and when diagnostics may temporarily raise
+that cadence for observability. The lab must use the same control policy modules
+as production code so tests exercise the real boundary. Service monitor is a
+general diagnostics client: it may request temporary higher-rate control
+metadata from any service, and the service must automatically return to baseline
+cadence after the request expires.
+
 ## Rust owns packet execution
 
 Rust owns packet receive/send, encoded runtime state execution, frame encode/decode, AEAD
@@ -94,6 +102,13 @@ Adaptive scheduling must wait until receiver metrics are trustworthy.
 
 The scheduler should consume local queue age/depth, RTT, remote receiver metrics, loss estimate,
 jitter, reorder rate, carrier type, HOL/blocking risk, MTU eligibility, path state, and manual weights.
+
+Python owns the rich policy model and compiles it into small Rust execution
+primitives. Rust may follow path state, weight, capacity hints, latency hints,
+loss estimate, reorder hold time, and in-flight limits, but it must not decide
+how those values are derived. That keeps production scheduling explainable:
+policy and smoothing stay in Python, while Rust receives deterministic
+per-path values that are cheap to consult in the packet path.
 
 ## Receiver metrics
 

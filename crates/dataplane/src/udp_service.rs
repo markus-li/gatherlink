@@ -189,6 +189,10 @@ pub enum UdpServiceError {
     PathWeightTooSmall {
         path_id: PathId,
     },
+    PathSchedulerPrimitiveInvalid {
+        path_id: PathId,
+        field: &'static str,
+    },
     ServicePriorityTooSmall {
         service: String,
     },
@@ -219,6 +223,9 @@ impl fmt::Display for UdpServiceError {
             }
             Self::PathWeightTooSmall { path_id } => {
                 write!(formatter, "path {path_id} scheduler weight must be greater than zero")
+            }
+            Self::PathSchedulerPrimitiveInvalid { path_id, field } => {
+                write!(formatter, "path {path_id} scheduler primitive {field} is invalid")
             }
             Self::ServicePriorityTooSmall { service } => {
                 write!(formatter, "service {service} priority must be greater than zero")

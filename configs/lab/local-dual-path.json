@@ -28,6 +28,7 @@
       "client_address": "10.80.1.1",
       "server_address": "10.80.1.2",
       "subnet": "10.80.1.0/30",
+      "default_max_speed": "50mbit",
       "shape": {
         "rate": "50mbit"
       }
@@ -38,6 +39,7 @@
       "client_address": "10.80.2.1",
       "server_address": "10.80.2.2",
       "subnet": "10.80.2.0/30",
+      "default_max_speed": "50mbit",
       "shape": {
         "rate": "50mbit"
       }
@@ -50,6 +52,12 @@
     "duration_seconds": 10,
     "bandwidth": "20mbit"
   },
+  "reorder_policies": [
+    {
+      "node_pair": "client<->server",
+      "max_hold": "150ms"
+    }
+  ],
   "profiles": {
     "clean": {
       "path-a": {
@@ -97,6 +105,67 @@
       "path-b": {
         "blackhole": true
       }
+    }
+  },
+  "network_modes": {
+    "normal-saturated": {
+      "description": "Normal saturated-link behavior: shaped rates with the default qdisc queue so overload can appear as latency, backlog, reordering, and eventual drops like a real interface.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "3.2mbit"
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "1.7mbit"
+          }
+        }
+      ]
+    },
+    "forced-drop": {
+      "description": "Stress-test behavior: same shaped rates with tight qdisc queues so sustained over-capacity traffic quickly reports visible drops.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "3.2mbit",
+            "limit": 32
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "1.7mbit",
+            "limit": 16
+          }
+        }
+      ]
+    },
+    "clean-50mbit": {
+      "description": "Restore the default clean lab rates with ordinary qdisc queueing.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "50mbit"
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "50mbit"
+          }
+        }
+      ]
     }
   },
   "future_features": [

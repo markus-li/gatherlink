@@ -9,9 +9,11 @@ from pathlib import Path
 import typer
 
 from gatherlink.lab.runtime import (
+    apply_lab_network_mode,
     apply_lab_profile,
     apply_lab_shape,
     apply_lab_shape_profile,
+    apply_lab_sink_view_rates,
     cleanup_lab_runtime,
     clear_lab_shape,
     inspect_lab_interfaces,
@@ -23,6 +25,7 @@ from gatherlink.lab.runtime import (
     run_udp_sink_service,
     run_udp_smoke_test,
     send_udp_packets,
+    send_udp_packets_from_sink,
     start_lab_service,
     start_lab_sink_service,
     stop_lab_service,
@@ -162,11 +165,63 @@ def send(
     payload: str = typer.Option("gatherlink-lab", help="Payload prefix to send."),
     count: int = typer.Option(5, help="Number of UDP packets to send."),
     interval: float = typer.Option(0.05, help="Seconds between packets."),
+    duration: float | None = typer.Option(None, help="Seconds to send traffic for."),
+    bandwidth: str | None = typer.Option(None, help="Target bandwidth, for example 7mbit."),
+    payload_size: int | None = typer.Option(None, help="UDP payload size for bandwidth tests."),
+    direction: str = typer.Option("to-sink", help="Traffic direction: to-sink, from-sink, or both."),
 ) -> None:
-    """Send UDP packets into the lab service listener."""
+    """Send UDP packets in either lab direction."""
     scenario = load_lab_scenario_file(path)
-    result = send_udp_packets(scenario, payload=payload, count=count, interval_seconds=interval)
-    typer.echo(f"lab send: sent target={result.target} packets={result.packets} bytes={result.bytes}")
+    if direction == "to-sink":
+        result = send_udp_packets(
+            scenario,
+            payload=payload,
+            count=count,
+            interval_seconds=interval,
+            duration_seconds=duration,
+            bandwidth=bandwidth,
+            payload_size=payload_size,
+            use_namespace=True,
+        )
+    elif direction == "from-sink":
+        result = send_udp_packets_from_sink(
+            scenario,
+            payload=payload,
+            count=count,
+            interval_seconds=interval,
+            duration_seconds=duration,
+            bandwidth=bandwidth,
+            payload_size=payload_size,
+        )
+    elif direction == "both":
+        to_sink = send_udp_packets(
+            scenario,
+            payload=payload,
+            count=count,
+            interval_seconds=interval,
+            duration_seconds=duration,
+            bandwidth=bandwidth,
+            payload_size=payload_size,
+            use_namespace=True,
+        )
+        from_sink = send_udp_packets_from_sink(
+            scenario,
+            payload=payload,
+            count=count,
+            interval_seconds=interval,
+            duration_seconds=duration,
+            bandwidth=bandwidth,
+            payload_size=payload_size,
+        )
+        result = type(to_sink)(
+            target=f"{to_sink.target}<->{from_sink.target}",
+            packets=to_sink.packets + from_sink.packets,
+            bytes=to_sink.bytes + from_sink.bytes,
+        )
+    else:
+        typer.echo("direction must be 'to-sink', 'from-sink', or 'both'", err=True)
+        raise typer.Exit(1)
+    typer.echo(f"lab send: direction={direction} target={result.target} packets={result.packets} bytes={result.bytes}")
 
 
 @app.command("smoke")
@@ -221,6 +276,30 @@ def profiles(path: Path) -> None:
         typer.echo(f"lab profile: {name} paths={','.join(profile.keys())}")
 
 
+@app.command("network-modes")
+def network_modes(path: Path) -> None:
+    """List named network behavior modes from a lab config."""
+    scenario = load_lab_scenario_file(path)
+    if not scenario.network_modes:
+        typer.echo("lab network modes: none")
+        return
+    for name, mode in scenario.network_modes.items():
+        description = f" description={mode.description}" if mode.description else ""
+        typer.echo(f"lab network mode: {name} targets={len(mode.targets)}{description}")
+
+
+@app.command("apply-network-mode")
+def apply_network_mode(path: Path, mode: str) -> None:
+    """Apply a named network behavior mode to an existing lab."""
+    scenario = load_lab_scenario_file(path)
+    try:
+        results = apply_lab_network_mode(scenario, mode)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    _render_shape_results(results)
+
+
 @app.command("apply-profile")
 def apply_profile(path: Path, profile: str) -> None:
     """Apply a named live shaping profile to an existing lab."""
@@ -241,6 +320,18 @@ def apply_shape_config(path: Path, shape_config: Path) -> None:
     _render_shape_results(apply_lab_shape_profile(scenario, profile))
 
 
+@app.command("shape-sink-view")
+def shape_sink_view(
+    path: Path,
+    path_name: str,
+    up: str = typer.Option(..., help="Sink-side upload rate, applied to remote/server egress."),
+    down: str = typer.Option(..., help="Sink-side download rate, applied to local/client egress."),
+) -> None:
+    """Apply asymmetric path rates using sink-side up/down semantics."""
+    scenario = load_lab_scenario_file(path)
+    _render_shape_results(apply_lab_sink_view_rates(scenario, path_name, sink_up_rate=up, sink_down_rate=down))
+
+
 @app.command("shape")
 def shape(
     path: Path,
@@ -250,6 +341,7 @@ def shape(
     jitter: str | None = typer.Option(None, help="Delay jitter, for example 10ms."),
     loss: str | None = typer.Option(None, help="Packet loss, for example 2%."),
     reorder: str | None = typer.Option(None, help="Packet reorder, for example 25%."),
+    limit: int | None = typer.Option(None, help="Netem queue limit in packets; useful for overload drop tests."),
     mtu: int | None = typer.Option(None, help="Link MTU to apply to both veth ends."),
     state: str | None = typer.Option(None, help="Set path state to up or down."),
     side: str = typer.Option("both", help="Apply to local, remote, or both veth ends."),
@@ -272,6 +364,7 @@ def shape(
             jitter=jitter,
             loss=loss,
             reorder=reorder,
+            limit=limit,
             mtu=mtu,
             state=state,
             blackhole=blackhole,

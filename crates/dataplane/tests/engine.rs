@@ -4,6 +4,9 @@ use std::time::Duration;
 use gatherlink_dataplane::engine::{CoreDataplane, ReapplyOutcome};
 use gatherlink_dataplane::runtime_config::{CorePathConfig, CoreRuntimeConfig, PathSchedulerState};
 use gatherlink_dataplane::udp_service::UdpServiceConfig;
+use gatherlink_protocol::control::{
+    ClockSyncMode, ControlMessage, ControlPayload, InternalClockSync, PathCapacity, PathLatency, PathMetadata,
+};
 
 #[test]
 fn forwards_one_udp_payload_through_core_frame_boundary() {
@@ -29,6 +32,105 @@ fn forwards_one_udp_payload_through_core_frame_boundary() {
     assert_eq!(outcome.frame_count, 1);
     assert_eq!(outcome.batch_count, 0);
     assert_eq!(outcome.fragment_count, 0);
+
+    let metrics = dataplane.metrics_snapshot();
+    assert_eq!(metrics.services["udp-main"].packets, 1);
+    assert_eq!(metrics.services["udp-main"].bytes, b"plain-user-udp".len() as u64);
+    assert_eq!(metrics.services["udp-main"].tx_packets, 1);
+    assert_eq!(metrics.services["udp-main"].tx_bytes, b"plain-user-udp".len() as u64);
+    assert_eq!(metrics.paths[&0].packets, 1);
+    assert_eq!(metrics.paths[&0].bytes, b"plain-user-udp".len() as u64);
+    assert_eq!(metrics.paths[&0].tx_packets, 1);
+    assert_eq!(metrics.paths[&0].tx_bytes, b"plain-user-udp".len() as u64);
+}
+
+#[test]
+fn telemetry_records_received_data_and_control_facts() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config =
+        CoreRuntimeConfig::single_udp_service("udp-main", "127.0.0.1:0".parse().unwrap(), target.local_addr().unwrap())
+            .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let control = ControlPayload::new(vec![
+        ControlMessage::PathMetadata(PathMetadata::new(7, "path-a").unwrap()),
+        ControlMessage::PathCapacity(PathCapacity::new(7, Some(3_000_000), Some(1_500_000)).unwrap()),
+        ControlMessage::PathLatency(
+            PathLatency::new(7, Some(12_000), Some(10_000), Some(14_000), Some(11_000)).unwrap(),
+        ),
+        ControlMessage::InternalClockSync(
+            InternalClockSync::new(
+                99,
+                7,
+                ClockSyncMode::Response,
+                1_000_000,
+                Some(1_010_000),
+                Some(1_011_000),
+            )
+            .unwrap(),
+        ),
+    ])
+    .unwrap();
+
+    dataplane.observe_received_data_frame(1, 7, 1, 1200);
+    dataplane.observe_received_control_payload_on_path(7, &control, 128);
+
+    let metrics = dataplane.metrics_snapshot();
+    assert_eq!(metrics.paths[&7].rx_packets, 1);
+    assert_eq!(metrics.paths[&7].rx_bytes, 1200);
+    assert_eq!(metrics.control_metadata.received.frames, 1);
+    assert_eq!(metrics.control_metadata.received.messages, 4);
+    assert_eq!(metrics.control_metadata.received.bytes, 128);
+    assert_eq!(metrics.control_metadata.path_control[&7].rx.frames, 1);
+    assert_eq!(metrics.control_metadata.path_control[&7].rx.bytes, 128);
+    assert_eq!(metrics.control_metadata.path_metadata[&7], "path-a");
+    assert_eq!(metrics.control_metadata.path_capacity[&7].tx_bps, Some(3_000_000));
+    assert_eq!(metrics.control_metadata.path_capacity[&7].rx_bps, Some(1_500_000));
+    assert_eq!(metrics.control_metadata.path_latency[&7].tx_current_us, Some(12_000));
+    assert_eq!(metrics.control_metadata.path_latency[&7].tx_mean_us, Some(10_000));
+    assert_eq!(metrics.control_metadata.path_latency[&7].rx_current_us, Some(14_000));
+    assert_eq!(metrics.control_metadata.path_latency[&7].rx_mean_us, Some(11_000));
+    let sync = metrics.control_metadata.internal_clock_sync.unwrap();
+    assert_eq!(sync.exchange_id, 99);
+    assert_eq!(sync.path_id, 7);
+    assert_eq!(sync.mode, 2);
+    assert_eq!(sync.origin_us, 1_000_000);
+    assert_eq!(sync.receive_us, Some(1_010_000));
+    assert_eq!(sync.transmit_us, Some(1_011_000));
+}
+
+#[test]
+fn control_payload_duplication_uses_all_enabled_paths_with_one_sequence() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new_with_scheduler(10, 0, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+            CorePathConfig::new_with_scheduler(20, 0, 1200, true, PathSchedulerState::Busy, 1).unwrap(),
+            CorePathConfig::new_with_scheduler(30, 0, 1200, false, PathSchedulerState::Disabled, 1).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let control = ControlPayload::new(vec![ControlMessage::PathMetadata(
+        PathMetadata::new(10, "path-a").unwrap(),
+    )])
+    .unwrap()
+    .encode()
+    .unwrap();
+
+    let plans = dataplane
+        .duplicate_control_payload_for_all_paths(1, control.clone())
+        .unwrap();
+
+    assert_eq!(plans.len(), 2);
+    assert_eq!(plans.iter().map(|plan| plan.path_id).collect::<Vec<_>>(), vec![10, 20]);
+    assert!(plans.iter().all(|plan| plan.sequence == plans[0].sequence));
+    assert!(plans.iter().all(|plan| plan.payload_len == control.len()));
 }
 
 #[test]
@@ -128,6 +230,11 @@ fn round_robin_scheduler_rotates_across_eligible_paths() {
     let path_ids = outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>();
     assert_eq!(path_ids, vec![10, 20, 10, 20]);
     assert!(outcomes.iter().all(|outcome| outcome.batch_count == 0));
+
+    let metrics = dataplane.metrics_snapshot();
+    assert_eq!(metrics.services["udp-main"].packets, 4);
+    assert_eq!(metrics.paths[&10].packets, 2);
+    assert_eq!(metrics.paths[&20].packets, 2);
 }
 
 #[test]

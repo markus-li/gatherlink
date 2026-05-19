@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "name": "sink-view-asymmetric-2x3-1x2",
+  "description": "Apply asymmetric rates from the sink perspective: path-a 2Mbit up/3Mbit down, path-b 1Mbit up/2Mbit down. Down is local/client egress; up is remote/server egress.",
+  "targets": [
+    {
+      "path": "path-a",
+      "side": "local",
+      "shape": {
+        "rate": "3mbit"
+      }
+    },
+    {
+      "path": "path-a",
+      "side": "remote",
+      "shape": {
+        "rate": "2mbit"
+      }
+    },
+    {
+      "path": "path-b",
+      "side": "local",
+      "shape": {
+        "rate": "2mbit"
+      }
+    },
+    {
+      "path": "path-b",
+      "side": "remote",
+      "shape": {
+        "rate": "1mbit"
+      }
+    }
+  ]
+}

@@ -20,6 +20,8 @@ pub enum ProtocolError {
     InvalidFragment,
     MalformedExtension,
     MalformedBatch,
+    MalformedControl,
+    ControlTooLarge(usize),
 }
 
 impl fmt::Display for ProtocolError {
@@ -56,6 +58,13 @@ impl fmt::Display for ProtocolError {
             Self::InvalidFragment => write!(formatter, "fragment metadata is invalid"),
             Self::MalformedExtension => write!(formatter, "frame extension area is malformed"),
             Self::MalformedBatch => write!(formatter, "batch payload is malformed"),
+            Self::MalformedControl => write!(formatter, "control metaband payload is malformed"),
+            Self::ControlTooLarge(length) => {
+                write!(
+                    formatter,
+                    "control metaband payload too large for v1 frame: {length} bytes"
+                )
+            }
         }
     }
 }

@@ -62,6 +62,76 @@ pub enum PathSchedulerState {
     Disabled,
 }
 
+/// Primitive per-path scheduler facts already reduced by Python policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PathSchedulerPrimitives {
+    tx_capacity_bps: Option<u64>,
+    rx_capacity_bps: Option<u64>,
+    latency_us: Option<u32>,
+    loss_ppm: u32,
+    reorder_hold_us: u32,
+    max_in_flight_packets: u16,
+    max_in_flight_bytes: u32,
+}
+
+impl PathSchedulerPrimitives {
+    /// Build primitive scheduler facts from values that are cheap for Rust to follow.
+    pub fn new(
+        tx_capacity_bps: Option<u64>,
+        rx_capacity_bps: Option<u64>,
+        latency_us: Option<u32>,
+        loss_ppm: u32,
+        reorder_hold_us: u32,
+        max_in_flight_packets: u16,
+        max_in_flight_bytes: u32,
+    ) -> Self {
+        Self {
+            tx_capacity_bps,
+            rx_capacity_bps,
+            latency_us,
+            loss_ppm,
+            reorder_hold_us,
+            max_in_flight_packets,
+            max_in_flight_bytes,
+        }
+    }
+
+    /// Python's local-view transmit capacity estimate for this path.
+    pub fn tx_capacity_bps(&self) -> Option<u64> {
+        self.tx_capacity_bps
+    }
+
+    /// Python's local-view receive capacity estimate for this path.
+    pub fn rx_capacity_bps(&self) -> Option<u64> {
+        self.rx_capacity_bps
+    }
+
+    /// Python-selected latency estimate used by compiled scheduling policy.
+    pub fn latency_us(&self) -> Option<u32> {
+        self.latency_us
+    }
+
+    /// Loss estimate in parts per million, already smoothed by Python.
+    pub fn loss_ppm(&self) -> u32 {
+        self.loss_ppm
+    }
+
+    /// Reorder hold time that Python wants Rust to apply for this path.
+    pub fn reorder_hold_us(&self) -> u32 {
+        self.reorder_hold_us
+    }
+
+    /// Packet concurrency limit selected by Python, or zero when unlimited.
+    pub fn max_in_flight_packets(&self) -> u16 {
+        self.max_in_flight_packets
+    }
+
+    /// Byte concurrency limit selected by Python, or zero when unlimited.
+    pub fn max_in_flight_bytes(&self) -> u32 {
+        self.max_in_flight_bytes
+    }
+}
+
 /// Already-compiled path runtime data handed to Rust by the Python control plane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorePathConfig {
@@ -71,6 +141,7 @@ pub struct CorePathConfig {
     enabled: bool,
     state: PathSchedulerState,
     weight: u16,
+    primitives: PathSchedulerPrimitives,
 }
 
 impl CorePathConfig {
@@ -96,11 +167,38 @@ impl CorePathConfig {
         state: PathSchedulerState,
         weight: u16,
     ) -> Result<Self, UdpServiceError> {
+        Self::new_with_scheduler_primitives(
+            path_id,
+            route_id,
+            mtu,
+            enabled,
+            state,
+            weight,
+            PathSchedulerPrimitives::default(),
+        )
+    }
+
+    /// Create a path with explicit compiled scheduler state and primitive facts.
+    pub fn new_with_scheduler_primitives(
+        path_id: PathId,
+        route_id: RouteId,
+        mtu: usize,
+        enabled: bool,
+        state: PathSchedulerState,
+        weight: u16,
+        primitives: PathSchedulerPrimitives,
+    ) -> Result<Self, UdpServiceError> {
         if mtu <= V1_HEADER_LEN + FRAGMENT_EXTENSION_LEN {
             return Err(UdpServiceError::PathMtuTooSmall { path_id, mtu });
         }
         if weight == 0 {
             return Err(UdpServiceError::PathWeightTooSmall { path_id });
+        }
+        if primitives.loss_ppm() > 1_000_000 {
+            return Err(UdpServiceError::PathSchedulerPrimitiveInvalid {
+                path_id,
+                field: "loss_ppm",
+            });
         }
 
         Ok(Self {
@@ -110,6 +208,7 @@ impl CorePathConfig {
             enabled,
             state,
             weight,
+            primitives,
         })
     }
 
@@ -146,6 +245,11 @@ impl CorePathConfig {
     /// Return the compiled round-robin weight.
     pub fn weight(&self) -> u16 {
         self.weight
+    }
+
+    /// Return the primitive scheduler facts Python compiled for Rust.
+    pub fn primitives(&self) -> PathSchedulerPrimitives {
+        self.primitives
     }
 
     /// Return whether this path is preferred for ordinary whole-packet sends.

@@ -15,6 +15,7 @@ pub fn udp_error_to_py(error: UdpServiceError) -> PyErr {
         | UdpServiceError::DuplicatePathId(_)
         | UdpServiceError::MissingPath
         | UdpServiceError::PathMtuTooSmall { .. }
+        | UdpServiceError::PathSchedulerPrimitiveInvalid { .. }
         | UdpServiceError::PathWeightTooSmall { .. }
         | UdpServiceError::ServicePriorityTooSmall { .. }
         | UdpServiceError::IncompatibleListenReapply { .. } => PyValueError::new_err(error.to_string()),

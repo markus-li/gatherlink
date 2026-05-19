@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from threading import Event
 
@@ -94,6 +95,55 @@ def test_service_ipc_status_and_stop(tmp_path: Path) -> None:
         server.close()
 
 
+def test_service_ipc_status_works_while_custom_command_runs(tmp_path: Path) -> None:
+    registry = ServiceRegistry(tmp_path / "services")
+    command_started = Event()
+    release_command = Event()
+    record = registry.register(
+        ServiceRecord(
+            name="lab.concurrent-ipc",
+            kind="lab",
+            pid=os.getpid(),
+            log_file=tmp_path / "ipc.log",
+        )
+    )
+
+    def slow_command(_request: dict[str, object]) -> dict[str, object]:
+        command_started.set()
+        release_command.wait(timeout=2)
+        return {"done": True}
+
+    server = ServiceIpcServer(
+        record,
+        status=lambda: {"running": True},
+        stop=lambda: None,
+        commands={"slow": slow_command},
+    )
+    server.start()
+    try:
+        from threading import Thread
+
+        result: dict[str, object] = {}
+
+        def run_slow_command() -> None:
+            result.update(request_service(record, "slow", timeout_seconds=3))
+
+        worker = Thread(target=run_slow_command, daemon=True)
+        worker.start()
+        assert command_started.wait(timeout=1)
+
+        status_started_at = time.monotonic()
+        assert request_service(record, "status")["status"] == {"running": True}
+        assert time.monotonic() - status_started_at < 1
+
+        release_command.set()
+        worker.join(timeout=3)
+        assert result["result"] == {"done": True}
+    finally:
+        release_command.set()
+        server.close()
+
+
 def test_iter_log_lines_tails_existing_log(tmp_path: Path) -> None:
     log_file = tmp_path / "service.log"
     log_file.write_text("one\ntwo\nthree\n", encoding="utf-8")
@@ -173,7 +223,12 @@ def test_services_cli_attach_can_render_aggregate_once(tmp_path: Path, monkeypat
     assert result.exit_code == 0
     assert "Gatherlink service monitor" in result.output
     assert "lab.local-dual-path" in result.output
-    assert "pkts" in result.output
+    assert "txp" in result.output
+    assert "rxp" in result.output
+    assert "service time/control" in result.output
+    assert "sys" in result.output
+    assert "gl" in result.output
+    assert "ntp" in result.output
     assert "42B" in result.output
     assert "1.6Kibit/s" in result.output
     assert "legend: - means" in result.output
@@ -214,6 +269,18 @@ def test_services_cli_monitor_can_render_multiple_aggregate_rows(tmp_path: Path,
                 "path-a": {"packets": 1, "bytes": 5},
                 "path-b": {"packets": 1, "bytes": 5},
             },
+            "control_metadata": {
+                "sent": {"frames": 2, "messages": 4, "bytes": 128, "last_at": "2026-05-17T09:48:11+00:00"},
+                "received": {"frames": 1, "messages": 2, "bytes": 64, "last_at": "2026-05-17T09:48:12+00:00"},
+                "path_control": {
+                    "path-a": {
+                        "tx": {"frames": 2, "messages": 4, "bytes": 128},
+                        "rx": {"frames": 1, "messages": 2, "bytes": 64},
+                    }
+                },
+                "path_control_count": 1,
+                "path_capacity": {"path-a": {"tx_bps": 3_000_000, "rx_bps": 1_500_000}},
+            },
         },
         stop=lambda: None,
     )
@@ -252,6 +319,49 @@ def test_services_cli_monitor_can_render_multiple_aggregate_rows(tmp_path: Path,
     assert "last=4096B" in result.output
     assert "..." in result.output
     assert "reord" in result.output
+    assert "tx/s" in result.output
+    assert "rx/s" in result.output
+    assert "service time/control" in result.output
+    assert "path control" in result.output
+    assert "ctx" in result.output
+    assert "crx" in result.output
+    assert "2/128B" in result.output
+    assert "1/64B" in result.output
+    assert "tx=3.0Mb rx=1.5Mb" in result.output
+
+
+def test_service_monitor_requests_temporary_control_cadence(tmp_path: Path, monkeypatch) -> None:
+    from gatherlink.cli.services import _request_monitor_control_cadence
+    from gatherlink.control import MONITOR_CONTROL_REQUEST_TTL_SECONDS
+
+    registry_path = tmp_path / "services"
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(registry_path))
+    requests = []
+    record = ServiceRegistry(registry_path).register(
+        ServiceRecord(
+            name="lab.monitor-cadence",
+            kind="lab",
+            pid=os.getpid(),
+            log_file=tmp_path / "service.log",
+        )
+    )
+    server = ServiceIpcServer(
+        record,
+        status=lambda: {"running": True},
+        stop=lambda: None,
+        commands={
+            "control-cadence": lambda request: requests.append(request) or {"profile": request["profile"]},
+        },
+    )
+    server.start()
+    try:
+        _request_monitor_control_cadence(record)
+    finally:
+        server.close()
+
+    assert requests
+    assert requests[0]["profile"] == "monitor"
+    assert requests[0]["ttl_seconds"] == MONITOR_CONTROL_REQUEST_TTL_SECONDS
 
 
 def test_services_cli_close_uses_service_ipc_and_clears_pid(tmp_path: Path, monkeypatch) -> None:
