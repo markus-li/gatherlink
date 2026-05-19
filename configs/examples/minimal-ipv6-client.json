@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "node": "client",
+  "peer": "relay",
+  "paths": [
+    {
+      "name": "wan6",
+      "interface": "eth0",
+      "source_ip": "2001:db8::10",
+      "gateway": "2001:db8::1"
+    }
+  ],
+  "services": [
+    {
+      "name": "udp-v6",
+      "listen": "[::1]:55180",
+      "target": "[::1]:51820"
+    }
+  ]
+}

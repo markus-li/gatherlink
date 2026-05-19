@@ -2,3 +2,6 @@
 name = "gatherlink-dataplane"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+gatherlink-protocol = { path = "../protocol" }

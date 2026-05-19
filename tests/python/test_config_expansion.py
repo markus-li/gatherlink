@@ -38,3 +38,13 @@ def test_dns_helper_expands_to_ordered_runtime_helper() -> None:
     assert helper.kind == "dns"
     assert helper.listen == "127.0.0.1:5353"
     assert helper.strategy == "race_first_valid"
+
+
+def test_ipv6_service_expands_without_ipv4_assumptions() -> None:
+    config = validate_config_file(EXAMPLES / "minimal-ipv6-client.json")
+    runtime = expand_config(config)
+
+    assert runtime.paths[0].source_ip == "2001:db8::10"
+    assert runtime.paths[0].gateway == "2001:db8::1"
+    assert runtime.services[0].listen == "[::1]:55180"
+    assert runtime.services[0].target == "[::1]:51820"

@@ -8,8 +8,13 @@ should receive already-validated runtime state and should not contain business l
 
 from __future__ import annotations
 
+from gatherlink.config.runtime import RuntimeConfig
+from gatherlink.runtime.plan import RuntimePlan, build_runtime_plan
 from gatherlink.shared.logging import get_logger
 
 logger = get_logger(__name__)
 
 
+def plan_runtime_start(config: RuntimeConfig) -> RuntimePlan:
+    """Return the non-privileged startup plan for a runtime config."""
+    return build_runtime_plan(config)

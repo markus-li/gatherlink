@@ -27,6 +27,7 @@ def test_example_format_detection() -> None:
     assert detect_config_format(load_config_dict(EXAMPLES / "wireguard-client.json")) == "wireguard-client"
     assert detect_config_format(load_config_dict(EXAMPLES / "wireguard-server.json")) == "wireguard-server"
     assert detect_config_format(load_config_dict(EXAMPLES / "dns-helper.json")) == "dns-helper"
+    assert detect_config_format(load_config_dict(EXAMPLES / "minimal-ipv6-client.json")) == "minimal-client"
 
 
 def test_schema_version_rejects_future_versions() -> None:
@@ -115,3 +116,12 @@ def test_config_show_cli_can_print_canonical_json() -> None:
     assert '"dns"' in result.output
     assert '"runtime_model"' not in result.output
     assert '"schema_version": 1' in result.output
+
+
+def test_ipv6_example_config_preserves_bracketed_udp_endpoints() -> None:
+    config = validate_config_file(EXAMPLES / "minimal-ipv6-client.json")
+
+    assert config.paths[0].source_ip == "2001:db8::10"
+    assert config.paths[0].gateway == "2001:db8::1"
+    assert config.services[0].listen == "[::1]:55180"
+    assert config.services[0].target == "[::1]:51820"

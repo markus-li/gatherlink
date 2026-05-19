@@ -5,3 +5,10 @@ edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+[features]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+gatherlink-dataplane = { path = "../dataplane" }
+pyo3 = { version = "0.22", features = ["auto-initialize"] }

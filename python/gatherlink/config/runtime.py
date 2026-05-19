@@ -36,7 +36,7 @@ class RuntimeServiceConfig(GatherlinkBaseModel):
 
 
 class RuntimeWireGuardHelperConfig(GatherlinkBaseModel):
-    """Runtime-ready WireGuard helper settings."""
+    """Runtime-ready WireGuard helper settings outside the core runner."""
 
     kind: Literal["wireguard"] = "wireguard"
     enabled: bool = True
@@ -46,7 +46,7 @@ class RuntimeWireGuardHelperConfig(GatherlinkBaseModel):
 
 
 class RuntimeDnsHelperConfig(GatherlinkBaseModel):
-    """Runtime-ready DNS helper settings."""
+    """Runtime-ready DNS helper settings outside the core runner."""
 
     kind: Literal["dns"] = "dns"
     enabled: bool = True
@@ -66,5 +66,8 @@ class RuntimeConfig(GatherlinkBaseModel):
     peer: str | None = None
     paths: list[RuntimePathConfig] = Field(default_factory=list)
     services: list[RuntimeServiceConfig] = Field(default_factory=list)
+    # Helpers are kept in the runtime contract for helper supervisors to consume,
+    # but the core runner must ignore them. Tunneling, DNS assistance, and other
+    # integrations are not part of the core userland UDP transport.
     helpers: list[RuntimeHelperConfig] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)

@@ -1,8 +1,7 @@
-//! version
+//! Protocol version constants.
 //!
-//! Wire/control protocol definitions shared by dataplane components.
-//!
-//! Rust code should stay focused on deterministic, high-performance execution.
-//! Product policy, path interpretation, config expansion, and environment logic
-//! belong in the Python control plane.
+//! Version fields are part of authenticated protocol context later. Public UDP
+//! listeners must still silently drop unauthenticated/invalid packets.
 
+/// Initial protocol version for core userland UDP frames.
+pub const PROTOCOL_VERSION: u16 = 1;
