@@ -7,8 +7,8 @@
 use std::collections::HashSet;
 use std::net::SocketAddr;
 
-use gatherlink_protocol::frame::{FRAGMENT_EXTENSION_LEN, V1_HEADER_LEN};
-use gatherlink_protocol::ids::{PathId, RouteId, ServiceId, USER_SERVICE_ID_START};
+use gatherlink_protocol::frame::{FRAGMENT_METADATA_LEN, V1_HEADER_LEN};
+use gatherlink_protocol::ids::{PathId, ServiceId, USER_SERVICE_ID_START};
 
 use crate::udp_service::{UdpServiceConfig, UdpServiceError};
 
@@ -182,7 +182,6 @@ impl PathSchedulerPrimitives {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorePathConfig {
     path_id: PathId,
-    route_id: RouteId,
     mtu: usize,
     transport_bind: Option<SocketAddr>,
     transport_remote: Option<SocketAddr>,
@@ -193,50 +192,40 @@ pub struct CorePathConfig {
 }
 
 impl CorePathConfig {
-    /// Create a path with a compact wire id, route id, MTU, and current capacity hint.
+    /// Create a path with a compact wire id, MTU, and current capacity hint.
     ///
     /// The `busy` flag is intentionally simple for now. Python can later replace it with richer live capacity state
     /// without changing the packet code that decides whether to fragment onto a less-busy path.
-    pub fn new(path_id: PathId, route_id: RouteId, mtu: usize, busy: bool) -> Result<Self, UdpServiceError> {
+    pub fn new(path_id: PathId, mtu: usize, busy: bool) -> Result<Self, UdpServiceError> {
         let state = if busy {
             PathSchedulerState::Busy
         } else {
             PathSchedulerState::Active
         };
-        Self::new_with_scheduler(path_id, route_id, mtu, true, state, 1)
+        Self::new_with_scheduler(path_id, mtu, true, state, 1)
     }
 
     /// Create a path with explicit compiled scheduler state.
     pub fn new_with_scheduler(
         path_id: PathId,
-        route_id: RouteId,
         mtu: usize,
         enabled: bool,
         state: PathSchedulerState,
         weight: u16,
     ) -> Result<Self, UdpServiceError> {
-        Self::new_with_scheduler_primitives(
-            path_id,
-            route_id,
-            mtu,
-            enabled,
-            state,
-            weight,
-            PathSchedulerPrimitives::default(),
-        )
+        Self::new_with_scheduler_primitives(path_id, mtu, enabled, state, weight, PathSchedulerPrimitives::default())
     }
 
     /// Create a path with explicit compiled scheduler state and primitive facts.
     pub fn new_with_scheduler_primitives(
         path_id: PathId,
-        route_id: RouteId,
         mtu: usize,
         enabled: bool,
         state: PathSchedulerState,
         weight: u16,
         primitives: PathSchedulerPrimitives,
     ) -> Result<Self, UdpServiceError> {
-        if mtu <= V1_HEADER_LEN + FRAGMENT_EXTENSION_LEN {
+        if mtu <= V1_HEADER_LEN + FRAGMENT_METADATA_LEN {
             return Err(UdpServiceError::PathMtuTooSmall { path_id, mtu });
         }
         if weight == 0 {
@@ -251,7 +240,6 @@ impl CorePathConfig {
 
         Ok(Self {
             path_id,
-            route_id,
             mtu,
             transport_bind: None,
             transport_remote: None,
@@ -265,11 +253,6 @@ impl CorePathConfig {
     /// Wire path id carried in every frame.
     pub fn path_id(&self) -> PathId {
         self.path_id
-    }
-
-    /// Wire route id carried in every frame.
-    pub fn route_id(&self) -> RouteId {
-        self.route_id
     }
 
     /// Maximum encoded frame size for this path.
@@ -336,14 +319,14 @@ impl CorePathConfig {
 
     /// Maximum fragment payload bytes once the fragment extension is present.
     pub fn max_fragment_payload(&self) -> usize {
-        self.mtu - V1_HEADER_LEN - FRAGMENT_EXTENSION_LEN
+        self.mtu - V1_HEADER_LEN - FRAGMENT_METADATA_LEN
     }
 }
 
 impl CoreRuntimeConfig {
     /// Build a core runtime config from already-validated UDP services.
     pub fn new(services: Vec<UdpServiceConfig>) -> Result<Self, UdpServiceError> {
-        Self::new_with_paths(services, vec![CorePathConfig::new(0, 0, DEFAULT_PATH_MTU, false)?])
+        Self::new_with_paths(services, vec![CorePathConfig::new(0, DEFAULT_PATH_MTU, false)?])
     }
 
     /// Build a core runtime config from already-validated UDP services and paths.

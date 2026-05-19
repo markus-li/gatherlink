@@ -147,7 +147,6 @@ impl PyPathConfig {
     #[pyo3(signature = (
         path_id,
         mtu,
-        route_id = 0,
         busy = false,
         enabled = true,
         state = "active",
@@ -165,7 +164,6 @@ impl PyPathConfig {
     pub fn new(
         path_id: u16,
         mtu: usize,
-        route_id: u16,
         busy: bool,
         enabled: bool,
         state: &str,
@@ -194,9 +192,8 @@ impl PyPathConfig {
             max_in_flight_packets,
             max_in_flight_bytes,
         );
-        let mut inner =
-            CorePathConfig::new_with_scheduler_primitives(path_id, route_id, mtu, enabled, state, weight, primitives)
-                .map_err(udp_error_to_py)?;
+        let mut inner = CorePathConfig::new_with_scheduler_primitives(path_id, mtu, enabled, state, weight, primitives)
+            .map_err(udp_error_to_py)?;
         if let (Some(bind), Some(remote)) = (transport_bind, transport_remote) {
             let bind_addr = bind
                 .parse::<SocketAddr>()
@@ -211,10 +208,6 @@ impl PyPathConfig {
 
     pub fn path_id(&self) -> u16 {
         self.inner.path_id()
-    }
-
-    pub fn route_id(&self) -> u16 {
-        self.inner.route_id()
     }
 
     pub fn mtu(&self) -> usize {

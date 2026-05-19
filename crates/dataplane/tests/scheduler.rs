@@ -10,7 +10,6 @@ use gatherlink_dataplane::udp_service::UdpServiceConfig;
 fn path(path_id: u16, tx_capacity_bps: u64, latency_us: u32, loss_ppm: u32) -> CorePathConfig {
     CorePathConfig::new_with_scheduler_primitives(
         path_id,
-        0,
         1200,
         true,
         PathSchedulerState::Active,

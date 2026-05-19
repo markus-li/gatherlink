@@ -1071,12 +1071,13 @@ def test_service_disable_metadata_is_generic_peer_control() -> None:
 
 def test_service_monitor_summarizes_control_metadata_separately() -> None:
     from gatherlink.cli.services import (
-        _control_metadata_context,
         _gatherlink_time_context,
         _ntp_context,
         _path_capacity_context,
         _path_control_context,
         _path_mtu_context,
+        _render_path_control_rows,
+        _render_service_control_rows,
         _status_context,
     )
 
@@ -1135,11 +1136,34 @@ def test_service_monitor_summarizes_control_metadata_separately() -> None:
     }
 
     context = _status_context(status)
-    control = _control_metadata_context(status["control_metadata"])
+    rows = [
+        {
+            "service": "lab.local-dual-path",
+            "row_type": "service",
+            "state": "running",
+            "system_time": "09:48:14",
+            "gatherlink_time": _gatherlink_time_context(status["control_metadata"]),
+            "ntp": _ntp_context(status["control_metadata"]),
+            "control_metadata": status["control_metadata"],
+        },
+        {
+            "service": "path:path-a",
+            "row_type": "path",
+            "parent": "lab.local-dual-path",
+            "path": "path-a",
+            "control_metadata": status["control_metadata"],
+        },
+    ]
+    service_control = "\n".join(_render_service_control_rows(rows))
+    path_control = "\n".join(_render_path_control_rows(rows))
 
     assert context == "listen=127.0.0.1:51820"
     assert "listen=127.0.0.1:51820" in context
-    assert control.startswith("rx=2/126B clk=off+2.5/+2.0ms rtt=8.0ms n=3 paths=2 svc=1 " "pctrl=1 lat=2 last=")
+    assert "service time/control" in service_control
+    assert "2/126B" in service_control
+    assert "paths svc pol err off lat last" in service_control
+    assert "path control" in path_control
+    assert "path-a" in path_control
     assert _path_capacity_context(status["control_metadata"], "path-a") == "tx=3.0Mb rx=- tl=2.5/2.0ms rl=-/-"
     assert "tx=frm:1200/pay:1186/lnk:1500" in _path_mtu_context(status["control_metadata"], "path-a")
     assert (

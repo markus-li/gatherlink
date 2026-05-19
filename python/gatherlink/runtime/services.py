@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
+from gatherlink.platform.debian import default_debian_backend
 from gatherlink.shared.models.base import GatherlinkBaseModel
 
 SERVICE_REGISTRY_ENV = "GATHERLINK_SERVICE_REGISTRY"
@@ -61,16 +62,14 @@ class ServiceRecord(GatherlinkBaseModel):
     def is_running(self) -> bool:
         """Return whether the registered PID currently exists."""
         if self.manager == "systemd":
-            # TODO: Query systemd status directly once service files exist.
-            # For now the registry makes ownership visible without guessing.
-            return False
+            return bool(self.systemd_unit and default_debian_backend().systemd_is_active(self.systemd_unit))
         pid = self.current_pid()
         return pid_is_running(pid)
 
     def status_label(self) -> str:
         """Return a human-readable lifecycle state for listings."""
         if self.manager == "systemd":
-            return "systemd"
+            return "systemd:active" if self.is_running() else "systemd:inactive"
         return "running" if self.is_running() else "stopped"
 
 
@@ -137,6 +136,9 @@ class ServiceRegistry:
                 request_service(service, "stop")
             except ServiceIpcError:
                 os.kill(pid, signal.SIGTERM)
+            if pid != os.getpid() and not wait_for_pid_exit(pid, timeout_seconds=2.0):
+                os.kill(pid, signal.SIGTERM)
+                wait_for_pid_exit(pid, timeout_seconds=2.0)
         self.mark_stopped(service.name)
         return service
 
@@ -245,6 +247,16 @@ def pid_is_running(pid: int | None) -> bool:
     except OSError:
         return False
     return True
+
+
+def wait_for_pid_exit(pid: int, *, timeout_seconds: float) -> bool:
+    """Wait briefly for a process to exit after a graceful stop request."""
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not pid_is_running(pid):
+            return True
+        time.sleep(0.05)
+    return not pid_is_running(pid)
 
 
 class ServiceIpcError(RuntimeError):

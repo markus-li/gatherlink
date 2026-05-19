@@ -1,11 +1,12 @@
 use std::net::{SocketAddr, UdpSocket};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::thread;
 use std::time::Duration;
 
 use gatherlink_crypto::envelope::{
     decrypt_packet_without_replay, ENCRYPTED_DATA_HEADER_LEN, PACKET_TYPE_ENCRYPTED_DATA_V1,
 };
-use gatherlink_dataplane::engine::CoreDataplane;
+use gatherlink_dataplane::engine::{CoreDataplane, RemoteDeliverOutcome};
 use gatherlink_dataplane::runtime_config::{
     CorePathConfig, CoreRuntimeConfig, SchedulerConfig, TransportSecurityConfig,
 };
@@ -13,7 +14,70 @@ use gatherlink_dataplane::udp_service::UdpServiceConfig;
 use gatherlink_protocol::control::{ControlMessage, ControlPayload, PathMetadata};
 use gatherlink_protocol::frame::{Frame, FrameKind};
 
+static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(0);
+
+fn recv_with_retry(socket: &UdpSocket, buffer: &mut [u8]) -> (usize, SocketAddr) {
+    for _ in 0..20 {
+        match socket.recv_from(buffer) {
+            Ok(received) => return received,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(10)),
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => thread::sleep(Duration::from_millis(10)),
+            Err(error) => panic!("failed to receive UDP datagram: {error}"),
+        }
+    }
+    socket.recv_from(buffer).unwrap()
+}
+
+fn receive_paths_with_retry(dataplane: &mut CoreDataplane, max_frames: usize) -> Vec<RemoteDeliverOutcome> {
+    for _ in 0..20 {
+        let delivered = dataplane.receive_available_from_paths(max_frames).unwrap();
+        if !delivered.is_empty() {
+            return delivered;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    dataplane.receive_available_from_paths(max_frames).unwrap()
+}
+
+fn wait_for_duplicate_counters(
+    dataplane: &mut CoreDataplane,
+    service_name: &str,
+    expected_duplicates: u64,
+    unexpected_duplicates: u64,
+) {
+    for _ in 0..20 {
+        let delivered = dataplane.receive_available_from_paths(8).unwrap();
+        assert!(
+            delivered.is_empty(),
+            "duplicate datagram should not be emitted to the application"
+        );
+        let snapshot = dataplane.metrics_snapshot();
+        let Some(service) = snapshot.services.get(service_name) else {
+            thread::sleep(Duration::from_millis(10));
+            continue;
+        };
+        if service.expected_duplicate_packets == expected_duplicates
+            && service.unexpected_duplicate_packets == unexpected_duplicates
+        {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let snapshot = dataplane.metrics_snapshot();
+    let service = snapshot.services.get(service_name).unwrap();
+    assert_eq!(service.expected_duplicate_packets, expected_duplicates);
+    assert_eq!(service.unexpected_duplicate_packets, unexpected_duplicates);
+}
+
 fn reserve_loopback_addr() -> SocketAddr {
+    for _ in 0..20_000 {
+        let port = NEXT_TEST_PORT.fetch_add(1, Ordering::Relaxed);
+        let port = 20_000 + (port % 10_000);
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        if UdpSocket::bind(addr).is_ok() {
+            return addr;
+        }
+    }
     UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap()
 }
 
@@ -22,7 +86,7 @@ fn service(name: &str, target: SocketAddr) -> UdpServiceConfig {
 }
 
 fn path(path_id: u16, bind: SocketAddr, remote: SocketAddr) -> CorePathConfig {
-    CorePathConfig::new(path_id, 0, 1200, false)
+    CorePathConfig::new(path_id, 1200, false)
         .unwrap()
         .with_transport(bind, remote)
 }
@@ -66,12 +130,12 @@ fn path_transport_sends_encoded_gatherlink_frame_not_raw_payload() {
     let outcome = dataplane.forward_one_for_service("udp-main").unwrap();
 
     let mut buffer = [0_u8; 1500];
-    let (length, _source) = path_remote.recv_from(&mut buffer).unwrap();
+    let (length, _source) = recv_with_retry(&path_remote, &mut buffer);
     assert_ne!(&buffer[..length], b"wireguard-like-payload");
     let frame = Frame::decode(&buffer[..length]).unwrap();
-    assert_eq!(frame.header.kind, FrameKind::Data);
-    assert_eq!(frame.header.service_id, 256);
-    assert_eq!(frame.header.path_id, 42);
+    assert_eq!(frame.kind, FrameKind::Data);
+    assert_eq!(frame.service_id, 256);
+    assert_eq!(frame.path_id, 42);
     assert_eq!(frame.payload, b"wireguard-like-payload");
     assert_eq!(outcome.path_id, 42);
     assert_eq!(outcome.payload_len, b"wireguard-like-payload".len());
@@ -99,15 +163,15 @@ fn encrypted_path_transport_sends_aead_packet_not_plain_frame() {
     dataplane.forward_one_for_service("udp-main").unwrap();
 
     let mut buffer = [0_u8; 1500];
-    let (length, _source) = path_remote.recv_from(&mut buffer).unwrap();
+    let (length, _source) = recv_with_retry(&path_remote, &mut buffer);
     let packet = &buffer[..length];
     assert_eq!(packet[0], PACKET_TYPE_ENCRYPTED_DATA_V1);
     let decrypted = decrypt_packet_without_replay(&send_key, packet).unwrap();
     assert_eq!(decrypted.receiver_index, 1234);
     assert!(Frame::decode(&decrypted.plaintext).is_err());
     let frame = Frame::decode_v2(&decrypted.plaintext).unwrap();
-    assert_eq!(frame.header.service_id, 256);
-    assert_eq!(frame.header.path_id, 42);
+    assert_eq!(frame.service_id, 256);
+    assert_eq!(frame.path_id, 42);
     assert_eq!(frame.payload, b"secret-payload");
 }
 
@@ -139,10 +203,10 @@ fn two_dataplanes_forward_payload_over_path_transport_to_fixed_target() {
         .send_to(b"fixed-target-forward", client_service_addr)
         .unwrap();
     client.forward_one_for_service("udp-main").unwrap();
-    let delivered = server.receive_available_from_paths(8).unwrap();
+    let delivered = receive_paths_with_retry(&mut server, 8);
 
     let mut buffer = [0_u8; 128];
-    let (length, _source) = remote_target.recv_from(&mut buffer).unwrap();
+    let (length, _source) = recv_with_retry(&remote_target, &mut buffer);
     assert_eq!(&buffer[..length], b"fixed-target-forward");
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].service, "udp-main");
@@ -190,15 +254,15 @@ fn encrypted_path_transport_carries_aead_packet_and_receiver_decrypts_frame() {
         .unwrap();
     client.forward_one_for_service("udp-main").unwrap();
 
-    let delivered = server.receive_available_from_paths(8).unwrap();
+    let delivered = receive_paths_with_retry(&mut server, 8);
     let mut buffer = [0_u8; 128];
-    let (length, _source) = remote_target.recv_from(&mut buffer).unwrap();
+    let (length, _source) = recv_with_retry(&remote_target, &mut buffer);
     assert_eq!(&buffer[..length], b"encrypted-fixed-target");
     assert_eq!(delivered.len(), 1);
     assert_eq!(delivered[0].path_id, 7);
 
     // A random plaintext frame sent to an encrypted transport is silently ignored.
-    let plaintext = Frame::data(0, 256, 7, 0, 123, b"not-authenticated".to_vec())
+    let plaintext = Frame::data(256, 7, 123, b"not-authenticated".to_vec())
         .unwrap()
         .encode()
         .unwrap();
@@ -265,13 +329,14 @@ fn user_service_fanout_is_deduped_before_udp_delivery() {
     app_sender.send_to(b"dedupe-me", client_service_addr).unwrap();
     let forwarded = client.forward_one_for_service("udp-main").unwrap();
     assert_eq!(forwarded.path_id, 1);
-    let delivered = server.receive_available_from_paths(8).unwrap();
+    let delivered = receive_paths_with_retry(&mut server, 8);
 
     let mut buffer = [0_u8; 128];
-    let (length, _source) = remote_target.recv_from(&mut buffer).unwrap();
+    let (length, _source) = recv_with_retry(&remote_target, &mut buffer);
     assert_eq!(&buffer[..length], b"dedupe-me");
     assert!(remote_target.recv_from(&mut buffer).is_err());
     assert_eq!(delivered.len(), 1);
+    wait_for_duplicate_counters(&mut server, "udp-main", 1, 0);
     let snapshot = server.metrics_snapshot();
     let service = snapshot.services.get("udp-main").unwrap();
     assert_eq!(service.rx_packets, 1);
@@ -301,17 +366,16 @@ fn unexpected_duplicate_is_counted_separately_from_expected_fanout() {
     .unwrap();
     let mut server = CoreDataplane::bind(server_config).unwrap();
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-    let encoded = Frame::data(0, 256, 1, 0, 99, b"surprise-duplicate".to_vec())
+    let encoded = Frame::data(256, 1, 99, b"surprise-duplicate".to_vec())
         .unwrap()
         .encode()
         .unwrap();
 
     sender.send_to(&encoded, server_path).unwrap();
-    let delivered = server.receive_available_from_paths(8).unwrap();
+    let delivered = receive_paths_with_retry(&mut server, 8);
     assert_eq!(delivered.len(), 1);
     sender.send_to(&encoded, server_path).unwrap();
-    let delivered = server.receive_available_from_paths(8).unwrap();
-    assert!(delivered.is_empty());
+    wait_for_duplicate_counters(&mut server, "udp-main", 0, 1);
 
     let snapshot = server.metrics_snapshot();
     let service = snapshot.services.get("udp-main").unwrap();
@@ -479,7 +543,7 @@ fn all_paths_service_scheduler_duplicates_payload_over_path_transports() {
         let mut buffer = [0_u8; 1500];
         let (length, _source) = remote.recv_from(&mut buffer).unwrap();
         let frame = Frame::decode(&buffer[..length]).unwrap();
-        assert_eq!(frame.header.kind, FrameKind::Data);
+        assert_eq!(frame.kind, FrameKind::Data);
         assert_eq!(frame.payload, control);
     }
     assert_eq!(dataplane.metrics_snapshot().control_metadata.sent.frames, 2);
@@ -515,7 +579,7 @@ fn service_scheduler_fanout_below_bytes_only_duplicates_small_payloads() {
         let mut buffer = [0_u8; 1500];
         let (length, _source) = remote.recv_from(&mut buffer).unwrap();
         let frame = Frame::decode(&buffer[..length]).unwrap();
-        assert_eq!(frame.header.service_id, 9);
+        assert_eq!(frame.service_id, 9);
         assert_eq!(frame.payload, b"tiny");
     }
 
@@ -565,8 +629,8 @@ fn python_composed_service_payload_is_sent_through_one_scheduled_path_transport(
     let mut buffer = [0_u8; 1500];
     let (length, _source) = path_a_remote.recv_from(&mut buffer).unwrap();
     let frame = Frame::decode(&buffer[..length]).unwrap();
-    assert_eq!(frame.header.kind, FrameKind::Data);
-    assert_eq!(frame.header.service_id, 8);
+    assert_eq!(frame.kind, FrameKind::Data);
+    assert_eq!(frame.service_id, 8);
     assert_eq!(frame.payload, payload);
     assert!(path_b_remote.recv_from(&mut buffer).is_err());
     assert_eq!(dataplane.metrics_snapshot().control_metadata.sent.frames, 1);

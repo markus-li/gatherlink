@@ -65,9 +65,9 @@ class BootstrapCache(GatherlinkBaseModel):
     """
     Small JSON cache for last-known bootstrap endpoints.
 
-    TODO(bootstrap-auth): Promote endpoints into this cache only after an
-    authenticated bootstrap probe succeeds. Plaintext lab entries are useful for
-    local testing, but production bootstrap must not trust unauthenticated data.
+    Production callers should cache endpoints only after authenticated bootstrap
+    proof verification. Plaintext lab entries remain useful for local testing,
+    but they must stay visibly marked as unauthenticated test data.
     """
 
     peers: dict[str, BootstrapPeerCache] = Field(default_factory=dict)

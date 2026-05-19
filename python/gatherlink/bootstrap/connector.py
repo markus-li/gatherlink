@@ -32,6 +32,7 @@ class BootstrapProbeResult(GatherlinkBaseModel):
     authenticated: bool
     checked_at: datetime
     warning: str | None = None
+    proof: dict[str, object] | None = None
 
 
 class BootstrapChallenge(GatherlinkBaseModel):
@@ -44,22 +45,58 @@ class BootstrapChallenge(GatherlinkBaseModel):
     expires_at: datetime
 
 
-def probe_candidate(endpoint: BootstrapEndpoint, *, allow_insecure: bool = False) -> BootstrapProbeResult:
+def probe_candidate(
+    endpoint: BootstrapEndpoint,
+    *,
+    allow_insecure: bool = False,
+    expected_peer: IdentityPublicRecord | None = None,
+    proof: SignedDocument | None = None,
+    now: datetime | None = None,
+) -> BootstrapProbeResult:
     """
     Validate whether a candidate can be used for bootstrap.
 
-    TODO(bootstrap-auth): Replace this plaintext lab probe with an authenticated
-    challenge once identity, signing, and crypto are in place. Until then this
-    function intentionally refuses production-style validation unless the caller
-    opts into insecure local bootstrap behavior.
+    Authenticated bootstrap is intentionally Python-owned and document-based at
+    this stage: the candidate is accepted only when a signed challenge proof
+    matches the expected peer identity and endpoint. Network challenge exchange
+    can plug into the same proof verifier later without changing cache policy.
     """
+    checked_at = now or datetime.now(UTC)
+    if expected_peer is not None and proof is not None:
+        try:
+            challenge = verify_bootstrap_challenge_proof(
+                proof,
+                expected_peer,
+                expected_endpoint=endpoint,
+                now=checked_at,
+            )
+        except ValueError as exc:
+            return BootstrapProbeResult(
+                endpoint=endpoint,
+                reachable=False,
+                authenticated=False,
+                checked_at=checked_at,
+                warning=str(exc),
+            )
+        return BootstrapProbeResult(
+            endpoint=endpoint.model_copy(update={"last_verified_at": checked_at}),
+            reachable=True,
+            authenticated=True,
+            checked_at=checked_at,
+            proof={
+                "domain": proof.domain,
+                "issued_at": challenge.issued_at.isoformat(),
+                "expires_at": challenge.expires_at.isoformat(),
+            },
+        )
+
     if not allow_insecure:
         return BootstrapProbeResult(
             endpoint=endpoint,
             reachable=False,
             authenticated=False,
-            checked_at=datetime.now(UTC),
-            warning="authenticated bootstrap probes are not implemented yet",
+            checked_at=checked_at,
+            warning="authenticated bootstrap requires --peer-identity and --proof",
         )
 
     logger.warning("using insecure bootstrap candidate %s; this is only acceptable for local labs", endpoint.authority())
@@ -67,7 +104,7 @@ def probe_candidate(endpoint: BootstrapEndpoint, *, allow_insecure: bool = False
         endpoint=endpoint,
         reachable=True,
         authenticated=False,
-        checked_at=datetime.now(UTC),
+        checked_at=checked_at,
         warning="insecure plaintext bootstrap accepted for local lab use",
     )
 
@@ -105,7 +142,7 @@ def verify_bootstrap_challenge_proof(
     *,
     expected_endpoint: BootstrapEndpoint | None = None,
     now: datetime | None = None,
-) -> None:
+) -> BootstrapChallenge:
     """Verify a signed bootstrap challenge proof against expected peer identity."""
     if proof.domain != BOOTSTRAP_CHALLENGE_DOMAIN:
         raise ValueError("unexpected bootstrap proof domain")
@@ -121,3 +158,4 @@ def verify_bootstrap_challenge_proof(
         raise ValueError("bootstrap challenge proof has expired")
     if expected_endpoint is not None and challenge.endpoint.authority() != expected_endpoint.authority():
         raise ValueError("bootstrap proof endpoint does not match candidate")
+    return challenge

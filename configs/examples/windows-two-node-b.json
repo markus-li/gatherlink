@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "node": "windows-node-b",
+  "role": "server",
+  "peer": "windows-node-a",
+  "paths": [
+    {
+      "name": "wsl-path-a",
+      "interface": "eth0",
+      "transport_bind": "10.88.1.12:57001",
+      "transport_remote": "10.88.1.11:56001",
+      "scheduler": {
+        "mtu": 1200,
+        "tx_capacity_bps": 50000000,
+        "rx_capacity_bps": 50000000
+      }
+    },
+    {
+      "name": "wsl-path-b",
+      "interface": "eth0",
+      "transport_bind": "10.88.2.12:57002",
+      "transport_remote": "10.88.2.11:56002",
+      "scheduler": {
+        "mtu": 1200,
+        "tx_capacity_bps": 50000000,
+        "rx_capacity_bps": 50000000
+      }
+    },
+    {
+      "name": "wsl-path-c",
+      "interface": "eth0",
+      "transport_bind": "10.88.3.12:57003",
+      "transport_remote": "10.88.3.11:56003",
+      "scheduler": {
+        "mtu": 1200,
+        "tx_capacity_bps": 50000000,
+        "rx_capacity_bps": 50000000
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "udp-main",
+      "listen": "0.0.0.0:0",
+      "target": "10.88.0.12:51820"
+    }
+  ],
+  "security": {
+    "mode": "static",
+    "receiver_index": 101,
+    "send_key": "j25NmSQURl1GzZtqpwPXmGmhudM6iT1E31xeZDb0csw=",
+    "receive_key": "kJiywLJJjRWSIX7ZGttO1R7SKITfnefGyfsawZ5XNxI="
+  }
+}

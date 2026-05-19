@@ -31,36 +31,31 @@ impl TransportSecurity {
         }
     }
 
-    /// Protect one already-encoded compact v1 Gatherlink frame before path-socket send.
+    /// Protect one compact Gatherlink frame before path-socket send.
     ///
-    /// The engine still uses v1 bytes internally as a compatibility boundary.
-    /// Static secure transport converts that view into compact v2 before AEAD
-    /// protection so service/path metadata is not visible on the carrier.
-    pub fn protect_frame(&mut self, frame: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    /// Plain transport emits compact v1. Static secure transport encrypts
+    /// compact v2 plaintext so service/path metadata is not visible on the
+    /// carrier.
+    pub fn protect_frame(&mut self, frame: &Frame) -> Result<Vec<u8>, CryptoError> {
         match self {
-            Self::None => Ok(frame.to_vec()),
+            Self::None => frame.encode_v1().map_err(|_| CryptoError::SilentDrop),
             Self::Static { keys } => {
-                let compact_v2 = Frame::decode_v1(frame)
-                    .and_then(|decoded| decoded.encode_v2())
-                    .map_err(|_| CryptoError::SilentDrop)?;
+                let compact_v2 = frame.encode_v2().map_err(|_| CryptoError::SilentDrop)?;
                 keys.encrypt_frame(&compact_v2)
             }
         }
     }
 
-    /// Authenticate and unwrap one path-socket packet before frame decoding.
+    /// Authenticate and unwrap one path-socket packet into a compact frame.
     ///
-    /// Static secure transport decrypts compact v2 and synthesizes compact v1
-    /// bytes for the current engine. This keeps the public encrypted wire shape
-    /// correct while older internal consumers migrate to compact frame objects.
-    pub fn unprotect_packet(&mut self, packet: &[u8]) -> Result<Vec<u8>, CryptoError> {
+    /// Plain transport decodes compact v1. Static secure transport decrypts
+    /// compact v2 and returns the same compact frame model.
+    pub fn unprotect_packet(&mut self, packet: &[u8]) -> Result<Frame, CryptoError> {
         match self {
-            Self::None => Ok(packet.to_vec()),
+            Self::None => Frame::decode_v1(packet).map_err(|_| CryptoError::SilentDrop),
             Self::Static { keys } => {
                 let DecryptedPacket { plaintext, .. } = keys.decrypt_packet(packet)?;
-                Frame::decode_v2(&plaintext)
-                    .and_then(|decoded| decoded.encode_v1())
-                    .map_err(|_| CryptoError::SilentDrop)
+                Frame::decode_v2(&plaintext).map_err(|_| CryptoError::SilentDrop)
             }
         }
     }

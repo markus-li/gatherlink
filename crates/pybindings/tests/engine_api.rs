@@ -243,7 +243,7 @@ fn python_facing_dataplane_accepts_explicit_paths() {
     assert_eq!(service.priority(), 200);
     assert_eq!(service.return_mode(), "learned-single-source");
     let path = PyPathConfig::new(
-        3, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+        3, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
     )
     .unwrap();
     assert_eq!(path.tx_capacity_bps(), None);
@@ -266,7 +266,6 @@ fn python_facing_path_config_accepts_scheduler_primitives() {
     let path = PyPathConfig::new(
         7,
         1200,
-        2,
         false,
         true,
         "active",
@@ -312,11 +311,11 @@ fn python_facing_dataplane_accepts_scheduler_config() {
     .unwrap();
     let paths = vec![
         PyPathConfig::new(
-            5, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+            5, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
         )
         .unwrap(),
         PyPathConfig::new(
-            6, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+            6, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
         )
         .unwrap(),
     ];
@@ -351,7 +350,7 @@ fn python_facing_scheduler_reapply_preserves_bound_service_socket() {
     )
     .unwrap();
     let paths = vec![PyPathConfig::new(
-        5, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+        5, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
     )
     .unwrap()];
     let scheduler = PySchedulerConfig::new("round_robin").unwrap();
@@ -361,7 +360,6 @@ fn python_facing_scheduler_reapply_preserves_bound_service_socket() {
     let updated_paths = vec![PyPathConfig::new(
         5,
         1180,
-        0,
         false,
         true,
         "active",

@@ -4,7 +4,7 @@ use gatherlink_dataplane::runtime_config::{
     CorePathConfig, CoreRuntimeConfig, PathSchedulerPrimitives, PathSchedulerState,
 };
 use gatherlink_dataplane::udp_service::{UdpServiceConfig, UdpServiceError};
-use gatherlink_protocol::frame::{FRAGMENT_EXTENSION_LEN, V1_HEADER_LEN};
+use gatherlink_protocol::frame::{FRAGMENT_METADATA_LEN, V1_HEADER_LEN};
 
 #[test]
 fn rejects_duplicate_service_names() {
@@ -60,8 +60,8 @@ fn rejects_duplicate_path_ids() {
         "127.0.0.1:51820".parse().unwrap(),
     )
     .unwrap();
-    let first = CorePathConfig::new(7, 0, 1200, false).unwrap();
-    let second = CorePathConfig::new(7, 1, 1200, false).unwrap();
+    let first = CorePathConfig::new(7, 1200, false).unwrap();
+    let second = CorePathConfig::new(7, 1200, false).unwrap();
 
     let err = CoreRuntimeConfig::new_with_paths(vec![service], vec![first, second]).unwrap_err();
 
@@ -70,7 +70,7 @@ fn rejects_duplicate_path_ids() {
 
 #[test]
 fn rejects_path_mtu_that_cannot_carry_a_fragment() {
-    let err = CorePathConfig::new(7, 0, V1_HEADER_LEN + FRAGMENT_EXTENSION_LEN, false).unwrap_err();
+    let err = CorePathConfig::new(7, V1_HEADER_LEN + FRAGMENT_METADATA_LEN, false).unwrap_err();
 
     assert!(matches!(err, UdpServiceError::PathMtuTooSmall { path_id: 7, .. }));
 }
@@ -86,9 +86,8 @@ fn accepts_compiled_scheduler_primitives() {
         64,
         524_288,
     );
-    let path =
-        CorePathConfig::new_with_scheduler_primitives(9, 1, 1200, true, PathSchedulerState::Active, 3, primitives)
-            .unwrap();
+    let path = CorePathConfig::new_with_scheduler_primitives(9, 1200, true, PathSchedulerState::Active, 3, primitives)
+        .unwrap();
 
     assert_eq!(path.weight(), 3);
     assert_eq!(path.primitives().tx_capacity_bps(), Some(3_000_000));

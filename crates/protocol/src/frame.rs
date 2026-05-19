@@ -2,11 +2,11 @@
 //!
 //! Plaintext/lab traffic uses compact v1, which carries a visible version byte.
 //! Secure transport encrypts compact v2, which is the same logical frame without
-//! that visible version byte. The richer [`FrameHeader`] fields are a synthesized
-//! compatibility view for older engine code while the dataplane migrates.
+//! that visible version byte. This module deliberately models only the compact
+//! fields that exist on the wire.
 
 use crate::errors::ProtocolError;
-use crate::ids::{PathId, RouteId, SequenceNumber, ServiceId, SessionId};
+use crate::ids::{PathId, SequenceNumber, ServiceId};
 use crate::version::PROTOCOL_VERSION;
 
 /// Compact v1 plaintext header length in bytes.
@@ -15,14 +15,11 @@ pub const V1_HEADER_LEN: usize = 14;
 /// Compact v2 decrypted secure header length in bytes.
 pub const V2_HEADER_LEN: usize = 13;
 
-/// Max v1 payload length before future fragmentation is needed.
-pub const MAX_V1_PAYLOAD_LEN: usize = u16::MAX as usize;
+/// Maximum compact-frame payload length before future higher-level splitting is needed.
+pub const MAX_FRAME_PAYLOAD_LEN: usize = u16::MAX as usize;
 
 /// Fixed fragment metadata length after a compact v1/v2 header.
 pub const FRAGMENT_METADATA_LEN: usize = 10;
-
-/// Compatibility alias for code that still calls the fragment metadata an extension.
-pub const FRAGMENT_EXTENSION_LEN: usize = FRAGMENT_METADATA_LEN;
 
 const KIND_DATA: u8 = 0;
 const KIND_CONTROL: u8 = 1;
@@ -30,7 +27,6 @@ const KIND_BATCH: u8 = 2;
 const KIND_MASK: u8 = 0b0000_0011;
 const FLAG_FRAGMENT_PRESENT: u8 = 0b0000_0100;
 const KIND_FLAGS_RESERVED_MASK: u8 = 0b1111_1000;
-const KNOWN_FLAGS: u16 = 0;
 
 /// Broad frame class carried over UDP.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -59,42 +55,6 @@ impl FrameKind {
             other => Err(ProtocolError::UnknownFrameKind(other)),
         }
     }
-}
-
-/// Compatibility flags reserved for protocol behavior.
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
-pub struct FrameFlags {
-    bits: u16,
-}
-
-impl FrameFlags {
-    /// Build flags from raw bits, rejecting values v1 does not understand.
-    pub fn from_bits(bits: u16) -> Result<Self, ProtocolError> {
-        if bits & !KNOWN_FLAGS != 0 {
-            return Err(ProtocolError::UnknownFlags(bits));
-        }
-        Ok(Self { bits })
-    }
-
-    /// Return raw flag bits for encoding.
-    pub fn bits(self) -> u16 {
-        self.bits
-    }
-}
-
-/// Fixed compact v1 header.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameHeader {
-    pub version: u8,
-    pub kind: FrameKind,
-    pub header_len: u16,
-    pub flags: FrameFlags,
-    pub session_id: SessionId,
-    pub service_id: ServiceId,
-    pub path_id: PathId,
-    pub route_id: RouteId,
-    pub sequence: SequenceNumber,
-    pub payload_len: u16,
 }
 
 /// Fragment metadata carried only when one virtual UDP payload must be split.
@@ -127,124 +87,13 @@ impl FragmentInfo {
     }
 }
 
-impl FrameHeader {
-    /// Build a frame header for one protocol payload.
-    pub fn new(
-        kind: FrameKind,
-        session_id: SessionId,
-        service_id: ServiceId,
-        path_id: PathId,
-        route_id: RouteId,
-        sequence: SequenceNumber,
-        payload_len: usize,
-    ) -> Result<Self, ProtocolError> {
-        if payload_len > MAX_V1_PAYLOAD_LEN {
-            return Err(ProtocolError::PayloadTooLarge(payload_len));
-        }
-
-        Ok(Self {
-            version: PROTOCOL_VERSION,
-            kind,
-            header_len: V1_HEADER_LEN as u16,
-            flags: FrameFlags::default(),
-            session_id,
-            service_id,
-            path_id,
-            route_id,
-            sequence,
-            payload_len: payload_len as u16,
-        })
-    }
-
-    /// Build a data-frame header for one virtual UDP payload.
-    pub fn data(
-        session_id: SessionId,
-        service_id: ServiceId,
-        path_id: PathId,
-        route_id: RouteId,
-        sequence: SequenceNumber,
-        payload_len: usize,
-    ) -> Result<Self, ProtocolError> {
-        Self::new(
-            FrameKind::Data,
-            session_id,
-            service_id,
-            path_id,
-            route_id,
-            sequence,
-            payload_len,
-        )
-    }
-
-    /// Encode the compact v1 header into a caller-provided buffer.
-    pub fn encode_into(&self, output: &mut [u8]) -> Result<(), ProtocolError> {
-        if output.len() < V1_HEADER_LEN {
-            return Err(ProtocolError::BufferTooSmall);
-        }
-
-        output[..V1_HEADER_LEN].fill(0);
-        output[0] = self.version;
-        output[1] = self.kind.to_u8();
-        write_u16(output, 2, self.service_id);
-        write_u16(output, 4, self.path_id);
-        write_u64(output, 6, self.sequence);
-        Ok(())
-    }
-
-    fn decode_v1(input: &[u8], has_fragment: bool, payload_len: usize) -> Result<Self, ProtocolError> {
-        let version = *input.first().ok_or(ProtocolError::BufferTooSmall)?;
-        if version != PROTOCOL_VERSION {
-            return Err(ProtocolError::UnsupportedVersion(version));
-        }
-        Self::decode_logical(version, input[1], &input[2..], has_fragment, payload_len, V1_HEADER_LEN)
-    }
-
-    fn decode_v2(input: &[u8], has_fragment: bool, payload_len: usize) -> Result<Self, ProtocolError> {
-        Self::decode_logical(
-            PROTOCOL_VERSION,
-            input[0],
-            &input[1..],
-            has_fragment,
-            payload_len,
-            V2_HEADER_LEN,
-        )
-    }
-
-    fn decode_logical(
-        version: u8,
-        kind_flags: u8,
-        fields: &[u8],
-        has_fragment: bool,
-        payload_len: usize,
-        base_header_len: usize,
-    ) -> Result<Self, ProtocolError> {
-        if kind_flags & KIND_FLAGS_RESERVED_MASK != 0 {
-            return Err(ProtocolError::UnknownFlags(u16::from(
-                kind_flags & KIND_FLAGS_RESERVED_MASK,
-            )));
-        }
-        if payload_len > u16::MAX as usize {
-            return Err(ProtocolError::PayloadTooLarge(payload_len));
-        }
-        Ok(Self {
-            version,
-            kind: FrameKind::from_u8(kind_flags & KIND_MASK)?,
-            header_len: (base_header_len + if has_fragment { FRAGMENT_METADATA_LEN } else { 0 }) as u16,
-            flags: FrameFlags::default(),
-            session_id: 0,
-            service_id: read_u16(fields, 0),
-            path_id: read_u16(fields, 2),
-            route_id: 0,
-            sequence: read_u64(fields, 4),
-            payload_len: payload_len as u16,
-        })
-    }
-}
-
-/// Owned frame with header and payload.
+/// Owned compact frame with its logical payload.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
-    pub header: FrameHeader,
+    pub kind: FrameKind,
+    pub service_id: ServiceId,
+    pub path_id: PathId,
+    pub sequence: SequenceNumber,
     pub fragment: Option<FragmentInfo>,
     pub payload: Vec<u8>,
 }
@@ -252,49 +101,27 @@ pub struct Frame {
 impl Frame {
     /// Build a data frame around a virtual UDP payload.
     pub fn data(
-        session_id: SessionId,
         service_id: ServiceId,
         path_id: PathId,
-        route_id: RouteId,
         sequence: SequenceNumber,
         payload: Vec<u8>,
     ) -> Result<Self, ProtocolError> {
-        let header = FrameHeader::data(session_id, service_id, path_id, route_id, sequence, payload.len())?;
-        Ok(Self {
-            header,
-            fragment: None,
-            payload,
-        })
+        Self::new(FrameKind::Data, service_id, path_id, sequence, None, payload)
     }
 
     /// Build a batch frame containing multiple virtual UDP payloads for one path.
     ///
     /// Batch frames keep byte usage low for many small UDP datagrams. The frame
-    /// header sequence is the first payload's sequence number; each following
-    /// item is implicitly `sequence + index` in payload order.
+    /// sequence is the first payload's sequence number; each following item is
+    /// implicitly `sequence + index` in payload order.
     pub fn batch(
-        session_id: SessionId,
         service_id: ServiceId,
         path_id: PathId,
-        route_id: RouteId,
         sequence: SequenceNumber,
         payloads: &[Vec<u8>],
     ) -> Result<Self, ProtocolError> {
         let payload = encode_batch_payload(payloads)?;
-        let header = FrameHeader::new(
-            FrameKind::Batch,
-            session_id,
-            service_id,
-            path_id,
-            route_id,
-            sequence,
-            payload.len(),
-        )?;
-        Ok(Self {
-            header,
-            fragment: None,
-            payload,
-        })
+        Self::new(FrameKind::Batch, service_id, path_id, sequence, None, payload)
     }
 
     /// Build a control metaband frame.
@@ -303,49 +130,50 @@ impl Frame {
     /// increasing the fixed data header. They may be batched or sent sparsely by
     /// higher layers.
     pub fn control(
-        session_id: SessionId,
         service_id: ServiceId,
         path_id: PathId,
-        route_id: RouteId,
         sequence: SequenceNumber,
         payload: Vec<u8>,
     ) -> Result<Self, ProtocolError> {
-        let header = FrameHeader::new(
-            FrameKind::Control,
-            session_id,
-            service_id,
-            path_id,
-            route_id,
-            sequence,
-            payload.len(),
-        )?;
-        Ok(Self {
-            header,
-            fragment: None,
-            payload,
-        })
+        Self::new(FrameKind::Control, service_id, path_id, sequence, None, payload)
     }
 
     /// Build one data-frame fragment for a virtual UDP payload that does not fit one path MTU.
     pub fn fragment(
-        session_id: SessionId,
         service_id: ServiceId,
         path_id: PathId,
-        route_id: RouteId,
         sequence: SequenceNumber,
         fragment: FragmentInfo,
         payload: Vec<u8>,
     ) -> Result<Self, ProtocolError> {
-        let mut frame = Self::data(session_id, service_id, path_id, route_id, sequence, payload)?;
-        frame.header.header_len = (V1_HEADER_LEN + FRAGMENT_METADATA_LEN) as u16;
-        frame.fragment = Some(fragment);
-        Ok(frame)
+        Self::new(FrameKind::Data, service_id, path_id, sequence, Some(fragment), payload)
+    }
+
+    fn new(
+        kind: FrameKind,
+        service_id: ServiceId,
+        path_id: PathId,
+        sequence: SequenceNumber,
+        fragment: Option<FragmentInfo>,
+        payload: Vec<u8>,
+    ) -> Result<Self, ProtocolError> {
+        if payload.len() > MAX_FRAME_PAYLOAD_LEN {
+            return Err(ProtocolError::PayloadTooLarge(payload.len()));
+        }
+        Ok(Self {
+            kind,
+            service_id,
+            path_id,
+            sequence,
+            fragment,
+            payload,
+        })
     }
 
     /// Decode this frame's batch payload into individual virtual UDP payloads.
     pub fn batch_payloads(&self) -> Result<Vec<Vec<u8>>, ProtocolError> {
-        if self.header.kind != FrameKind::Batch {
-            return Err(ProtocolError::UnknownFrameKind(self.header.kind.to_u8()));
+        if self.kind != FrameKind::Batch {
+            return Err(ProtocolError::UnknownFrameKind(self.kind.to_u8()));
         }
 
         decode_batch_payload(&self.payload)
@@ -363,20 +191,17 @@ impl Frame {
 
     /// Encode this frame into compact v1 plaintext wire bytes.
     pub fn encode_v1(&self) -> Result<Vec<u8>, ProtocolError> {
-        if self.payload.len() != self.header.payload_len as usize {
-            return Err(ProtocolError::PayloadLengthMismatch {
-                expected: self.header.payload_len as usize,
-                actual: self.payload.len(),
-            });
-        }
-
         let header_len = V1_HEADER_LEN + self.fragment.map_or(0, |_| FRAGMENT_METADATA_LEN);
         let mut output = vec![0_u8; header_len + self.payload.len()];
-        let mut header = self.header.clone();
-        header.header_len = header_len as u16;
-        header.encode_into(&mut output[..V1_HEADER_LEN])?;
-        if let Some(fragment) = self.fragment {
+        output[0] = PROTOCOL_VERSION;
+        output[1] = self.kind.to_u8();
+        if self.fragment.is_some() {
             output[1] |= FLAG_FRAGMENT_PRESENT;
+        }
+        write_u16(&mut output, 2, self.service_id);
+        write_u16(&mut output, 4, self.path_id);
+        write_u64(&mut output, 6, self.sequence);
+        if let Some(fragment) = self.fragment {
             encode_fragment_metadata(fragment, &mut output[V1_HEADER_LEN..header_len]);
         }
         output[header_len..].copy_from_slice(&self.payload);
@@ -385,22 +210,15 @@ impl Frame {
 
     /// Encode this frame into compact v2 bytes for AEAD plaintext.
     pub fn encode_v2(&self) -> Result<Vec<u8>, ProtocolError> {
-        if self.payload.len() != self.header.payload_len as usize {
-            return Err(ProtocolError::PayloadLengthMismatch {
-                expected: self.header.payload_len as usize,
-                actual: self.payload.len(),
-            });
-        }
-
         let header_len = V2_HEADER_LEN + self.fragment.map_or(0, |_| FRAGMENT_METADATA_LEN);
         let mut output = vec![0_u8; header_len + self.payload.len()];
-        output[0] = self.header.kind.to_u8();
+        output[0] = self.kind.to_u8();
         if self.fragment.is_some() {
             output[0] |= FLAG_FRAGMENT_PRESENT;
         }
-        write_u16(&mut output, 1, self.header.service_id);
-        write_u16(&mut output, 3, self.header.path_id);
-        write_u64(&mut output, 5, self.header.sequence);
+        write_u16(&mut output, 1, self.service_id);
+        write_u16(&mut output, 3, self.path_id);
+        write_u64(&mut output, 5, self.sequence);
         if let Some(fragment) = self.fragment {
             encode_fragment_metadata(fragment, &mut output[V2_HEADER_LEN..header_len]);
         }
@@ -418,7 +236,12 @@ impl Frame {
         if input.len() < V1_HEADER_LEN {
             return Err(ProtocolError::BufferTooSmall);
         }
-        let has_fragment = parse_kind_flags(input[1])?;
+        let version = input[0];
+        if version != PROTOCOL_VERSION {
+            return Err(ProtocolError::UnsupportedVersion(version));
+        }
+        let kind_flags = input[1];
+        let has_fragment = parse_kind_flags(kind_flags)?;
         let header_len = V1_HEADER_LEN + if has_fragment { FRAGMENT_METADATA_LEN } else { 0 };
         if input.len() < header_len {
             return Err(ProtocolError::BufferTooSmall);
@@ -428,13 +251,14 @@ impl Frame {
         } else {
             None
         };
-        let payload_len = input.len() - header_len;
-        let header = FrameHeader::decode_v1(input, has_fragment, payload_len)?;
-        Ok(Self {
-            header,
+        Self::new(
+            FrameKind::from_u8(kind_flags & KIND_MASK)?,
+            read_u16(input, 2),
+            read_u16(input, 4),
+            read_u64(input, 6),
             fragment,
-            payload: input[header_len..].to_vec(),
-        })
+            input[header_len..].to_vec(),
+        )
     }
 
     /// Decode one complete compact v2 AEAD plaintext frame.
@@ -442,7 +266,8 @@ impl Frame {
         if input.len() < V2_HEADER_LEN {
             return Err(ProtocolError::BufferTooSmall);
         }
-        let has_fragment = parse_kind_flags(input[0])?;
+        let kind_flags = input[0];
+        let has_fragment = parse_kind_flags(kind_flags)?;
         let header_len = V2_HEADER_LEN + if has_fragment { FRAGMENT_METADATA_LEN } else { 0 };
         if input.len() < header_len {
             return Err(ProtocolError::BufferTooSmall);
@@ -452,13 +277,14 @@ impl Frame {
         } else {
             None
         };
-        let payload_len = input.len() - header_len;
-        let header = FrameHeader::decode_v2(input, has_fragment, payload_len)?;
-        Ok(Self {
-            header,
+        Self::new(
+            FrameKind::from_u8(kind_flags & KIND_MASK)?,
+            read_u16(input, 1),
+            read_u16(input, 3),
+            read_u64(input, 5),
             fragment,
-            payload: input[header_len..].to_vec(),
-        })
+            input[header_len..].to_vec(),
+        )
     }
 }
 
@@ -481,7 +307,7 @@ fn encode_fragment_metadata(fragment: FragmentInfo, output: &mut [u8]) {
 
 fn decode_fragment_metadata(input: &[u8]) -> Result<FragmentInfo, ProtocolError> {
     if input.len() != FRAGMENT_METADATA_LEN {
-        return Err(ProtocolError::MalformedExtension);
+        return Err(ProtocolError::MalformedFragment);
     }
     let datagram_id = u32::from_be_bytes([input[0], input[1], input[2], input[3]]);
     let fragment_index = read_u16(input, 4);
@@ -504,7 +330,7 @@ fn encode_batch_payload(payloads: &[Vec<u8>]) -> Result<Vec<u8>, ProtocolError> 
             return Err(ProtocolError::BatchItemTooLarge(payload.len()));
         }
         total_len += 2 + payload.len();
-        if total_len > MAX_V1_PAYLOAD_LEN {
+        if total_len > MAX_FRAME_PAYLOAD_LEN {
             return Err(ProtocolError::BatchTooLarge(total_len));
         }
     }

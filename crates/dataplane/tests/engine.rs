@@ -108,13 +108,13 @@ fn control_payload_duplication_uses_all_enabled_paths_with_one_sequence() {
         )
         .unwrap()],
         vec![
-            CorePathConfig::new_with_scheduler(10, 0, 1200, true, PathSchedulerState::Active, 1)
+            CorePathConfig::new_with_scheduler(10, 1200, true, PathSchedulerState::Active, 1)
                 .unwrap()
                 .with_transport("127.0.0.1:0".parse().unwrap(), path_a_remote.local_addr().unwrap()),
-            CorePathConfig::new_with_scheduler(20, 0, 1200, true, PathSchedulerState::Busy, 1)
+            CorePathConfig::new_with_scheduler(20, 1200, true, PathSchedulerState::Busy, 1)
                 .unwrap()
                 .with_transport("127.0.0.1:0".parse().unwrap(), path_b_remote.local_addr().unwrap()),
-            CorePathConfig::new_with_scheduler(30, 0, 1200, false, PathSchedulerState::Disabled, 1)
+            CorePathConfig::new_with_scheduler(30, 1200, false, PathSchedulerState::Disabled, 1)
                 .unwrap()
                 .with_transport("127.0.0.1:0".parse().unwrap(), path_c_remote.local_addr().unwrap()),
         ],
@@ -170,7 +170,7 @@ fn coalesces_tiny_udp_payloads_into_one_batch_frame() {
             target.local_addr().unwrap(),
         )
         .unwrap()],
-        vec![CorePathConfig::new(7, 0, 1200, false).unwrap()],
+        vec![CorePathConfig::new(7, 1200, false).unwrap()],
     )
     .unwrap();
     let mut dataplane = CoreDataplane::bind(config).unwrap();
@@ -208,8 +208,8 @@ fn round_robin_scheduler_rotates_across_eligible_paths() {
         )
         .unwrap()],
         vec![
-            CorePathConfig::new(10, 0, 1200, false).unwrap(),
-            CorePathConfig::new(20, 0, 1200, false).unwrap(),
+            CorePathConfig::new(10, 1200, false).unwrap(),
+            CorePathConfig::new(20, 1200, false).unwrap(),
         ],
     )
     .unwrap();
@@ -253,9 +253,9 @@ fn round_robin_scheduler_honors_compiled_path_weights_and_disabled_paths() {
         )
         .unwrap()],
         vec![
-            CorePathConfig::new_with_scheduler(10, 0, 1200, true, PathSchedulerState::Active, 2).unwrap(),
-            CorePathConfig::new_with_scheduler(99, 0, 1200, false, PathSchedulerState::Disabled, 1).unwrap(),
-            CorePathConfig::new_with_scheduler(20, 0, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+            CorePathConfig::new_with_scheduler(10, 1200, true, PathSchedulerState::Active, 2).unwrap(),
+            CorePathConfig::new_with_scheduler(99, 1200, false, PathSchedulerState::Disabled, 1).unwrap(),
+            CorePathConfig::new_with_scheduler(20, 1200, true, PathSchedulerState::Active, 1).unwrap(),
         ],
     )
     .unwrap();
@@ -292,7 +292,7 @@ fn fragments_oversized_udp_payload_when_no_path_can_fit_it_whole() {
             target.local_addr().unwrap(),
         )
         .unwrap()],
-        vec![CorePathConfig::new(9, 0, 100, false).unwrap()],
+        vec![CorePathConfig::new(9, 100, false).unwrap()],
     )
     .unwrap();
     let mut dataplane = CoreDataplane::bind(config).unwrap();
@@ -324,8 +324,8 @@ fn fragments_onto_available_path_when_whole_fit_path_is_busy() {
         )
         .unwrap()],
         vec![
-            CorePathConfig::new(1, 0, 300, true).unwrap(),
-            CorePathConfig::new(2, 0, 80, false).unwrap(),
+            CorePathConfig::new(1, 300, true).unwrap(),
+            CorePathConfig::new(2, 80, false).unwrap(),
         ],
     )
     .unwrap();
@@ -428,8 +428,8 @@ fn scheduler_reapply_preserves_bound_service_socket() {
     let mut dataplane = CoreDataplane::bind(config).unwrap();
     let original_listen = dataplane.service("udp-main").unwrap().local_addr().unwrap();
     let paths = vec![
-        CorePathConfig::new_with_scheduler(2, 0, 1200, true, PathSchedulerState::Active, 1).unwrap(),
-        CorePathConfig::new_with_scheduler(3, 0, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+        CorePathConfig::new_with_scheduler(2, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+        CorePathConfig::new_with_scheduler(3, 1200, true, PathSchedulerState::Active, 1).unwrap(),
     ];
 
     let outcome = dataplane

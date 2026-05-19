@@ -15,6 +15,8 @@ DPI engine, QoS system, or general proxy framework.
 
 Early runnable milestones are documented in:
 
-- `docs/local-dual-path-lab.md`
-- `docs/plaintext-security-mode.md`
-- `docs/diagnostics-events.md`
+- `docs/user/README.md`
+- `docs/labs/local-dual-path-lab.md`
+- `docs/labs/wsl-two-distro-lab.md`
+- `docs/protocol/plaintext-security-mode.md`
+- `docs/operations/diagnostics-events.md`

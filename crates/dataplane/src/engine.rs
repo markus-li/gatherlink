@@ -284,12 +284,11 @@ impl CoreDataplane {
                     mtu: frame_plan.path.mtu(),
                 });
             }
-            if self.try_send_path_frame(frame_plan.path.path_id(), &encoded, false)? {
+            if self.try_send_path_frame(frame_plan.path.path_id(), &frame_plan.frame, encoded.len(), false)? {
                 self.metrics
                     .record_reserved_sent(frame_plan.path.path_id(), encoded.len());
                 plans.push(ControlTransmitPlan {
                     path_id: frame_plan.path.path_id(),
-                    route_id: frame_plan.path.route_id(),
                     sequence: frame_plan.datagrams[0].sequence,
                     frame_len: encoded.len(),
                     payload_len: frame_plan.datagrams.iter().map(|datagram| datagram.payload.len()).sum(),
@@ -319,9 +318,8 @@ impl CoreDataplane {
         for path_index in path_indices {
             let path = &self.paths[path_index];
             let path_id = path.path_id();
-            let route_id = path.route_id();
             let mtu = path.mtu();
-            let frame = Frame::data(0, service_id, path_id, route_id, sequence, payload.clone())?;
+            let frame = Frame::data(service_id, path_id, sequence, payload.clone())?;
             let encoded = frame.encode()?;
             if encoded.len() > mtu {
                 return Err(DataplaneError::FrameExceedsPathMtu {
@@ -330,11 +328,10 @@ impl CoreDataplane {
                     mtu,
                 });
             }
-            if self.try_send_path_frame(path_id, &encoded, false)? {
+            if self.try_send_path_frame(path_id, &frame, encoded.len(), false)? {
                 self.metrics.record_reserved_sent(path_id, encoded.len());
                 plans.push(ControlTransmitPlan {
                     path_id,
-                    route_id,
                     sequence,
                     frame_len: encoded.len(),
                     payload_len: payload.len(),
@@ -410,34 +407,34 @@ impl CoreDataplane {
         let frames = self.path_transports.receive_available(max_frames)?;
         let mut outcomes = Vec::new();
         for received in frames {
-            let frame_bytes = match self.transport_security.unprotect_packet(&received.bytes) {
-                Ok(bytes) => bytes,
+            let decoded = match self.transport_security.unprotect_packet(&received.bytes) {
+                Ok(frame) => frame,
                 Err(CryptoError::SilentDrop) => continue,
                 Err(error) => return Err(DataplaneError::Crypto(error)),
             };
-            let decoded = Frame::decode(&frame_bytes)?;
-            match decoded.header.kind {
+            let frame_bytes_len = received.bytes.len();
+            match decoded.kind {
                 FrameKind::Data => {
                     if let Some(payload) = self.remote_fragments.push_or_payload(&decoded)? {
-                        if is_reserved_service_id(decoded.header.service_id) {
+                        if is_reserved_service_id(decoded.service_id) {
                             self.observe_received_reserved_service_payload(
-                                decoded.header.service_id,
-                                decoded.header.path_id,
-                                decoded.header.sequence,
+                                decoded.service_id,
+                                decoded.path_id,
+                                decoded.sequence,
                                 payload,
-                                frame_bytes.len(),
+                                frame_bytes_len,
                             );
                         } else {
                             if self.observe_user_payload_first_seen(
-                                decoded.header.service_id,
-                                decoded.header.path_id,
-                                decoded.header.sequence,
+                                decoded.service_id,
+                                decoded.path_id,
+                                decoded.sequence,
                                 payload.len(),
                             ) {
                                 outcomes.push(self.emit_remote_payload(
-                                    decoded.header.service_id,
-                                    decoded.header.path_id,
-                                    decoded.header.sequence,
+                                    decoded.service_id,
+                                    decoded.path_id,
+                                    decoded.sequence,
                                     &payload,
                                 )?);
                             }
@@ -446,24 +443,24 @@ impl CoreDataplane {
                 }
                 FrameKind::Batch => {
                     for (index, payload) in decoded.batch_payloads()?.iter().enumerate() {
-                        let sequence = decoded.header.sequence + index as u64;
-                        if is_reserved_service_id(decoded.header.service_id) {
+                        let sequence = decoded.sequence + index as u64;
+                        if is_reserved_service_id(decoded.service_id) {
                             self.observe_received_reserved_service_payload(
-                                decoded.header.service_id,
-                                decoded.header.path_id,
+                                decoded.service_id,
+                                decoded.path_id,
                                 sequence,
                                 payload.clone(),
-                                frame_bytes.len(),
+                                frame_bytes_len,
                             );
                         } else if self.observe_user_payload_first_seen(
-                            decoded.header.service_id,
-                            decoded.header.path_id,
+                            decoded.service_id,
+                            decoded.path_id,
                             sequence,
                             payload.len(),
                         ) {
                             outcomes.push(self.emit_remote_payload(
-                                decoded.header.service_id,
-                                decoded.header.path_id,
+                                decoded.service_id,
+                                decoded.path_id,
                                 sequence,
                                 payload,
                             )?);
@@ -472,11 +469,11 @@ impl CoreDataplane {
                 }
                 FrameKind::Control => {
                     self.observe_received_reserved_service_payload(
-                        decoded.header.service_id,
-                        decoded.header.path_id,
-                        decoded.header.sequence,
+                        decoded.service_id,
+                        decoded.path_id,
+                        decoded.sequence,
                         decoded.payload,
-                        frame_bytes.len(),
+                        frame_bytes_len,
                     );
                 }
             }
@@ -595,7 +592,7 @@ impl CoreDataplane {
             }
 
             let decoded = Frame::decode(&encoded)?;
-            match decoded.header.kind {
+            match decoded.kind {
                 FrameKind::Data => {
                     let Some(payload) = fragments.push_or_payload(&decoded)? else {
                         continue;
@@ -608,7 +605,7 @@ impl CoreDataplane {
                         target: self.services[service_index].config().target(),
                         payload_len: emitted,
                         sequence: plan.datagrams[0].sequence,
-                        path_id: decoded.header.path_id,
+                        path_id: decoded.path_id,
                         frame_count: plan.fragment_count,
                         batch_count: 0,
                         fragment_count: plan.fragment_count.saturating_sub(1),
@@ -631,7 +628,7 @@ impl CoreDataplane {
                             target: self.services[service_index].config().target(),
                             payload_len: emitted,
                             sequence: plan.datagrams[index].sequence,
-                            path_id: decoded.header.path_id,
+                            path_id: decoded.path_id,
                             frame_count: 1,
                             batch_count: payloads.len(),
                             fragment_count: 0,
@@ -673,7 +670,7 @@ impl CoreDataplane {
                 });
             }
             let expected_fanout = plan.datagrams.iter().any(|datagram| datagram.expected_fanout);
-            if self.try_send_path_frame(plan.path.path_id(), &encoded, expected_fanout)? {
+            if self.try_send_path_frame(plan.path.path_id(), &plan.frame, encoded.len(), expected_fanout)? {
                 for datagram in &plan.datagrams {
                     let outcome = ForwardOutcome {
                         service: service_name.to_owned(),
@@ -701,17 +698,18 @@ impl CoreDataplane {
     fn try_send_path_frame(
         &mut self,
         path_id: u16,
-        encoded: &[u8],
+        frame: &Frame,
+        frame_len: usize,
         expected_fanout: bool,
     ) -> Result<bool, DataplaneError> {
         let packet = self
             .transport_security
-            .protect_frame(encoded)
+            .protect_frame(frame)
             .map_err(DataplaneError::Crypto)?;
         match self.path_transports.send_frame(path_id, &packet) {
             Ok(_sent) => Ok(true),
             Err(UdpServiceError::SendFailed(_error)) => {
-                self.metrics.record_send_failed(path_id, encoded.len(), expected_fanout);
+                self.metrics.record_send_failed(path_id, frame_len, expected_fanout);
                 Ok(false)
             }
             Err(error) => Err(DataplaneError::from(error)),
@@ -870,20 +868,11 @@ impl CoreDataplane {
             }
 
             let frame = if batch_payloads.len() > 1 {
-                Frame::batch(
-                    0,
-                    service_id,
-                    current.path.path_id(),
-                    current.path.route_id(),
-                    current.sequence,
-                    &batch_payloads,
-                )?
+                Frame::batch(service_id, current.path.path_id(), current.sequence, &batch_payloads)?
             } else {
                 Frame::data(
-                    0,
                     service_id,
                     current.path.path_id(),
-                    current.path.route_id(),
                     current.sequence,
                     current.payload.clone(),
                 )?
@@ -983,7 +972,6 @@ pub struct ReservedServiceEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlTransmitPlan {
     pub path_id: u16,
-    pub route_id: u16,
     pub sequence: u64,
     pub frame_len: usize,
     pub payload_len: usize,

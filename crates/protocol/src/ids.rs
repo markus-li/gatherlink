@@ -56,9 +56,6 @@ pub const fn is_reserved_service_id(service_id: ServiceId) -> bool {
 /// Logical path/carrier identifier.
 pub type PathId = u16;
 
-/// Reserved route/transit identifier for future explicit overlay plans.
-pub type RouteId = u16;
-
 /// Global per-session/service packet sequence number.
 ///
 /// Data frames keep this sequence global so receivers can detect cross-path

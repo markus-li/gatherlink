@@ -1,0 +1,94 @@
+"""
+Debian compatibility backend for Gatherlink v1.
+
+Python owns platform integration: process management, operator commands, lab
+network setup, diagnostics collection, and filesystem layout. Keeping those
+calls behind this backend prevents OS-specific details from leaking into helper
+or runtime policy code while v1 intentionally supports Debian only.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+
+class CommandRunner(Protocol):
+    """Small command runner interface used by platform adapters and tests."""
+
+    def run(self, command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Run one command and return its completed process."""
+
+
+class SubprocessCommandRunner:
+    """Run commands through ``subprocess.run`` with captured text output."""
+
+    def run(self, command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Run one command."""
+        return subprocess.run(command, check=check, text=True, capture_output=True)
+
+
+@dataclass(frozen=True)
+class DebianCompatibilityBackend:
+    """Debian-only compatibility operations used by the Python control plane."""
+
+    runner: CommandRunner | None = None
+
+    def command_runner(self) -> CommandRunner:
+        """Return the configured command runner or the default subprocess runner."""
+        return self.runner or SubprocessCommandRunner()
+
+    def sudo_ip(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Run Debian ``ip`` through sudo for lab/setup operations."""
+        return self.command_runner().run(["sudo", "ip", *args], check=check)
+
+    def sudo_tc(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Run Debian ``tc`` through sudo for lab shaping operations."""
+        return self.command_runner().run(["sudo", "tc", *args], check=check)
+
+    def ip(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Run unprivileged Debian ``ip`` for read-only namespace/interface queries."""
+        return self.command_runner().run(["ip", *args], check=check)
+
+    def tc(self, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Run unprivileged Debian ``tc`` for read-only qdisc queries."""
+        return self.command_runner().run(["tc", *args], check=check)
+
+    def namespace_exists(self, namespace: str) -> bool:
+        """Return whether a Linux network namespace exists."""
+        result = self.ip(["netns", "list", namespace], check=False)
+        return result.returncode == 0 and namespace in result.stdout
+
+    def qdisc_stats(self, interface: str) -> subprocess.CompletedProcess[str]:
+        """Return ``tc -s qdisc`` output for one visible interface."""
+        return self.tc(["-s", "qdisc", "show", "dev", interface], check=False)
+
+    def read_interface_mtu(self, interface: str, *, sys_class_net: Path = Path("/sys/class/net")) -> int | None:
+        """Read an interface MTU from Debian sysfs when the interface is visible."""
+        try:
+            raw = (sys_class_net / interface / "mtu").read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+
+    def journalctl_command(self, unit: str, *, follow: bool = False, tail: int = 100) -> list[str]:
+        """Build the journal command used for systemd-owned service logs."""
+        command = ["journalctl", "-u", unit, "--no-pager", "-n", str(tail)]
+        if follow:
+            command.append("-f")
+        return command
+
+    def systemd_is_active(self, unit: str) -> bool:
+        """Return whether systemd reports a unit as active on this Debian host."""
+        result = self.command_runner().run(["systemctl", "is-active", "--quiet", unit], check=False)
+        return result.returncode == 0
+
+
+def default_debian_backend(*, runner: CommandRunner | None = None) -> DebianCompatibilityBackend:
+    """Return the Debian backend used by v1 control-plane code."""
+    return DebianCompatibilityBackend(runner=runner)

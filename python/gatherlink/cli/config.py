@@ -79,11 +79,15 @@ def show(
         bool,
         typer.Option("--runtime/--canonical", help="Print expanded runtime config instead of canonical user config."),
     ] = True,
+    as_json: Annotated[
+        bool,
+        typer.Option("--json", help="Emit machine-readable JSON output. This is the default format today."),
+    ] = False,
 ) -> None:
     """Validate and print a Gatherlink config file."""
     try:
         config = validate_config_file(path)
         output = expand_config(config) if runtime else config
     except ConfigValidationError as exc:
-        _render_error(exc, as_json=False)
+        _render_error(exc, as_json=as_json)
     typer.echo(json.dumps(output.export_dict(), indent=2, sort_keys=True))

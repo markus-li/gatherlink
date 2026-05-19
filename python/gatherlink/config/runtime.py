@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_serializer
 
 from gatherlink.config.models import (
     NodeRole,
@@ -40,7 +40,6 @@ class RuntimePathSchedulerConfig(GatherlinkBaseModel):
     """Compiled per-path scheduler state consumed by Rust."""
 
     path_id: int
-    route_id: int = 0
     enabled: bool = True
     state: PathSchedulerState = "active"
     weight: int = 1
@@ -96,6 +95,20 @@ class RuntimeSecurityConfig(GatherlinkBaseModel):
     receiver_index: int = 1
     send_key: bytes | None = None
     receive_key: bytes | None = None
+
+    @field_serializer("send_key", "receive_key", when_used="json")
+    def _serialize_secret_key(self, value: bytes | None) -> str | None:
+        """
+        Redact runtime key bytes in operator-facing JSON.
+
+        The runtime object must keep raw bytes for the Rust bridge, but `config
+        show --runtime --json` is introspection, not secret export. Showing the
+        byte length is enough to prove static material compiled successfully
+        without leaking the key.
+        """
+        if value is None:
+            return None
+        return f"[redacted:{len(value)} bytes]"
 
     @property
     def packet_overhead(self) -> int:

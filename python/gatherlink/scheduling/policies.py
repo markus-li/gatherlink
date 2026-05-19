@@ -47,7 +47,6 @@ class SchedulerPolicyBase(ABC):
         path = context.path
         return RuntimePathSchedulerConfig(
             path_id=context.index,
-            route_id=0,
             enabled=path.scheduler.enabled and context.state != "disabled",
             state=context.state,
             weight=self.weight(context),

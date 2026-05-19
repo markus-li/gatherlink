@@ -17,7 +17,7 @@ def test_all_example_configs_validate() -> None:
         config = validate_config_file(path)
         assert config.schema_version == 1
         assert config.helpers is not None
-        assert config.security.mode == "none"
+        assert config.security.mode in {"none", "static"}
 
 
 def test_supported_schema_versions_are_registered() -> None:
@@ -146,6 +146,15 @@ def test_config_show_cli_prints_runtime_json_by_default() -> None:
     assert '"schema_version": 1' in result.output
 
 
+def test_config_show_cli_accepts_explicit_json_runtime_flag() -> None:
+    result = CliRunner().invoke(app, ["config", "show", "--runtime", "--json", str(EXAMPLES / "dns-helper.json")])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["metadata"]["runtime_model"] == "RuntimeConfig"
+    assert payload["helpers"][0]["kind"] == "dns"
+
+
 def test_config_show_cli_can_print_canonical_json() -> None:
     result = CliRunner().invoke(app, ["config", "show", "--canonical", str(EXAMPLES / "dns-helper.json")])
 
@@ -198,6 +207,18 @@ def test_path_scheduler_hints_expand_into_runtime_scheduler() -> None:
     assert runtime.paths[0].transport_bind == "127.0.0.1:56001"
     assert runtime.paths[0].transport_remote == "127.0.0.1:56002"
     assert runtime.scheduler.paths[0] == runtime.paths[0].scheduler
+
+
+def test_server_config_can_preserve_explicit_path_transport() -> None:
+    from gatherlink.config import expand_config
+
+    config = validate_config_file(EXAMPLES / "windows-two-node-b.json")
+    runtime = expand_config(config)
+
+    assert config.role == "server"
+    assert [path.name for path in config.paths] == ["wsl-path-a", "wsl-path-b", "wsl-path-c"]
+    assert config.paths[0].transport_bind == "10.88.1.12:57001"
+    assert runtime.paths[0].transport_remote == "10.88.1.11:56001"
 
 
 def test_service_priority_expands_into_runtime_priority_value() -> None:

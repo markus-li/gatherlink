@@ -9,6 +9,7 @@ from pathlib import Path
 
 import typer
 
+from gatherlink.lab.helper_smoke import run_all_helper_smokes
 from gatherlink.lab.reports import write_three_path_scheduler_report
 from gatherlink.lab.runtime import (
     apply_lab_network_mode,
@@ -50,6 +51,17 @@ def plan(path: Path) -> None:
     scenario = load_lab_scenario_file(path)
     lab_plan = plan_lab_scenario(scenario)
     typer.echo(json.dumps(lab_plan.export_dict(), indent=2, sort_keys=True))
+
+
+@app.command("helpers-smoke")
+def helpers_smoke() -> None:
+    """Run local userland smoke scenarios for all active helpers."""
+    results = run_all_helper_smokes()
+    for result in results:
+        status = "ok" if result.ok else "failed"
+        typer.echo(f"{result.helper}: {status} {result.detail}")
+    if not all(result.ok for result in results):
+        raise typer.Exit(1)
 
 
 @app.command("up")

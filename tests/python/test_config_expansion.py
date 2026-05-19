@@ -49,3 +49,16 @@ def test_ipv6_service_expands_without_ipv4_assumptions() -> None:
     assert runtime.paths[0].gateway == "2001:db8::1"
     assert runtime.services[0].listen == "[::1]:55180"
     assert runtime.services[0].target == "[::1]:51820"
+
+
+def test_static_runtime_export_redacts_key_material() -> None:
+    config = validate_config_file(EXAMPLES / "windows-two-node-a.json")
+    runtime = expand_config(config)
+
+    exported = runtime.export_dict()
+
+    assert exported["security"]["mode"] == "static"
+    assert exported["security"]["send_key"] == "[redacted:32 bytes]"
+    assert exported["security"]["receive_key"] == "[redacted:32 bytes]"
+    assert runtime.security.send_key is not None
+    assert len(runtime.security.send_key) == 32

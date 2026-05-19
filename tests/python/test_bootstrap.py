@@ -12,7 +12,7 @@ from gatherlink.bootstrap.connector import (
 )
 from gatherlink.bootstrap.resolver import resolve_bootstrap
 from gatherlink.cli.main import app
-from gatherlink.secrets.identity import IdentityPublicRecord
+from gatherlink.secrets.identity import IdentityPublicRecord, IdentityRecord
 from gatherlink.security.keys import NodeIdentity
 from typer.testing import CliRunner
 
@@ -56,12 +56,12 @@ def test_resolver_prefers_static_and_deduplicates_cache(tmp_path) -> None:
     assert resolution.sources == ["static", "cache"]
 
 
-def test_probe_refuses_authenticated_mode_until_crypto_exists() -> None:
+def test_probe_requires_authenticated_proof_or_insecure_flag() -> None:
     result = probe_candidate(BootstrapEndpoint.parse("127.0.0.1:51820"))
 
     assert result.reachable is False
     assert result.authenticated is False
-    assert "authenticated bootstrap probes" in result.warning
+    assert "authenticated bootstrap requires" in result.warning
 
 
 def test_signed_bootstrap_challenge_verifies_expected_peer_and_endpoint() -> None:
@@ -79,6 +79,26 @@ def test_signed_bootstrap_challenge_verifies_expected_peer_and_endpoint() -> Non
     )
 
 
+def test_authenticated_probe_accepts_signed_peer_challenge() -> None:
+    peer = NodeIdentity.generate()
+    endpoint = BootstrapEndpoint.parse("127.0.0.1:51820")
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    challenge = create_bootstrap_challenge(endpoint, now=now, nonce=b"2" * 32)
+    proof = sign_bootstrap_challenge(peer, challenge)
+
+    result = probe_candidate(
+        endpoint,
+        expected_peer=IdentityPublicRecord.from_identity(peer),
+        proof=proof,
+        now=now,
+    )
+
+    assert result.reachable is True
+    assert result.authenticated is True
+    assert result.endpoint.last_verified_at == now
+    assert result.proof["domain"] == "GATHERLINK_BOOTSTRAP_CHALLENGE_V1"
+
+
 def test_bootstrap_cli_resolves_static_endpoint() -> None:
     result = CliRunner().invoke(app, ["bootstrap", "resolve", "peer-a", "--static", "127.0.0.1:51820"])
 
@@ -94,6 +114,51 @@ def test_bootstrap_cli_probe_requires_insecure_flag() -> None:
     assert result.exit_code == 1
     payload = json.loads(result.output)
     assert payload["reachable"] is False
+
+
+def test_bootstrap_cli_probe_accepts_signed_proof_and_updates_cache(tmp_path) -> None:
+    runner = CliRunner()
+    endpoint = "127.0.0.1:51820"
+    identity = NodeIdentity.generate()
+    identity_path = tmp_path / "peer.json"
+    challenge_path = tmp_path / "challenge.json"
+    proof_path = tmp_path / "proof.json"
+    cache_path = tmp_path / "bootstrap-cache.json"
+
+    identity_path.write_text(json.dumps(IdentityRecord.from_identity(identity).export_dict()), encoding="utf-8")
+
+    challenge = runner.invoke(app, ["bootstrap", "challenge", endpoint])
+    assert challenge.exit_code == 0
+    challenge_path.write_text(challenge.output, encoding="utf-8")
+
+    proof = runner.invoke(app, ["bootstrap", "proof", str(identity_path), str(challenge_path)])
+    assert proof.exit_code == 0
+    proof_path.write_text(proof.output, encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "bootstrap",
+            "probe",
+            endpoint,
+            "--peer-identity",
+            str(identity_path),
+            "--proof",
+            str(proof_path),
+            "--cache-peer",
+            "peer-a",
+            "--cache",
+            str(cache_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["reachable"] is True
+    assert payload["authenticated"] is True
+    cached = BootstrapCache.load(cache_path).get("peer-a")
+    assert cached[0].authority() == endpoint
+    assert cached[0].last_verified_at is not None
 
 
 def test_secrets_cli_creates_public_identity_and_static_session(tmp_path) -> None:

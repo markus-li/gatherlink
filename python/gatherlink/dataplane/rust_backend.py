@@ -100,7 +100,6 @@ def _path_dto(bindings: ModuleType | Any, path: Any) -> Any:
     return bindings.PathConfig(
         _bounded_u16(scheduler.path_id, field="path.scheduler.path_id"),
         scheduler.mtu,
-        _bounded_u16(scheduler.route_id, field="path.scheduler.route_id"),
         scheduler.state == "busy",
         scheduler.enabled,
         scheduler.state,

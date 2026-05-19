@@ -1,20 +1,50 @@
-"""
-Relay discovery and candidate relay selection.
-
-This module is part of the optional Gatherlink helper/control-plane layer.
-
-Helper modules may provide policy, topology planning, user workflow support, connectivity workflow support, or configuration generation. They must not move packet hot-path behavior out of the Rust dataplane and must not turn Gatherlink into a firewall/router/proxy-zoo product.
-"""
+"""Relay discovery and candidate relay selection."""
 
 from __future__ import annotations
 
-from gatherlink.shared.logging import get_logger
+import json
+from collections.abc import Iterable
+from pathlib import Path
 
-logger = get_logger(__name__)
+from gatherlink.helpers.relay_fabric.health import EndpointProbe, evaluate_relay_health
+from gatherlink.helpers.relay_fabric.models import RelayCandidate, RelayDiscoveryReport
 
 
-# File-specific TODO:
-# - Implement python/gatherlink/helpers/relay_fabric/discovery.py.
-# - Preserve explicit/generated configuration philosophy.
-# - Keep helper failures isolated from the core transport.
-# - Add unit tests and integration scenarios before marking stable.
+def load_relay_candidates(path: Path) -> list[RelayCandidate]:
+    """Load relay candidates from a local JSON metadata file."""
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    records = payload if isinstance(payload, list) else payload.get("relays", [])
+    return [RelayCandidate.model_validate(item) for item in records]
+
+
+def discover_relays(
+    configured: Iterable[RelayCandidate],
+    *,
+    required_protocol_version: str | None = None,
+    endpoint_probe: EndpointProbe | None = None,
+) -> RelayDiscoveryReport:
+    """Build a relay discovery report from configured/signed candidates."""
+    candidates = list(configured)
+    health = [
+        evaluate_relay_health(
+            candidate,
+            required_protocol_version=required_protocol_version,
+            endpoint_probe=endpoint_probe,
+        )
+        for candidate in candidates
+    ]
+    return RelayDiscoveryReport(candidates=candidates, health=health)
+
+
+def discover_relays_from_file(
+    path: Path,
+    *,
+    required_protocol_version: str | None = None,
+    endpoint_probe: EndpointProbe | None = None,
+) -> RelayDiscoveryReport:
+    """Load and evaluate relays from one local JSON metadata file."""
+    return discover_relays(
+        load_relay_candidates(path),
+        required_protocol_version=required_protocol_version,
+        endpoint_probe=endpoint_probe,
+    )

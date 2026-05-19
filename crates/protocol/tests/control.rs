@@ -47,12 +47,12 @@ fn control_payload_fits_inside_control_frame() {
         PathAssignment::new(u64::MAX - 2, 3, 42).unwrap(),
     )])
     .unwrap();
-    let frame = Frame::control(1, 2, 42, 0, 99, control.encode().unwrap()).unwrap();
+    let frame = Frame::control(2, 42, 99, control.encode().unwrap()).unwrap();
 
     let decoded_frame = Frame::decode(&frame.encode().unwrap()).unwrap();
     let decoded_control = ControlPayload::decode(&decoded_frame.payload).unwrap();
 
-    assert_eq!(decoded_frame.header.kind, FrameKind::Control);
+    assert_eq!(decoded_frame.kind, FrameKind::Control);
     assert_eq!(decoded_control, control);
 }
 

@@ -21,6 +21,7 @@ from gatherlink.config.errors import ConfigValidationError
 from gatherlink.config.validation import validate_config_file
 from gatherlink.control import MONITOR_CONTROL_REQUEST_REFRESH_SECONDS, MONITOR_CONTROL_REQUEST_TTL_SECONDS
 from gatherlink.lab.scenarios import load_lab_scenario_file
+from gatherlink.platform.debian import default_debian_backend
 from gatherlink.runtime.services import (
     ServiceIpcError,
     ServiceRecord,
@@ -267,6 +268,10 @@ def _aggregate_rows_for_service(
                 "rx_bytes": 0,
                 "rx_speed_bytes_per_second": "not_reported",
                 "missed": "not_reported",
+                "expected_duplicate_packets": "not_reported",
+                "duplicate_packets": "not_reported",
+                "send_failed_packets": "not_reported",
+                "fanout_send_failed_packets": "not_reported",
                 "reordered": "not_reported",
                 "reorder_needed": "not_reported",
                 "row_type": "service",
@@ -294,6 +299,10 @@ def _aggregate_rows_for_service(
                 "rx_bytes": 0,
                 "rx_speed_bytes_per_second": "not_reported",
                 "missed": "not_reported",
+                "expected_duplicate_packets": "not_reported",
+                "duplicate_packets": "not_reported",
+                "send_failed_packets": "not_reported",
+                "fanout_send_failed_packets": "not_reported",
                 "reordered": "not_reported",
                 "reorder_needed": "not_reported",
                 "row_type": "service",
@@ -697,54 +706,6 @@ def _status_context(status: dict[str, object]) -> str:
     return ""
 
 
-def _control_metadata_context(control_metadata: object) -> str:
-    if not isinstance(control_metadata, dict):
-        return "not_reported"
-    sent = control_metadata.get("sent")
-    received = control_metadata.get("received")
-    path_metadata_count = int(control_metadata.get("path_metadata_count", 0) or 0)
-    service_metadata_count = int(control_metadata.get("service_metadata_count", 0) or 0)
-    service_scheduler_policy_count = int(control_metadata.get("service_scheduler_policy_count", 0) or 0)
-    service_endpoint_mismatch_count = int(control_metadata.get("service_endpoint_mismatch_count", 0) or 0)
-    service_disable_count = int(control_metadata.get("service_disable_count", 0) or 0)
-    path_latency_count = int(control_metadata.get("path_latency_count", 0) or 0)
-    path_control_count = int(control_metadata.get("path_control_count", 0) or 0)
-    parts = []
-    if isinstance(sent, dict) and int(sent.get("frames", 0) or 0) > 0:
-        parts.append(
-            f"tx={sent.get('frames', 0)}/{_format_bytes(int(sent.get('bytes', 0) or 0), human_units=True, decimal_units=False)}"
-        )
-    if isinstance(received, dict) and int(received.get("frames", 0) or 0) > 0:
-        parts.append(
-            f"rx={received.get('frames', 0)}/{_format_bytes(int(received.get('bytes', 0) or 0), human_units=True, decimal_units=False)}"
-        )
-    clock = _internal_clock_context(control_metadata.get("internal_clock"))
-    if clock:
-        parts.append(clock)
-    if path_metadata_count:
-        parts.append(f"paths={path_metadata_count}")
-    if service_metadata_count:
-        parts.append(f"svc={service_metadata_count}")
-    if service_scheduler_policy_count:
-        parts.append(f"pol={service_scheduler_policy_count}")
-    if service_endpoint_mismatch_count:
-        parts.append(f"svc_err={service_endpoint_mismatch_count}")
-    if service_disable_count:
-        parts.append(f"svc_off={service_disable_count}")
-    if path_control_count:
-        parts.append(f"pctrl={path_control_count}")
-    if path_latency_count:
-        parts.append(f"lat={path_latency_count}")
-    last_at = None
-    if isinstance(received, dict):
-        last_at = received.get("last_at")
-    if not last_at and isinstance(sent, dict):
-        last_at = sent.get("last_at")
-    if isinstance(last_at, str) and last_at:
-        parts.append(f"last={_short_time(last_at)}")
-    return " ".join(parts) if parts else "not_reported"
-
-
 def _control_last_time(control_metadata: dict[str, object]) -> str:
     sent = control_metadata.get("sent")
     received = control_metadata.get("received")
@@ -1090,7 +1051,6 @@ def _aggregate_legend() -> list[str]:
         "  svc      number of service-id/name mappings learned through control metadata; endpoints stay in config",
         "  pol      number of peer service scheduler policies learned for Python-owned receive expectations",
         "  err      endpoint assertion mismatches that stopped traffic for a service",
-        "  svc_err  endpoint assertion mismatches that stopped traffic for a service",
         "  off      peer service-disable assertions currently advertised through control metadata",
         "  svc_off  compact context summary of peer-disabled services",
         "  cap      directional path capacity metadata; tx/rx are from the row's local point of view",
@@ -1133,9 +1093,7 @@ def _print_systemd_log(unit: str | None, *, follow: bool, tail: int) -> None:
     if not unit:
         typer.echo("systemd service has no unit name recorded", err=True)
         raise typer.Exit(1)
-    command = ["journalctl", "-u", unit, "--no-pager", "-n", str(tail)]
-    if follow:
-        command.append("-f")
+    command = default_debian_backend().journalctl_command(unit, follow=follow, tail=tail)
     try:
         subprocess.run(command, check=False)
     except FileNotFoundError as exc:

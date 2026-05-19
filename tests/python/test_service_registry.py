@@ -330,6 +330,28 @@ def test_services_cli_monitor_can_render_multiple_aggregate_rows(tmp_path: Path,
     assert "tx=3.0Mb rx=1.5Mb" in result.output
 
 
+def test_services_cli_monitor_handles_stopped_records_with_new_counter_columns(
+    tmp_path: Path, monkeypatch
+) -> None:
+    registry_path = tmp_path / "services"
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(registry_path))
+    ServiceRegistry(registry_path).register(
+        ServiceRecord(
+            name="lab.stopped",
+            kind="lab",
+            pid=999_999,
+            log_file=tmp_path / "stopped.log",
+        )
+    )
+
+    result = CliRunner().invoke(app, ["services", "monitor", "lab.stopped", "--once"])
+
+    assert result.exit_code == 0
+    assert "lab.stopped" in result.output
+    assert "xdup" in result.output
+    assert "ffail" in result.output
+
+
 def test_service_monitor_requests_temporary_control_cadence(tmp_path: Path, monkeypatch) -> None:
     from gatherlink.cli.services import _request_monitor_control_cadence
     from gatherlink.control import MONITOR_CONTROL_REQUEST_TTL_SECONDS
@@ -391,6 +413,10 @@ def test_services_cli_close_uses_service_ipc_and_clears_pid(tmp_path: Path, monk
 
 
 def test_services_cli_lists_systemd_records_without_process_ownership(tmp_path: Path, monkeypatch) -> None:
+    class FakeBackend:
+        def systemd_is_active(self, unit: str) -> bool:
+            return unit == "gatherlink.service"
+
     registry_path = tmp_path / "services"
     ServiceRegistry(registry_path).register(
         ServiceRecord(
@@ -403,12 +429,14 @@ def test_services_cli_lists_systemd_records_without_process_ownership(tmp_path: 
         )
     )
     monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(registry_path))
+    monkeypatch.setattr("gatherlink.runtime.services.default_debian_backend", lambda: FakeBackend())
 
     list_result = CliRunner().invoke(app, ["services", "list"])
     close_result = CliRunner().invoke(app, ["services", "close", "core.gatherlink"])
 
     assert list_result.exit_code == 0
     assert "manager=systemd" in list_result.output
+    assert "state=systemd:active" in list_result.output
     assert "systemd_unit=gatherlink.service" in list_result.output
     assert "detached=False" in list_result.output
     assert close_result.exit_code == 1

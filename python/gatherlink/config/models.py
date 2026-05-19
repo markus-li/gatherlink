@@ -138,6 +138,11 @@ def _security_or_default(value: dict | None) -> dict:
     return value or {}
 
 
+def _paths_or_empty(value: list[dict] | None) -> list[dict]:
+    """Preserve server path transports when provided, otherwise use no paths."""
+    return value or []
+
+
 class WireGuardHelperConfig(GatherlinkBaseModel):
     """Optional WireGuard helper configuration."""
 
@@ -196,7 +201,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "role": "role",
             "peer": FieldTransform(None),
             "security": FieldTransform(_security_or_default, source="security"),
-            "paths": FieldTransform([]),
+            "paths": FieldTransform(_paths_or_empty, source="paths"),
             "services": "services",
             "helpers": FieldTransform({}),
         },
@@ -216,7 +221,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "role": "role",
             "peer": FieldTransform(None),
             "security": FieldTransform(_security_or_default, source="security"),
-            "paths": FieldTransform([]),
+            "paths": FieldTransform(_paths_or_empty, source="paths"),
             "services": "services",
             "helpers": FieldTransform({}),
         },
@@ -226,7 +231,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "role": FieldTransform("client"),
             "peer": FieldTransform(None),
             "security": FieldTransform(_security_or_default, source="security"),
-            "paths": FieldTransform([]),
+            "paths": FieldTransform(_paths_or_empty, source="paths"),
             "services": FieldTransform([]),
             "helpers": "helpers",
         },

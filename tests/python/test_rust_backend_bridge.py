@@ -32,7 +32,6 @@ class FakeUdpServiceConfig:
 class FakePathConfig:
     path_id: int
     mtu: int
-    route_id: int
     busy: bool
     enabled: bool
     state: str
@@ -128,7 +127,6 @@ def test_runtime_config_converts_to_rust_binding_dtos() -> None:
         FakePathConfig(
             path_id=0,
             mtu=1300,
-            route_id=0,
             busy=False,
             enabled=True,
             state="active",

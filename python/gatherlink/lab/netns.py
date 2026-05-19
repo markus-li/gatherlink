@@ -11,11 +11,9 @@ from __future__ import annotations
 
 import ipaddress
 import json
-import subprocess
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from gatherlink.lab.scenarios import (
     LabNetworkModeConfig,
@@ -25,20 +23,11 @@ from gatherlink.lab.scenarios import (
     LabShapeProfileConfig,
     LabShapeSide,
 )
+from gatherlink.platform.debian import CommandRunner, SubprocessCommandRunner, default_debian_backend
 
 
-class CommandRunner(Protocol):
-    """Small command runner interface used by lab setup tests."""
-
-    def run(self, command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
-        """Run one command."""
-
-
-class SubprocessRunner:
+class SubprocessRunner(SubprocessCommandRunner):
     """Run lab setup commands through subprocess."""
-
-    def run(self, command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(command, check=check, text=True, capture_output=True)
 
 
 @dataclass(frozen=True)
@@ -301,7 +290,7 @@ def inspect_lab_interfaces(config: LabScenarioConfig, *, runner: CommandRunner |
 
 def namespace_exists(namespace: str) -> bool:
     """Return whether a Linux network namespace exists."""
-    return subprocess.run(["ip", "netns", "list", namespace], check=False, capture_output=True).returncode == 0
+    return default_debian_backend().namespace_exists(namespace)
 
 
 def client_namespace(config: LabScenarioConfig) -> str:
@@ -336,15 +325,11 @@ def path_handle(config: LabScenarioConfig, path: LabPathConfig) -> PathHandle:
 def lab_qdisc_stats(config: LabScenarioConfig, *, side: LabShapeSide) -> dict[str, dict[str, int]]:
     """Read live `tc -s qdisc` counters for each lab path in the current namespace."""
     stats: dict[str, dict[str, int]] = {}
+    backend = default_debian_backend()
     for path in config.paths:
         handle = path_handle(config, path)
         interface = handle.client_interface if side == "local" else handle.server_interface
-        result = subprocess.run(
-            ["tc", "-s", "qdisc", "show", "dev", interface],
-            check=False,
-            text=True,
-            capture_output=True,
-        )
+        result = backend.qdisc_stats(interface)
         if result.returncode == 0:
             stats[path.name] = parse_tc_qdisc_stats(result.stdout)
     return stats
@@ -406,14 +391,14 @@ def bandwidth_to_bps(value: str) -> float:
     return float(normalized)
 
 
-def sudo_ip(args: list[str], *, runner: CommandRunner, check: bool = True) -> subprocess.CompletedProcess[str]:
+def sudo_ip(args: list[str], *, runner: CommandRunner, check: bool = True):
     """Run `ip` with sudo for lab setup operations."""
-    return runner.run(["sudo", "ip", *args], check=check)
+    return default_debian_backend(runner=runner).sudo_ip(args, check=check)
 
 
-def sudo_tc(args: list[str], *, runner: CommandRunner, check: bool = True) -> subprocess.CompletedProcess[str]:
+def sudo_tc(args: list[str], *, runner: CommandRunner, check: bool = True):
     """Run `tc` with sudo for lab shaping operations."""
-    return runner.run(["sudo", "tc", *args], check=check)
+    return default_debian_backend(runner=runner).sudo_tc(args, check=check)
 
 
 @dataclass(frozen=True)

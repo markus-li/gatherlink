@@ -215,6 +215,9 @@ dependencies = [
 [[package]]
 name = "gatherlink-time-helper"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "generic-array"

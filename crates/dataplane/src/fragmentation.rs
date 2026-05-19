@@ -26,10 +26,8 @@ pub(crate) fn fragment_datagram(datagram: &PlannedDatagram) -> Result<Vec<FrameP
     for (index, chunk) in datagram.payload.chunks(max_fragment_payload).enumerate() {
         let fragment = FragmentInfo::new(datagram_id, index as u16, fragment_count as u16, datagram.payload.len())?;
         let frame = Frame::fragment(
-            0,
             datagram.service_id,
             datagram.path.path_id(),
-            datagram.path.route_id(),
             datagram.sequence,
             fragment,
             chunk.to_vec(),

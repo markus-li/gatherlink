@@ -132,10 +132,9 @@ def _runtime_scheduler_paths(
             compiled.model_copy(
                 update={
                     # The expansion layer has already selected the compact
-                    # runtime path id and route id. Preserve them here so a hot
+                    # runtime path id. Preserve it here so a hot
                     # scheduler reapply cannot accidentally renumber live paths.
                     "path_id": current.path_id,
-                    "route_id": current.route_id,
                     "mtu": mtu,
                 }
             )

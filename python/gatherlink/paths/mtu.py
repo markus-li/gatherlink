@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from gatherlink.platform.debian import default_debian_backend
+
 DEFAULT_SAFE_FRAME_MTU = 1200
 MIN_GATHERLINK_FRAME_MTU = 64
 V1_BASE_HEADER_LEN = 14
@@ -52,14 +54,7 @@ class PathMtuObservation:
 
 def detect_interface_mtu(interface: str, *, sys_class_net: Path = Path("/sys/class/net")) -> int | None:
     """Read a Linux interface MTU from sysfs when the interface is visible in this namespace."""
-    try:
-        raw = (sys_class_net / interface / "mtu").read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    try:
-        return int(raw)
-    except ValueError:
-        return None
+    return default_debian_backend().read_interface_mtu(interface, sys_class_net=sys_class_net)
 
 
 def observe_path_mtu(
