@@ -57,6 +57,8 @@ def _plan_service_steps(config: RuntimeConfig, *, first_order: int) -> list[Runt
                     "listen": service.listen,
                     "target": service.target,
                     "protocol": service.protocol,
+                    "priority": service.priority,
+                    "priority_value": service.priority_value,
                 },
             )
         )
@@ -92,6 +94,7 @@ def build_runtime_plan(config: RuntimeConfig) -> RuntimePlan:
             mode="core-dataplane",
             details={
                 "paths": [path.export_dict() for path in config.paths],
+                "scheduler": config.scheduler.export_dict(),
                 "services": [service.name for service in config.services],
             },
         )

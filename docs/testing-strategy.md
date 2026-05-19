@@ -10,11 +10,19 @@ Use pure Python unit tests, Rust unit tests, protocol encode/decode tests,
 integration tests with network namespaces, netem loss/jitter/reorder tests,
 bootstrap/DNS tests, and long-running soak tests.
 
-## Rust unit tests
+## Rust tests
 
 Cover frame encode/decode, replay windows, dedupe, reorder buffer, MTU
 eligibility, weighted round-robin distribution, queue overflow, and invalid
 packet silent rejection.
+
+Rust production modules should not carry inline `#[cfg(test)] mod tests` blocks.
+Put Rust behavior tests in each crate's `tests/` directory instead, even when
+the tests exercise one module heavily. This keeps the Python/Rust boundary,
+packet executor, protocol encoder, and PyO3 bridge files readable as production
+code first. If a future test genuinely needs private internals, prefer exposing a
+small crate-private test helper module rather than growing production files with
+large embedded tests.
 
 ## Python unit tests
 

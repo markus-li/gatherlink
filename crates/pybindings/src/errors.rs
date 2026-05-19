@@ -12,9 +12,12 @@ pub fn udp_error_to_py(error: UdpServiceError) -> PyErr {
         | UdpServiceError::MissingListenAddress
         | UdpServiceError::DuplicateServiceName(_)
         | UdpServiceError::DuplicateListenAddress(_)
-        | UdpServiceError::IncompatibleListenReapply { .. } => {
-            PyValueError::new_err(error.to_string())
-        }
+        | UdpServiceError::DuplicatePathId(_)
+        | UdpServiceError::MissingPath
+        | UdpServiceError::PathMtuTooSmall { .. }
+        | UdpServiceError::PathWeightTooSmall { .. }
+        | UdpServiceError::ServicePriorityTooSmall { .. }
+        | UdpServiceError::IncompatibleListenReapply { .. } => PyValueError::new_err(error.to_string()),
         UdpServiceError::BindFailed(_)
         | UdpServiceError::ConfigureSocketFailed(_)
         | UdpServiceError::CloneFailed(_)
@@ -27,10 +30,16 @@ pub fn udp_error_to_py(error: UdpServiceError) -> PyErr {
 /// Convert dataplane execution errors into Python exceptions.
 pub fn dataplane_error_to_py(error: DataplaneError) -> PyErr {
     match error {
-        DataplaneError::UnknownService(_) => PyValueError::new_err(error.to_string()),
-        DataplaneError::UdpService(error) => udp_error_to_py(error),
-        DataplaneError::Protocol(_) | DataplaneError::UnexpectedFrameKind => {
-            PyRuntimeError::new_err(error.to_string())
+        DataplaneError::UnknownService(_) | DataplaneError::NoDatagramForwarded => {
+            PyValueError::new_err(error.to_string())
         }
+        DataplaneError::UdpService(error) => udp_error_to_py(error),
+        DataplaneError::Protocol(_)
+        | DataplaneError::NoPathAvailable
+        | DataplaneError::UnexpectedFrameKind
+        | DataplaneError::BatchDatagramMismatch
+        | DataplaneError::InvalidFragmentPlan
+        | DataplaneError::TooManyFragments(_)
+        | DataplaneError::FrameExceedsPathMtu { .. } => PyRuntimeError::new_err(error.to_string()),
     }
 }

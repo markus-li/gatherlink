@@ -178,7 +178,9 @@ def test_services_cli_attach_can_render_aggregate_once(tmp_path: Path, monkeypat
     assert "1.6Kibit/s" in result.output
     assert "legend: - means" in result.output
     assert "speed bit/s" in result.output
-    assert "press b to toggle" in result.output
+    assert "binary" in result.output
+    assert "b toggles" in result.output
+    assert "m toggles" in result.output
 
 
 def test_services_cli_monitor_can_render_multiple_aggregate_rows(tmp_path: Path, monkeypatch) -> None:
@@ -203,7 +205,16 @@ def test_services_cli_monitor_can_render_multiple_aggregate_rows(tmp_path: Path,
     )
     forwarder_server = ServiceIpcServer(
         forwarder,
-        status=lambda: {"packets": 2, "bytes": 10, "running": True, "target": "127.0.0.1:51820"},
+        status=lambda: {
+            "packets": 2,
+            "bytes": 10,
+            "running": True,
+            "target": "127.0.0.1:51820",
+            "path_stats": {
+                "path-a": {"packets": 1, "bytes": 5},
+                "path-b": {"packets": 1, "bytes": 5},
+            },
+        },
         stop=lambda: None,
     )
     sink_server = ServiceIpcServer(
@@ -233,6 +244,8 @@ def test_services_cli_monitor_can_render_multiple_aggregate_rows(tmp_path: Path,
     assert result.exit_code == 0
     assert "Gatherlink service monitor" in result.output
     assert "lab.tx" in result.output
+    assert "path:path-a" in result.output
+    assert "path:path-b" in result.output
     assert "lab.rx" in result.output
     assert "4.0KiB" in result.output
     assert ("hello" * 20) not in result.output

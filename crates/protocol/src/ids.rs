@@ -11,10 +11,10 @@ pub type SessionId = u128;
 pub type ServiceId = u64;
 
 /// Logical path/carrier identifier.
-pub type PathId = u64;
+pub type PathId = u16;
 
 /// Reserved route/transit identifier for future explicit overlay plans.
-pub type RouteId = u64;
+pub type RouteId = u16;
 
 /// Per-session or per-service sequence number, depending on future policy.
 pub type SequenceNumber = u64;

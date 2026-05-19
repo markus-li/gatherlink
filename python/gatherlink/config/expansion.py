@@ -13,10 +13,12 @@ from gatherlink.config.runtime import (
     RuntimeConfig,
     RuntimeDnsHelperConfig,
     RuntimePathConfig,
+    RuntimePathSchedulerConfig,
     RuntimeSecurityConfig,
     RuntimeServiceConfig,
     RuntimeWireGuardHelperConfig,
 )
+from gatherlink.scheduling.compiler import compile_scheduler, compile_service_priority
 
 
 def _service_by_name(services: list[ServiceConfig]) -> dict[str, ServiceConfig]:
@@ -24,7 +26,10 @@ def _service_by_name(services: list[ServiceConfig]) -> dict[str, ServiceConfig]:
     return {service.name: service for service in services}
 
 
-def _expand_paths(config: GatherlinkConfig) -> list[RuntimePathConfig]:
+def _expand_paths(
+    config: GatherlinkConfig,
+    scheduler_paths: list[RuntimePathSchedulerConfig],
+) -> list[RuntimePathConfig]:
     """Copy declared physical paths into the runtime contract."""
     # TODO: Replace this direct copy with discovered interface facts once the
     # physical path validator knows how to inspect Debian network state. Keeping
@@ -35,8 +40,9 @@ def _expand_paths(config: GatherlinkConfig) -> list[RuntimePathConfig]:
             interface=path.interface,
             source_ip=path.source_ip,
             gateway=path.gateway,
+            scheduler=scheduler_paths[index],
         )
-        for path in config.paths
+        for index, path in enumerate(config.paths)
     ]
 
 
@@ -47,6 +53,8 @@ def _expand_services(config: GatherlinkConfig) -> list[RuntimeServiceConfig]:
             name=service.name,
             target=service.target,
             listen=service.listen,
+            priority=service.priority,
+            priority_value=compile_service_priority(service.priority),
         )
         for service in config.services
     ]
@@ -82,14 +90,16 @@ def _expand_helpers(config: GatherlinkConfig) -> list[RuntimeWireGuardHelperConf
 
 def expand_config(config: GatherlinkConfig) -> RuntimeConfig:
     """Return the explicit runtime config for a validated user config."""
+    scheduler = compile_scheduler(config)
     return RuntimeConfig(
         schema_version=config.schema_version,
         node=config.node,
         role=config.role,
         peer=config.peer,
         security=RuntimeSecurityConfig(mode=config.security.mode),
-        paths=_expand_paths(config),
+        paths=_expand_paths(config, scheduler.paths),
         services=_expand_services(config),
+        scheduler=scheduler,
         helpers=_expand_helpers(config),
         metadata={
             # This metadata helps downstream commands distinguish runtime output

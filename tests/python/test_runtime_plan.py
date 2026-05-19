@@ -28,6 +28,8 @@ def test_runtime_plan_binds_udp_listener_for_core_service() -> None:
     assert service_step.action == "bind_udp_listener"
     assert service_step.details["listen"] == "127.0.0.1:55180"
     assert service_step.details["target"] == "127.0.0.1:51820"
+    assert service_step.details["priority"] == "normal"
+    assert service_step.details["priority_value"] == 100
 
 
 def test_runtime_plan_does_not_start_helpers_or_tunnels() -> None:
@@ -48,6 +50,7 @@ def test_runtime_plan_preserves_ipv6_udp_endpoints() -> None:
     assert service_step.details["listen"] == "[::1]:55180"
     assert service_step.details["target"] == "[::1]:51820"
     assert plan.steps[-1].details["paths"][0]["source_ip"] == "2001:db8::10"
+    assert plan.steps[-1].details["scheduler"]["mode"] == "round_robin"
 
 
 def test_runtime_plan_includes_plaintext_warning_details() -> None:

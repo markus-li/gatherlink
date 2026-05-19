@@ -183,20 +183,23 @@ def _print_aggregate(services: list[ServiceRecord], *, interval: float, once: bo
     previous: dict[str, tuple[float, int]] = {}
     human_units = True
     speed_bits = True
+    decimal_units = False
     with _KeyReader() as keys:
         while True:
             rows = []
             now = time.monotonic()
             for service in services:
-                row = _aggregate_row(service, previous=previous.get(service.name), now=now)
-                rows.append(row)
-                previous[service.name] = (now, row["bytes"])
+                service_rows = _aggregate_rows_for_service(service, previous=previous, now=now)
+                rows.extend(service_rows)
+                for row in service_rows:
+                    previous[str(row["row_key"])] = (now, row["bytes"])
 
             output = _render_aggregate_rows(
                 rows,
                 refreshed_at=datetime.now().strftime("%H:%M:%S"),
                 human_units=human_units,
                 speed_bits=speed_bits,
+                decimal_units=decimal_units,
                 interactive=keys.enabled and not once,
             )
             if once:
@@ -212,41 +215,101 @@ def _print_aggregate(services: list[ServiceRecord], *, interval: float, once: bo
                 if key == "b":
                     speed_bits = not speed_bits
                     break
+                if key == "m":
+                    decimal_units = not decimal_units
+                    break
                 if key == "q":
                     typer.echo()
                     return
                 time.sleep(0.05)
 
 
-def _aggregate_row(service: ServiceRecord, *, previous: tuple[float, int] | None, now: float) -> dict[str, object]:
+def _aggregate_rows_for_service(
+    service: ServiceRecord,
+    *,
+    previous: dict[str, tuple[float, int]],
+    now: float,
+) -> list[dict[str, object]]:
     if service.manager == "systemd":
-        return {
-            "service": service.name,
-            "state": "systemd",
-            "packets": 0,
-            "bytes": 0,
-            "speed_bytes_per_second": "not_reported",
-            "missed": "not_reported",
-            "reordered": "not_reported",
-            "reorder_needed": "not_reported",
-            "extra": service.systemd_unit or "",
-        }
+        return [
+            {
+                "row_key": service.name,
+                "service": service.name,
+                "state": "systemd",
+                "packets": 0,
+                "bytes": 0,
+                "speed_bytes_per_second": "not_reported",
+                "missed": "not_reported",
+                "reordered": "not_reported",
+                "reorder_needed": "not_reported",
+                "extra": service.systemd_unit or "",
+            }
+        ]
     try:
         status = request_service(service, "status")["status"]
     except ServiceIpcError as exc:
-        return {
-            "service": service.name,
-            "state": "ipc_error",
-            "packets": 0,
-            "bytes": 0,
-            "speed_bytes_per_second": "not_reported",
-            "missed": "not_reported",
-            "reordered": "not_reported",
-            "reorder_needed": "not_reported",
-            "extra": str(exc),
-        }
+        return [
+            {
+                "row_key": service.name,
+                "service": service.name,
+                "state": "ipc_error",
+                "packets": 0,
+                "bytes": 0,
+                "speed_bytes_per_second": "not_reported",
+                "missed": "not_reported",
+                "reordered": "not_reported",
+                "reorder_needed": "not_reported",
+                "extra": str(exc),
+            }
+        ]
 
     total_bytes = int(status.get("bytes", 0))
+    service_row = _row_from_status(
+        row_key=service.name,
+        name=service.name,
+        state="running" if status.get("running", service.is_running()) else "stopped",
+        packets=int(status.get("packets", 0)),
+        total_bytes=total_bytes,
+        status=status,
+        previous=previous.get(service.name),
+        now=now,
+        extra=_status_context(status),
+    )
+    rows = [service_row]
+    path_stats = status.get("path_stats", {})
+    if isinstance(path_stats, dict):
+        for path_name, path_status in path_stats.items():
+            if not isinstance(path_status, dict):
+                continue
+            path_key = f"{service.name}::{path_name}"
+            rows.append(
+                _row_from_status(
+                    row_key=path_key,
+                    name=f"  path:{path_name}",
+                    state="path",
+                    packets=int(path_status.get("packets", 0)),
+                    total_bytes=int(path_status.get("bytes", 0)),
+                    status=path_status,
+                    previous=previous.get(path_key),
+                    now=now,
+                    extra=f"parent={service.name}",
+                )
+            )
+    return rows
+
+
+def _row_from_status(
+    *,
+    row_key: str,
+    name: str,
+    state: str,
+    packets: int,
+    total_bytes: int,
+    status: dict[str, object],
+    previous: tuple[float, int] | None,
+    now: float,
+    extra: str,
+) -> dict[str, object]:
     if "current_speed_bps" in status:
         speed_bytes_per_second: int | str = int(status["current_speed_bps"])
     elif previous is None:
@@ -254,18 +317,18 @@ def _aggregate_row(service: ServiceRecord, *, previous: tuple[float, int] | None
     else:
         elapsed = max(now - previous[0], 0.001)
         speed_bytes_per_second = int((total_bytes - previous[1]) / elapsed)
-
     # TODO(rust-stats): Populate these from Rust dataplane status once the Rust side reports loss and reorder metrics.
     return {
-        "service": service.name,
-        "state": "running" if status.get("running", service.is_running()) else "stopped",
-        "packets": int(status.get("packets", 0)),
+        "row_key": row_key,
+        "service": name,
+        "state": state,
+        "packets": packets,
         "bytes": total_bytes,
         "speed_bytes_per_second": speed_bytes_per_second,
         "missed": status.get("missed_packets", "not_reported"),
         "reordered": status.get("reordered_packets", "not_reported"),
         "reorder_needed": status.get("packets_needing_reorder", "not_reported"),
-        "extra": _status_context(status),
+        "extra": extra,
     }
 
 
@@ -275,6 +338,7 @@ def _render_aggregate_rows(
     refreshed_at: str,
     human_units: bool,
     speed_bits: bool,
+    decimal_units: bool,
     interactive: bool,
 ) -> str:
     headers = ["service", "state", "pkts", "bytes", "speed", "miss", "ooo", "reord", "context"]
@@ -283,8 +347,13 @@ def _render_aggregate_rows(
             str(row["service"]),
             str(row["state"]),
             str(row["packets"]),
-            _format_bytes(int(row["bytes"]), human_units=human_units),
-            _format_rate(row["speed_bytes_per_second"], human_units=human_units, speed_bits=speed_bits),
+            _format_bytes(int(row["bytes"]), human_units=human_units, decimal_units=decimal_units),
+            _format_rate(
+                row["speed_bytes_per_second"],
+                human_units=human_units,
+                speed_bits=speed_bits,
+                decimal_units=decimal_units,
+            ),
             _compact_counter(row["missed"]),
             _compact_counter(row["reordered"]),
             _compact_counter(row["reorder_needed"]),
@@ -299,8 +368,9 @@ def _render_aggregate_rows(
     table_width = sum(widths) + len(widths) - 1
     mode = "human units" if human_units else "raw bytes"
     speed_mode = "bit/s" if speed_bits else "byte/s"
-    keys = " | h units | b speed | q quit" if interactive else ""
-    title = f"Gatherlink service monitor | refreshed {refreshed_at} | {mode} | speed {speed_mode}{keys}"
+    unit_base = "decimal" if decimal_units else "binary"
+    keys = " | h units | b speed | m base | q quit" if interactive else ""
+    title = f"Gatherlink service monitor | refreshed {refreshed_at} | {mode} | {unit_base} | speed {speed_mode}{keys}"
     lines = [title, "=" * max(table_width, len(title))]
     lines.append(" ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
     lines.append(" ".join("-" * width for width in widths))
@@ -314,49 +384,47 @@ def _compact_counter(value: object) -> str:
     return "-" if value == "not_reported" else str(value)
 
 
-def _format_bytes(value: int, *, human_units: bool) -> str:
+def _format_bytes(value: int, *, human_units: bool, decimal_units: bool) -> str:
     if not human_units:
         return str(value)
-    return _format_binary_quantity(value, suffix="")
+    return _format_human_quantity(value, units=_data_units(decimal_units), base=_unit_base(decimal_units))
 
 
-def _format_rate(value: object, *, human_units: bool, speed_bits: bool) -> str:
+def _format_rate(value: object, *, human_units: bool, speed_bits: bool, decimal_units: bool) -> str:
     if value == "not_reported":
         return "-"
     numeric = int(value)
     if not speed_bits:
         if not human_units:
             return str(numeric)
-        return f"{_format_binary_quantity(numeric, suffix='')}/s"
+        return f"{_format_human_quantity(numeric, units=_data_units(decimal_units), base=_unit_base(decimal_units))}/s"
     if not human_units:
         return str(numeric * 8)
-    return f"{_format_binary_rate(numeric * 8)}/s"
+    return f"{_format_human_quantity(numeric * 8, units=_bit_units(decimal_units), base=_unit_base(decimal_units))}/s"
 
 
-def _format_binary_quantity(value: int, *, suffix: str) -> str:
-    units = ["B", "KiB", "MiB", "GiB", "TiB"]
+def _format_human_quantity(value: int, *, units: list[str], base: int) -> str:
     amount = float(value)
     unit = units[0]
     for unit in units:
-        if abs(amount) < 1024 or unit == units[-1]:
+        if abs(amount) < base or unit == units[-1]:
             break
-        amount /= 1024
-    if unit == "B":
-        return f"{int(amount)}{unit}{suffix}"
-    return f"{amount:.1f}{unit}{suffix}"
-
-
-def _format_binary_rate(bits_per_second: int) -> str:
-    units = ["bit", "Kibit", "Mibit", "Gibit", "Tibit"]
-    amount = float(bits_per_second)
-    unit = units[0]
-    for unit in units:
-        if abs(amount) < 1024 or unit == units[-1]:
-            break
-        amount /= 1024
-    if unit == "bit":
+        amount /= base
+    if unit in {"B", "bit"}:
         return f"{int(amount)}{unit}"
     return f"{amount:.1f}{unit}"
+
+
+def _unit_base(decimal_units: bool) -> int:
+    return 1000 if decimal_units else 1024
+
+
+def _data_units(decimal_units: bool) -> list[str]:
+    return ["B", "KB", "MB", "GB", "TB"] if decimal_units else ["B", "KiB", "MiB", "GiB", "TiB"]
+
+
+def _bit_units(decimal_units: bool) -> list[str]:
+    return ["bit", "Kbit", "Mbit", "Gbit", "Tbit"] if decimal_units else ["bit", "Kibit", "Mibit", "Gibit", "Tibit"]
 
 
 def _status_context(status: dict[str, object]) -> str:
@@ -388,8 +456,8 @@ def _aggregate_legend() -> list[str]:
         "  service registered service name",
         "  state   service lifecycle reported by IPC, systemd, or ipc_error",
         "  pkts    packets observed since service start",
-        "  bytes   payload data observed since service start, 1024-based in human mode",
-        "  speed   rate sampled from payload bytes unless Rust reports it; press b to toggle bit/s vs byte/s",
+        "  bytes   payload data since service start; press m to toggle binary/decimal human units",
+        "  speed   sampled rate; b toggles bit/s vs byte/s, m toggles Kibit/Mibit vs Kbit/Mbit",
         "  miss    missed packets",
         "  ooo     out-of-order packets",
         "  reord   packets that required reorder buffering",

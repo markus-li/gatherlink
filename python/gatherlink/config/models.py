@@ -16,6 +16,20 @@ from gatherlink.shared.models import FieldTransform, GatherlinkBaseModel
 NodeRole = Literal["client", "server"]
 SecurityMode = Literal["none"]
 ConfigFormat = Literal["minimal-client", "minimal-server", "wireguard-client", "wireguard-server", "dns-helper"]
+PathSchedulerState = Literal["active", "busy", "drain", "disabled"]
+ServicePriority = Literal["bulk", "normal", "high", "critical"]
+
+
+class PathSchedulerConfig(GatherlinkBaseModel):
+    """Python-owned scheduler hints for one configured path."""
+
+    # TODO: Add measured RTT/loss/capacity-derived fields here when the path
+    # manager has trustworthy telemetry. Rust should continue to receive only
+    # the compiled execution state, not the policy inputs themselves.
+    enabled: bool = True
+    state: PathSchedulerState = "active"
+    weight: int = Field(default=1, ge=1, le=65535)
+    mtu: int = Field(default=1200, ge=64, le=65535)
 
 
 class PathConfig(GatherlinkBaseModel):
@@ -25,6 +39,7 @@ class PathConfig(GatherlinkBaseModel):
     interface: str
     source_ip: str | None = None
     gateway: str | None = None
+    scheduler: PathSchedulerConfig = Field(default_factory=PathSchedulerConfig)
 
 
 class ServiceConfig(GatherlinkBaseModel):
@@ -33,6 +48,7 @@ class ServiceConfig(GatherlinkBaseModel):
     name: str
     target: str
     listen: str | None = None
+    priority: ServicePriority = "normal"
 
 
 class SecurityConfig(GatherlinkBaseModel):

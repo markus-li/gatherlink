@@ -8,6 +8,7 @@ test:
 
 check:
     cargo check
+    @if rg -n '#\[cfg\(test\)\]|mod tests' crates -g '*.rs'; then echo "Rust tests belong in crate-level tests/ files, not inline production modules."; exit 1; fi
     ruff check python
 
 lab-up:

@@ -157,7 +157,9 @@ gatherlink services monitor lab.local-dual-path lab.local-dual-path.sink
 Aggregate mode uses 1024-based human-readable units by default for `bytes` and
 `speed`. Press `h` while it is running to toggle between human units and raw
 byte counters. Press `b` to toggle speed between bit/s and byte/s. Press `q` to
-quit, or use Ctrl-C.
+quit, or use Ctrl-C. Press `m` to toggle human units between binary
+(`KiB`, `MiB`, `Kibit/s`, `Mibit/s`) and decimal network units
+(`KB`, `MB`, `Kbit/s`, `Mbit/s`).
 
 Then inject traffic from another terminal or any UDP generator:
 
@@ -177,13 +179,19 @@ same addresses.
 Aggregate and monitor columns use full names when they fit without widening the
 table, and short names when the full title would make the live view noisy:
 
+Services that report per-path counters render child rows named `path:<name>`
+under the parent service. These rows use the same packet, byte, and speed
+columns, letting the local lab show `path-a` and `path-b` throughput separately
+while preserving the service-level total.
+
 - `service`: registered service name from the local Gatherlink service registry
 - `state`: lifecycle state reported by IPC, or `systemd` / `ipc_error`
 - `pkts`: total packets observed by that service since it started
 - `bytes`: total payload data observed by that service since it started,
-  rendered in 1024-based units by default
+  rendered in 1024-based units by default; press `m` to toggle 1000-based units
 - `speed`: current rate, sampled from payload byte deltas unless Rust reports a
-  native current speed; press `b` to toggle bit/s and byte/s
+  native current speed; press `b` to toggle bit/s and byte/s, and `m` to toggle
+  `Mibit/s` vs `Mbit/s`
 - `miss`: packets known missing or lost; `-` until exposed by the
   running service/dataplane
 - `ooo`: packets received out of order; `-` until exposed by the running

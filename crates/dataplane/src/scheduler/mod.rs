@@ -1,8 +1,6 @@
-//! scheduler::mod
+//! Compiled scheduler execution.
 //!
-//! High-speed Rust packet engine. No business policy belongs here.
-//!
-//! Rust code should stay focused on deterministic, high-performance execution.
-//! Product policy, path interpretation, config expansion, and environment logic
-//! belong in the Python control plane.
+//! Python owns scheduler policy and scoring. This module only executes the
+//! compiled scheduler mode and path state handed to Rust.
 
+pub mod weighted_rr;

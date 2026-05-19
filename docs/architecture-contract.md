@@ -110,7 +110,9 @@ Initial behavior: use safe default payload MTU, probe when enabled, track effect
 logical path, skip paths that cannot carry the packet, drop only when no eligible path exists, and
 count/report MTU drops loudly.
 
-Internal fragmentation is reserved in the protocol but not required for MVP.
+Internal fragmentation exists in the Rust packet executor for packets that do
+not fit the compiled path MTU or need to use available capacity on a smaller
+path. Python still owns MTU policy, path state, and operator-facing warnings.
 
 ## Security
 

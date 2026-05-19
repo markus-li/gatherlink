@@ -50,6 +50,32 @@ Format detection is deliberately shallow. It only chooses which input mapping to
 use; the canonical config model owns all real relationship checks, such as unique
 service names and helper references.
 
+## Scheduler Fields
+
+Path scheduler hints live in user config under each path:
+
+```json
+{
+  "name": "wan-a",
+  "interface": "eth0",
+  "scheduler": {
+    "enabled": true,
+    "state": "active",
+    "weight": 1,
+    "mtu": 1200
+  }
+}
+```
+
+Python compiles these hints into the runtime scheduler contract. Rust receives
+only compact execution values: path id, route id, enabled flag, state, weight,
+and MTU. This keeps policy, scoring, and future adaptive behavior in Python
+while still letting Rust make cheap packet-time choices.
+
+Services may declare a priority label: `bulk`, `normal`, `high`, or `critical`.
+Python compiles that label to a stable numeric runtime value. Priority belongs
+to configured Gatherlink services, not packet inspection, and is currently
+scaffolded for future multi-service fairness.
 
 `config show --canonical` prints the validated user-facing config after schema
 version and format normalization. `config show --runtime` prints the explicit

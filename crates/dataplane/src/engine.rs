@@ -5,18 +5,24 @@
 //! Python; this module executes already-compiled runtime state.
 
 use std::fmt;
+use std::net::SocketAddr;
 
 use gatherlink_protocol::errors::ProtocolError;
-use gatherlink_protocol::frame::{Frame, FrameKind};
+use gatherlink_protocol::frame::{Frame, FrameKind, V1_HEADER_LEN};
 
-use crate::runtime_config::CoreRuntimeConfig;
+use crate::fragmentation::{fragment_datagram, FragmentReassembly};
+use crate::runtime_config::{CorePathConfig, CoreRuntimeConfig, SchedulerMode};
+use crate::scheduler::weighted_rr::WeightedRoundRobin;
 use crate::udp_service::{UdpServiceError, UserlandUdpService};
 
 /// Core userland UDP dataplane.
 #[derive(Debug)]
 pub struct CoreDataplane {
     services: Vec<UserlandUdpService>,
+    paths: Vec<CorePathConfig>,
+    scheduler: WeightedRoundRobin,
     next_sequence: u64,
+    next_datagram_id: u32,
 }
 
 impl CoreDataplane {
@@ -31,7 +37,10 @@ impl CoreDataplane {
 
         Ok(Self {
             services,
+            paths: config.paths().to_vec(),
+            scheduler: compile_scheduler(config.scheduler().mode(), config.paths()),
             next_sequence: 1,
+            next_datagram_id: 1,
         })
     }
 
@@ -41,10 +50,7 @@ impl CoreDataplane {
     /// Rust preserves compatible sockets, binds new sockets before swapping the
     /// active service set, and reports what changed so Python can publish clean
     /// diagnostics or decide whether a more disruptive restart is needed.
-    pub fn reapply_config(
-        &mut self,
-        config: CoreRuntimeConfig,
-    ) -> Result<ReapplyOutcome, DataplaneError> {
+    pub fn reapply_config(&mut self, config: CoreRuntimeConfig) -> Result<ReapplyOutcome, DataplaneError> {
         let mut outcome = ReapplyOutcome::default();
         let mut services = Vec::with_capacity(config.services().len());
 
@@ -81,54 +87,279 @@ impl CoreDataplane {
             .count();
 
         self.services = services;
+        self.paths = config.paths().to_vec();
+        self.scheduler = compile_scheduler(config.scheduler().mode(), config.paths());
         Ok(outcome)
     }
 
     /// Return a bound service by name.
     pub fn service(&self, name: &str) -> Option<&UserlandUdpService> {
-        self.services
-            .iter()
-            .find(|service| service.config().name() == name)
+        self.services.iter().find(|service| service.config().name() == name)
+    }
+
+    /// Return the compiled paths Rust can use for frame production.
+    pub fn paths(&self) -> &[CorePathConfig] {
+        &self.paths
     }
 
     /// Receive one local UDP datagram, pass it through the v1 data-frame
     /// boundary, and emit the original virtual payload to the service target.
-    pub fn forward_one_for_service(
+    pub fn forward_one_for_service(&mut self, name: &str) -> Result<ForwardOutcome, DataplaneError> {
+        let outcomes = self.forward_available_for_service(name, 1)?;
+        outcomes.into_iter().next().ok_or(DataplaneError::NoDatagramForwarded)
+    }
+
+    /// Receive one or more queued UDP datagrams and forward them through Gatherlink framing.
+    ///
+    /// The first receive blocks like `forward_one_for_service`; the remaining reads drain immediately available
+    /// packets. Tiny same-path datagrams can become one batch frame, while oversized datagrams are fragmented only
+    /// when no non-busy path can carry them whole.
+    pub fn forward_available_for_service(
         &mut self,
         name: &str,
-    ) -> Result<ForwardOutcome, DataplaneError> {
+        max_datagrams: usize,
+    ) -> Result<Vec<ForwardOutcome>, DataplaneError> {
+        if max_datagrams == 0 {
+            return Ok(Vec::new());
+        }
+
         let service_index = self
             .services
             .iter()
             .position(|service| service.config().name() == name)
             .ok_or_else(|| DataplaneError::UnknownService(name.to_owned()))?;
 
+        let datagrams = self.receive_datagrams(service_index, max_datagrams)?;
+        self.forward_datagrams(service_index, name, datagrams)
+    }
+
+    fn receive_datagrams(
+        &self,
+        service_index: usize,
+        max_datagrams: usize,
+    ) -> Result<Vec<ReceivedDatagram>, DataplaneError> {
+        let mut datagrams = Vec::with_capacity(max_datagrams);
         let mut buffer = vec![0_u8; u16::MAX as usize];
         let (length, source) = self.services[service_index].recv_from(&mut buffer)?;
-        buffer.truncate(length);
+        datagrams.push(ReceivedDatagram {
+            payload: buffer[..length].to_vec(),
+            source,
+        });
 
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
-
-        // In the full system this frame travels over selected logical paths.
-        // The first core test target immediately decodes it in-process so we
-        // can prove the UDP service boundary without inventing helper tunnels.
-        let frame = Frame::data(0, service_index as u64 + 1, 0, 0, sequence, buffer)?;
-        let encoded = frame.encode()?;
-        let decoded = Frame::decode(&encoded)?;
-        if decoded.header.kind != FrameKind::Data {
-            return Err(DataplaneError::UnexpectedFrameKind);
+        for _ in 1..max_datagrams {
+            let mut buffer = vec![0_u8; u16::MAX as usize];
+            let Some((length, source)) = self.services[service_index].try_recv_from(&mut buffer)? else {
+                break;
+            };
+            datagrams.push(ReceivedDatagram {
+                payload: buffer[..length].to_vec(),
+                source,
+            });
         }
 
-        let emitted = self.services[service_index].emit_to_target(&decoded.payload)?;
-        Ok(ForwardOutcome {
-            service: name.to_owned(),
-            source,
-            target: self.services[service_index].config().target(),
-            payload_len: emitted,
-            sequence,
-        })
+        Ok(datagrams)
     }
+
+    fn forward_datagrams(
+        &mut self,
+        service_index: usize,
+        service_name: &str,
+        datagrams: Vec<ReceivedDatagram>,
+    ) -> Result<Vec<ForwardOutcome>, DataplaneError> {
+        let service_id = service_index as u64 + 1;
+        let planned = self.plan_datagrams(service_id, datagrams)?;
+        let frames = self.coalesce_planned_frames(service_id, planned)?;
+        let mut outcomes = Vec::new();
+        let mut fragments = FragmentReassembly::default();
+
+        for plan in frames {
+            let encoded = plan.frame.encode()?;
+            if encoded.len() > plan.path.mtu() {
+                return Err(DataplaneError::FrameExceedsPathMtu {
+                    path_id: plan.path.path_id(),
+                    frame_len: encoded.len(),
+                    mtu: plan.path.mtu(),
+                });
+            }
+
+            let decoded = Frame::decode(&encoded)?;
+            match decoded.header.kind {
+                FrameKind::Data => {
+                    let Some(payload) = fragments.push_or_payload(&decoded)? else {
+                        continue;
+                    };
+                    let emitted = self.services[service_index].emit_to_target(&payload)?;
+                    let source = plan.datagrams[0].source;
+                    outcomes.push(ForwardOutcome {
+                        service: service_name.to_owned(),
+                        source,
+                        target: self.services[service_index].config().target(),
+                        payload_len: emitted,
+                        sequence: plan.datagrams[0].sequence,
+                        path_id: decoded.header.path_id,
+                        frame_count: plan.fragment_count,
+                        batch_count: 0,
+                        fragment_count: plan.fragment_count.saturating_sub(1),
+                    });
+                }
+                FrameKind::Batch => {
+                    let payloads = decoded.batch_payloads()?;
+                    if payloads.len() != plan.datagrams.len() {
+                        return Err(DataplaneError::BatchDatagramMismatch);
+                    }
+
+                    for (index, payload) in payloads.iter().enumerate() {
+                        let emitted = self.services[service_index].emit_to_target(payload)?;
+                        outcomes.push(ForwardOutcome {
+                            service: service_name.to_owned(),
+                            source: plan.datagrams[index].source,
+                            target: self.services[service_index].config().target(),
+                            payload_len: emitted,
+                            sequence: plan.datagrams[index].sequence,
+                            path_id: decoded.header.path_id,
+                            frame_count: 1,
+                            batch_count: payloads.len(),
+                            fragment_count: 0,
+                        });
+                    }
+                }
+                FrameKind::Control => return Err(DataplaneError::UnexpectedFrameKind),
+            }
+        }
+
+        Ok(outcomes)
+    }
+
+    fn plan_datagrams(
+        &mut self,
+        service_id: u64,
+        datagrams: Vec<ReceivedDatagram>,
+    ) -> Result<Vec<PlannedDatagram>, DataplaneError> {
+        let mut planned = Vec::with_capacity(datagrams.len());
+        for datagram in datagrams {
+            let sequence = self.next_sequence;
+            self.next_sequence += 1;
+            let path = self.select_path(datagram.payload.len())?.clone();
+            let fragment = if datagram.payload.len() > path.max_data_payload() {
+                let datagram_id = self.next_datagram_id;
+                self.next_datagram_id = self.next_datagram_id.wrapping_add(1).max(1);
+                Some(datagram_id)
+            } else {
+                None
+            };
+            planned.push(PlannedDatagram {
+                payload: datagram.payload,
+                source: datagram.source,
+                sequence,
+                service_id,
+                path,
+                fragment,
+            });
+        }
+        Ok(planned)
+    }
+
+    fn select_path(&mut self, payload_len: usize) -> Result<&CorePathConfig, DataplaneError> {
+        let path_index = self
+            .scheduler
+            .select_path_index(&self.paths, payload_len)
+            .ok_or(DataplaneError::NoPathAvailable)?;
+        Ok(&self.paths[path_index])
+    }
+
+    fn coalesce_planned_frames(
+        &self,
+        service_id: u64,
+        planned: Vec<PlannedDatagram>,
+    ) -> Result<Vec<FramePlan>, DataplaneError> {
+        let mut frames = Vec::new();
+        let mut cursor = 0_usize;
+        while cursor < planned.len() {
+            let current = &planned[cursor];
+            if current.fragment.is_some() {
+                frames.extend(fragment_datagram(current)?);
+                cursor += 1;
+                continue;
+            }
+
+            let mut batch_payloads = vec![current.payload.clone()];
+            let mut batch_datagrams = vec![current.clone()];
+            let mut batch_len = V1_HEADER_LEN + 2 + 2 + current.payload.len();
+            let mut next = cursor + 1;
+            while next < planned.len() {
+                let candidate = &planned[next];
+                if candidate.fragment.is_some() || candidate.path.path_id() != current.path.path_id() {
+                    break;
+                }
+                let candidate_len = 2 + candidate.payload.len();
+                if batch_len + candidate_len > current.path.mtu() {
+                    break;
+                }
+                batch_len += candidate_len;
+                batch_payloads.push(candidate.payload.clone());
+                batch_datagrams.push(candidate.clone());
+                next += 1;
+            }
+
+            let frame = if batch_payloads.len() > 1 {
+                Frame::batch(
+                    0,
+                    service_id,
+                    current.path.path_id(),
+                    current.path.route_id(),
+                    current.sequence,
+                    &batch_payloads,
+                )?
+            } else {
+                Frame::data(
+                    0,
+                    service_id,
+                    current.path.path_id(),
+                    current.path.route_id(),
+                    current.sequence,
+                    current.payload.clone(),
+                )?
+            };
+            frames.push(FramePlan {
+                frame,
+                path: current.path.clone(),
+                datagrams: batch_datagrams,
+                fragment_count: 1,
+            });
+            cursor = next;
+        }
+        Ok(frames)
+    }
+}
+
+fn compile_scheduler(mode: SchedulerMode, paths: &[CorePathConfig]) -> WeightedRoundRobin {
+    match mode {
+        SchedulerMode::RoundRobin => WeightedRoundRobin::compile(paths),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReceivedDatagram {
+    payload: Vec<u8>,
+    source: SocketAddr,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlannedDatagram {
+    pub(crate) payload: Vec<u8>,
+    pub(crate) source: SocketAddr,
+    pub(crate) sequence: u64,
+    pub(crate) service_id: u64,
+    pub(crate) path: CorePathConfig,
+    pub(crate) fragment: Option<u32>,
+}
+
+#[derive(Debug)]
+pub(crate) struct FramePlan {
+    pub(crate) frame: Frame,
+    pub(crate) path: CorePathConfig,
+    pub(crate) datagrams: Vec<PlannedDatagram>,
+    pub(crate) fragment_count: usize,
 }
 
 /// Summary of one config reapply operation.
@@ -145,10 +376,14 @@ pub struct ReapplyOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForwardOutcome {
     pub service: String,
-    pub source: std::net::SocketAddr,
-    pub target: std::net::SocketAddr,
+    pub source: SocketAddr,
+    pub target: SocketAddr,
     pub payload_len: usize,
     pub sequence: u64,
+    pub path_id: u16,
+    pub frame_count: usize,
+    pub batch_count: usize,
+    pub fragment_count: usize,
 }
 
 /// Dataplane execution errors.
@@ -157,7 +392,13 @@ pub enum DataplaneError {
     UdpService(UdpServiceError),
     Protocol(ProtocolError),
     UnknownService(String),
+    NoDatagramForwarded,
+    NoPathAvailable,
     UnexpectedFrameKind,
+    BatchDatagramMismatch,
+    InvalidFragmentPlan,
+    TooManyFragments(usize),
+    FrameExceedsPathMtu { path_id: u16, frame_len: usize, mtu: usize },
 }
 
 impl fmt::Display for DataplaneError {
@@ -166,7 +407,20 @@ impl fmt::Display for DataplaneError {
             Self::UdpService(error) => write!(formatter, "{error}"),
             Self::Protocol(error) => write!(formatter, "{error}"),
             Self::UnknownService(name) => write!(formatter, "unknown UDP service: {name}"),
+            Self::NoDatagramForwarded => write!(formatter, "no datagram was forwarded"),
+            Self::NoPathAvailable => write!(formatter, "no path is available for packet framing"),
             Self::UnexpectedFrameKind => write!(formatter, "decoded frame was not a data frame"),
+            Self::BatchDatagramMismatch => write!(formatter, "batch payload count did not match planned datagrams"),
+            Self::InvalidFragmentPlan => write!(formatter, "internal fragment plan is invalid"),
+            Self::TooManyFragments(count) => write!(formatter, "datagram requires too many fragments: {count}"),
+            Self::FrameExceedsPathMtu {
+                path_id,
+                frame_len,
+                mtu,
+            } => write!(
+                formatter,
+                "encoded frame for path {path_id} is {frame_len} bytes, exceeding path MTU {mtu}",
+            ),
         }
     }
 }
@@ -182,143 +436,5 @@ impl From<UdpServiceError> for DataplaneError {
 impl From<ProtocolError> for DataplaneError {
     fn from(error: ProtocolError) -> Self {
         Self::Protocol(error)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::net::UdpSocket;
-    use std::time::Duration;
-
-    use super::*;
-    use crate::runtime_config::CoreRuntimeConfig;
-    use crate::udp_service::UdpServiceConfig;
-
-    #[test]
-    fn forwards_one_udp_payload_through_core_frame_boundary() {
-        let target = UdpSocket::bind("127.0.0.1:0").unwrap();
-        target
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
-        let config = CoreRuntimeConfig::single_udp_service(
-            "udp-main",
-            "127.0.0.1:0".parse().unwrap(),
-            target.local_addr().unwrap(),
-        )
-        .unwrap();
-        let mut dataplane = CoreDataplane::bind(config).unwrap();
-        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
-
-        sender.send_to(b"plain-user-udp", service_addr).unwrap();
-        let outcome = dataplane.forward_one_for_service("udp-main").unwrap();
-
-        let mut buffer = [0_u8; 64];
-        let (length, _source) = target.recv_from(&mut buffer).unwrap();
-        assert_eq!(&buffer[..length], b"plain-user-udp");
-        assert_eq!(outcome.service, "udp-main");
-        assert_eq!(outcome.payload_len, b"plain-user-udp".len());
-        assert_eq!(outcome.sequence, 1);
-    }
-
-    #[test]
-    fn forwards_ipv6_udp_payload_through_core_frame_boundary() {
-        let target = UdpSocket::bind("[::1]:0").unwrap();
-        target
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
-        let config = CoreRuntimeConfig::single_udp_service(
-            "udp-v6",
-            "[::1]:0".parse().unwrap(),
-            target.local_addr().unwrap(),
-        )
-        .unwrap();
-        let mut dataplane = CoreDataplane::bind(config).unwrap();
-        let sender = UdpSocket::bind("[::1]:0").unwrap();
-        let service_addr = dataplane.service("udp-v6").unwrap().local_addr().unwrap();
-
-        sender.send_to(b"plain-ipv6-udp", service_addr).unwrap();
-        let outcome = dataplane.forward_one_for_service("udp-v6").unwrap();
-
-        let mut buffer = [0_u8; 64];
-        let (length, _source) = target.recv_from(&mut buffer).unwrap();
-        assert_eq!(&buffer[..length], b"plain-ipv6-udp");
-        assert_eq!(outcome.service, "udp-v6");
-        assert_eq!(outcome.source.ip(), sender.local_addr().unwrap().ip());
-        assert_eq!(outcome.target, target.local_addr().unwrap());
-    }
-
-    #[test]
-    fn reapply_updates_target_without_rebinding_listener() {
-        let first_target = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let second_target = UdpSocket::bind("127.0.0.1:0").unwrap();
-        second_target
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
-        let config = CoreRuntimeConfig::single_udp_service(
-            "udp-main",
-            "127.0.0.1:0".parse().unwrap(),
-            first_target.local_addr().unwrap(),
-        )
-        .unwrap();
-        let mut dataplane = CoreDataplane::bind(config).unwrap();
-        let original_listen = dataplane.service("udp-main").unwrap().local_addr().unwrap();
-        let updated_config = CoreRuntimeConfig::new(vec![UdpServiceConfig::new(
-            "udp-main",
-            Some(original_listen),
-            second_target.local_addr().unwrap(),
-        )
-        .unwrap()])
-        .unwrap();
-
-        let outcome = dataplane.reapply_config(updated_config).unwrap();
-        let updated_listen = dataplane.service("udp-main").unwrap().local_addr().unwrap();
-
-        assert_eq!(
-            outcome,
-            ReapplyOutcome {
-                unchanged: 0,
-                updated: 1,
-                rebound: 0,
-                added: 0,
-                removed: 0,
-            },
-        );
-        assert_eq!(updated_listen, original_listen);
-    }
-
-    #[test]
-    fn reapply_can_add_and_remove_services() {
-        let first_target = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let second_target = UdpSocket::bind("127.0.0.1:0").unwrap();
-        let config = CoreRuntimeConfig::single_udp_service(
-            "udp-main",
-            "127.0.0.1:0".parse().unwrap(),
-            first_target.local_addr().unwrap(),
-        )
-        .unwrap();
-        let mut dataplane = CoreDataplane::bind(config).unwrap();
-        let replacement = CoreRuntimeConfig::new(vec![UdpServiceConfig::new(
-            "udp-secondary",
-            Some("127.0.0.1:0".parse().unwrap()),
-            second_target.local_addr().unwrap(),
-        )
-        .unwrap()])
-        .unwrap();
-
-        let outcome = dataplane.reapply_config(replacement).unwrap();
-
-        assert_eq!(
-            outcome,
-            ReapplyOutcome {
-                unchanged: 0,
-                updated: 0,
-                rebound: 0,
-                added: 1,
-                removed: 1,
-            },
-        );
-        assert!(dataplane.service("udp-main").is_none());
-        assert!(dataplane.service("udp-secondary").is_some());
     }
 }

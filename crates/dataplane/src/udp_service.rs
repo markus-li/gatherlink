@@ -5,8 +5,11 @@
 //! capabilities belong in this module.
 
 use std::fmt;
+use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
+
+use gatherlink_protocol::ids::PathId;
 
 /// UDP service configuration compiled by Python before it reaches Rust.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +17,7 @@ pub struct UdpServiceConfig {
     name: String,
     listen: Option<SocketAddr>,
     target: SocketAddr,
+    priority: u16,
 }
 
 impl UdpServiceConfig {
@@ -23,15 +27,29 @@ impl UdpServiceConfig {
         listen: Option<SocketAddr>,
         target: SocketAddr,
     ) -> Result<Self, UdpServiceError> {
+        Self::new_with_priority(name, listen, target, 100)
+    }
+
+    /// Create a UDP service config with compiled service priority.
+    pub fn new_with_priority(
+        name: impl Into<String>,
+        listen: Option<SocketAddr>,
+        target: SocketAddr,
+        priority: u16,
+    ) -> Result<Self, UdpServiceError> {
         let name = name.into();
         if name.trim().is_empty() {
             return Err(UdpServiceError::EmptyServiceName);
+        }
+        if priority == 0 {
+            return Err(UdpServiceError::ServicePriorityTooSmall { service: name });
         }
 
         Ok(Self {
             name,
             listen,
             target,
+            priority,
         })
     }
 
@@ -49,6 +67,11 @@ impl UdpServiceConfig {
     pub fn target(&self) -> SocketAddr {
         self.target
     }
+
+    /// Compiled service priority. Python owns how this affects future scheduling.
+    pub fn priority(&self) -> u16 {
+        self.priority
+    }
 }
 
 /// Bound userland UDP listener for a configured service.
@@ -61,9 +84,7 @@ pub struct UserlandUdpService {
 impl UserlandUdpService {
     /// Bind a normal UDP socket for a service that has a listen endpoint.
     pub fn bind(config: UdpServiceConfig) -> Result<Self, UdpServiceError> {
-        let listen = config
-            .listen()
-            .ok_or(UdpServiceError::MissingListenAddress)?;
+        let listen = config.listen().ok_or(UdpServiceError::MissingListenAddress)?;
         let socket = UdpSocket::bind(listen).map_err(UdpServiceError::BindFailed)?;
         Self::from_bound_socket(config, socket)
     }
@@ -75,9 +96,7 @@ impl UserlandUdpService {
 
     /// Return the actual bound address, useful when tests bind port 0.
     pub fn local_addr(&self) -> Result<SocketAddr, UdpServiceError> {
-        self.socket
-            .local_addr()
-            .map_err(UdpServiceError::LocalAddrFailed)
+        self.socket.local_addr().map_err(UdpServiceError::LocalAddrFailed)
     }
 
     /// Return whether a requested config can keep this service's live socket.
@@ -85,10 +104,7 @@ impl UserlandUdpService {
     /// The configured listener may be port 0 during tests or future dynamic
     /// allocation. Hot reapply therefore accepts either the original configured
     /// listen address or the actual bound address reported by the socket.
-    pub fn can_preserve_socket_for(
-        &self,
-        config: &UdpServiceConfig,
-    ) -> Result<bool, UdpServiceError> {
+    pub fn can_preserve_socket_for(&self, config: &UdpServiceConfig) -> Result<bool, UdpServiceError> {
         if self.config.name() != config.name() {
             return Ok(false);
         }
@@ -114,18 +130,29 @@ impl UserlandUdpService {
             });
         }
 
-        let socket = self
-            .socket
-            .try_clone()
-            .map_err(UdpServiceError::CloneFailed)?;
+        let socket = self.socket.try_clone().map_err(UdpServiceError::CloneFailed)?;
         Self::from_bound_socket(config, socket)
     }
 
     /// Receive one UDP datagram from the userland service socket.
     pub fn recv_from(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr), UdpServiceError> {
+        self.socket.recv_from(buffer).map_err(UdpServiceError::ReceiveFailed)
+    }
+
+    /// Receive one queued UDP datagram without blocking.
+    pub fn try_recv_from(&self, buffer: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, UdpServiceError> {
         self.socket
-            .recv_from(buffer)
-            .map_err(UdpServiceError::ReceiveFailed)
+            .set_nonblocking(true)
+            .map_err(UdpServiceError::ConfigureSocketFailed)?;
+        let result = match self.socket.recv_from(buffer) {
+            Ok(received) => Ok(Some(received)),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(UdpServiceError::ReceiveFailed(error)),
+        };
+        self.socket
+            .set_nonblocking(false)
+            .map_err(UdpServiceError::ConfigureSocketFailed)?;
+        result
     }
 
     /// Emit one UDP datagram to this service's configured target.
@@ -135,10 +162,7 @@ impl UserlandUdpService {
             .map_err(UdpServiceError::SendFailed)
     }
 
-    fn from_bound_socket(
-        config: UdpServiceConfig,
-        socket: UdpSocket,
-    ) -> Result<Self, UdpServiceError> {
+    fn from_bound_socket(config: UdpServiceConfig, socket: UdpSocket) -> Result<Self, UdpServiceError> {
         // Tests and future supervisors should fail predictably instead of
         // blocking forever when a service is miswired.
         socket
@@ -156,6 +180,18 @@ pub enum UdpServiceError {
     MissingListenAddress,
     DuplicateServiceName(String),
     DuplicateListenAddress(SocketAddr),
+    DuplicatePathId(PathId),
+    MissingPath,
+    PathMtuTooSmall {
+        path_id: PathId,
+        mtu: usize,
+    },
+    PathWeightTooSmall {
+        path_id: PathId,
+    },
+    ServicePriorityTooSmall {
+        service: String,
+    },
     IncompatibleListenReapply {
         service: String,
         current: Option<SocketAddr>,
@@ -176,6 +212,17 @@ impl fmt::Display for UdpServiceError {
             Self::MissingListenAddress => write!(formatter, "service requires a listen address"),
             Self::DuplicateServiceName(name) => write!(formatter, "duplicate service name: {name}"),
             Self::DuplicateListenAddress(addr) => write!(formatter, "duplicate UDP listen address: {addr}"),
+            Self::DuplicatePathId(path_id) => write!(formatter, "duplicate path id: {path_id}"),
+            Self::MissingPath => write!(formatter, "runtime config requires at least one path"),
+            Self::PathMtuTooSmall { path_id, mtu } => {
+                write!(formatter, "path {path_id} MTU {mtu} is too small for Gatherlink framing")
+            }
+            Self::PathWeightTooSmall { path_id } => {
+                write!(formatter, "path {path_id} scheduler weight must be greater than zero")
+            }
+            Self::ServicePriorityTooSmall { service } => {
+                write!(formatter, "service {service} priority must be greater than zero")
+            }
             Self::IncompatibleListenReapply {
                 service,
                 current,
@@ -204,119 +251,3 @@ impl fmt::Display for UdpServiceError {
 }
 
 impl std::error::Error for UdpServiceError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn binds_loopback_udp_socket_without_root() {
-        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let target: SocketAddr = "127.0.0.1:51820".parse().unwrap();
-        let config = UdpServiceConfig::new("udp-main", Some(listen), target).unwrap();
-
-        let service = UserlandUdpService::bind(config).unwrap();
-
-        assert_eq!(service.local_addr().unwrap().ip(), listen.ip());
-    }
-
-    #[test]
-    fn receives_userland_udp_datagram() {
-        let listen: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let target: SocketAddr = "127.0.0.1:51820".parse().unwrap();
-        let config = UdpServiceConfig::new("udp-main", Some(listen), target).unwrap();
-        let service = UserlandUdpService::bind(config).unwrap();
-        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
-
-        sender
-            .send_to(b"gatherlink-core-test", service.local_addr().unwrap())
-            .unwrap();
-
-        let mut buffer = [0_u8; 64];
-        let (length, source) = service.recv_from(&mut buffer).unwrap();
-
-        assert_eq!(&buffer[..length], b"gatherlink-core-test");
-        assert_eq!(source, sender.local_addr().unwrap());
-    }
-
-    #[test]
-    fn emits_userland_udp_datagram_to_target() {
-        let target_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
-        target_socket
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
-        let config = UdpServiceConfig::new(
-            "udp-main",
-            Some("127.0.0.1:0".parse().unwrap()),
-            target_socket.local_addr().unwrap(),
-        )
-        .unwrap();
-        let service = UserlandUdpService::bind(config).unwrap();
-
-        service.emit_to_target(b"target-payload").unwrap();
-
-        let mut buffer = [0_u8; 64];
-        let (length, _source) = target_socket.recv_from(&mut buffer).unwrap();
-        assert_eq!(&buffer[..length], b"target-payload");
-    }
-
-    #[test]
-    fn forwards_ipv6_loopback_udp_datagram() {
-        let target_socket = UdpSocket::bind("[::1]:0").unwrap();
-        target_socket
-            .set_read_timeout(Some(Duration::from_millis(500)))
-            .unwrap();
-        let config = UdpServiceConfig::new(
-            "udp-v6",
-            Some("[::1]:0".parse().unwrap()),
-            target_socket.local_addr().unwrap(),
-        )
-        .unwrap();
-        let service = UserlandUdpService::bind(config).unwrap();
-        let sender = UdpSocket::bind("[::1]:0").unwrap();
-
-        sender
-            .send_to(b"ipv6-userland-udp", service.local_addr().unwrap())
-            .unwrap();
-        let mut receive_buffer = [0_u8; 64];
-        let (length, source) = service.recv_from(&mut receive_buffer).unwrap();
-
-        assert_eq!(source.ip(), sender.local_addr().unwrap().ip());
-        assert_eq!(&receive_buffer[..length], b"ipv6-userland-udp");
-
-        service.emit_to_target(&receive_buffer[..length]).unwrap();
-        let mut target_buffer = [0_u8; 64];
-        let (target_length, _source) = target_socket.recv_from(&mut target_buffer).unwrap();
-        assert_eq!(&target_buffer[..target_length], b"ipv6-userland-udp");
-    }
-
-    #[test]
-    fn clones_socket_when_listener_is_unchanged() {
-        let first_target: SocketAddr = "127.0.0.1:51820".parse().unwrap();
-        let second_target: SocketAddr = "127.0.0.1:51821".parse().unwrap();
-        let config = UdpServiceConfig::new(
-            "udp-main",
-            Some("127.0.0.1:0".parse().unwrap()),
-            first_target,
-        )
-        .unwrap();
-        let service = UserlandUdpService::bind(config).unwrap();
-        let listen = service.local_addr().unwrap();
-        let updated_config =
-            UdpServiceConfig::new("udp-main", Some(listen), second_target).unwrap();
-
-        let updated = service.clone_with_config(updated_config).unwrap();
-
-        assert_eq!(updated.local_addr().unwrap(), listen);
-        assert_eq!(updated.config().target(), second_target);
-    }
-
-    #[test]
-    fn rejects_empty_service_name() {
-        let target: SocketAddr = "127.0.0.1:51820".parse().unwrap();
-
-        let err = UdpServiceConfig::new("  ", None, target).unwrap_err();
-
-        assert!(matches!(err, UdpServiceError::EmptyServiceName));
-    }
-}

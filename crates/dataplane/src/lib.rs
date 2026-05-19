@@ -2,15 +2,17 @@
 //!
 //! High-speed Rust packet engine. No business policy belongs here.
 
-pub mod engine;
-pub mod runtime_config;
-pub mod udp_service;
-pub mod sockets;
-pub mod receive;
-pub mod transmit;
 pub mod dedupe;
-pub mod reorder;
+pub mod engine;
+pub mod errors;
+mod fragmentation;
+pub mod metrics;
 pub mod mtu;
 pub mod queues;
-pub mod metrics;
-pub mod errors;
+pub mod receive;
+pub mod reorder;
+pub mod runtime_config;
+mod scheduler;
+pub mod sockets;
+pub mod transmit;
+pub mod udp_service;

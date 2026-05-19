@@ -13,8 +13,28 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from gatherlink.config.models import NodeRole, SecurityMode
+from gatherlink.config.models import NodeRole, PathSchedulerState, SecurityMode, ServicePriority
 from gatherlink.shared.models import GatherlinkBaseModel
+
+SchedulerMode = Literal["round_robin"]
+
+
+class RuntimePathSchedulerConfig(GatherlinkBaseModel):
+    """Compiled per-path scheduler state consumed by Rust."""
+
+    path_id: int
+    route_id: int = 0
+    enabled: bool = True
+    state: PathSchedulerState = "active"
+    weight: int = 1
+    mtu: int = 1200
+
+
+class RuntimeSchedulerConfig(GatherlinkBaseModel):
+    """Compiled scheduler runtime mode and path state."""
+
+    mode: SchedulerMode = "round_robin"
+    paths: list[RuntimePathSchedulerConfig] = Field(default_factory=list)
 
 
 class RuntimePathConfig(GatherlinkBaseModel):
@@ -24,6 +44,7 @@ class RuntimePathConfig(GatherlinkBaseModel):
     interface: str
     source_ip: str | None = None
     gateway: str | None = None
+    scheduler: RuntimePathSchedulerConfig
 
 
 class RuntimeServiceConfig(GatherlinkBaseModel):
@@ -33,6 +54,8 @@ class RuntimeServiceConfig(GatherlinkBaseModel):
     protocol: Literal["udp"] = "udp"
     target: str
     listen: str | None = None
+    priority: ServicePriority = "normal"
+    priority_value: int = 100
 
 
 class RuntimeSecurityConfig(GatherlinkBaseModel):
@@ -73,6 +96,7 @@ class RuntimeConfig(GatherlinkBaseModel):
     security: RuntimeSecurityConfig = Field(default_factory=RuntimeSecurityConfig)
     paths: list[RuntimePathConfig] = Field(default_factory=list)
     services: list[RuntimeServiceConfig] = Field(default_factory=list)
+    scheduler: RuntimeSchedulerConfig = Field(default_factory=RuntimeSchedulerConfig)
     # Helpers are kept in the runtime contract for helper supervisors to consume,
     # but the core runner must ignore them. Tunneling, DNS assistance, and other
     # integrations are not part of the core userland UDP transport.

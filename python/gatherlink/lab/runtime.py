@@ -417,6 +417,7 @@ def run_udp_forwarder(config: LabScenarioConfig) -> None:
     sock.bind((listen_host, listen_port))
 
     path_names = [path.name for path in config.paths] or ["default"]
+    path_stats = {path_name: {"packets": 0, "bytes": 0} for path_name in path_names}
     packet_count = 0
     byte_count = 0
     started_at = datetime.now(UTC)
@@ -429,6 +430,7 @@ def run_udp_forwarder(config: LabScenarioConfig) -> None:
             "paths": path_names,
             "packets": packet_count,
             "bytes": byte_count,
+            "path_stats": path_stats,
             "started_at": started_at.isoformat(),
         },
         stop=stop_event.set,
@@ -451,6 +453,8 @@ def run_udp_forwarder(config: LabScenarioConfig) -> None:
             sent = sock.sendto(payload, target)
             packet_count += 1
             byte_count += sent
+            path_stats[path]["packets"] += 1
+            path_stats[path]["bytes"] += sent
             print(
                 f"lab service: forwarded packet={packet_count} bytes={sent} total_bytes={byte_count} "
                 f"path={path} source={source}",

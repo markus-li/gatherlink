@@ -137,3 +137,37 @@ def test_security_mode_defaults_to_plaintext_for_early_lab_configs() -> None:
     config = validate_config_dict(data)
 
     assert config.security.mode == "none"
+
+
+def test_path_scheduler_hints_expand_into_runtime_scheduler() -> None:
+    from gatherlink.config import expand_config
+    from gatherlink.config.validation import validate_config_dict
+
+    data = load_config_dict(EXAMPLES / "minimal-client.json")
+    data["paths"][0]["scheduler"] = {
+        "enabled": True,
+        "state": "drain",
+        "weight": 3,
+        "mtu": 1300,
+    }
+
+    runtime = expand_config(validate_config_dict(data))
+
+    assert runtime.paths[0].scheduler.path_id == 0
+    assert runtime.paths[0].scheduler.state == "drain"
+    assert runtime.paths[0].scheduler.weight == 3
+    assert runtime.paths[0].scheduler.mtu == 1300
+    assert runtime.scheduler.paths[0] == runtime.paths[0].scheduler
+
+
+def test_service_priority_expands_into_runtime_priority_value() -> None:
+    from gatherlink.config import expand_config
+    from gatherlink.config.validation import validate_config_dict
+
+    data = load_config_dict(EXAMPLES / "minimal-client.json")
+    data["services"][0]["priority"] = "high"
+
+    runtime = expand_config(validate_config_dict(data))
+
+    assert runtime.services[0].priority == "high"
+    assert runtime.services[0].priority_value == 200

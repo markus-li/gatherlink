@@ -4,4 +4,4 @@
 //! listeners must still silently drop unauthenticated/invalid packets.
 
 /// Initial protocol version for core userland UDP frames.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u8 = 1;

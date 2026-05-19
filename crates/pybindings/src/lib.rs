@@ -12,6 +12,8 @@ pub mod errors;
 #[pymodule]
 fn gatherlink_pybindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<dto::PyUdpServiceConfig>()?;
+    module.add_class::<dto::PyPathConfig>()?;
+    module.add_class::<dto::PySchedulerConfig>()?;
     module.add_class::<dto::PyForwardOutcome>()?;
     module.add_class::<dto::PyReapplyOutcome>()?;
     module.add_class::<engine_api::PyCoreDataplane>()?;
