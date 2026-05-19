@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "rate-limit-pair",
+  "description": "Apply symmetric 10mbit limits to both local and remote veth ends on both paths.",
+  "targets": [
+    {
+      "path": "path-a",
+      "side": "both",
+      "shape": {
+        "rate": "10mbit"
+      }
+    },
+    {
+      "path": "path-b",
+      "side": "both",
+      "shape": {
+        "rate": "10mbit"
+      }
+    }
+  ]
+}

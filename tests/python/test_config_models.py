@@ -15,6 +15,7 @@ def test_all_example_configs_validate() -> None:
         config = validate_config_file(path)
         assert config.schema_version == 1
         assert config.helpers is not None
+        assert config.security.mode == "none"
 
 
 def test_supported_schema_versions_are_registered() -> None:
@@ -125,3 +126,14 @@ def test_ipv6_example_config_preserves_bracketed_udp_endpoints() -> None:
     assert config.paths[0].gateway == "2001:db8::1"
     assert config.services[0].listen == "[::1]:55180"
     assert config.services[0].target == "[::1]:51820"
+
+
+def test_security_mode_defaults_to_plaintext_for_early_lab_configs() -> None:
+    data = load_config_dict(EXAMPLES / "minimal-client.json")
+    data.pop("security")
+
+    from gatherlink.config.validation import validate_config_dict
+
+    config = validate_config_dict(data)
+
+    assert config.security.mode == "none"

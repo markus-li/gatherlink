@@ -16,4 +16,6 @@ def test_run_plan_cli_prints_core_userland_udp_plan() -> None:
     payload = json.loads(result.output)
     assert payload["transport_target"] == "core-userland-udp"
     assert payload["requires_root"] is False
+    assert "security.mode=none" in payload["warnings"][0]
+    assert payload["steps"][0]["details"]["security_mode"] == "none"
     assert payload["steps"][1]["action"] == "bind_udp_listener"

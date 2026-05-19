@@ -35,6 +35,7 @@ class RuntimePlan(GatherlinkBaseModel):
     transport_target: Literal["core-userland-udp"] = "core-userland-udp"
     requires_root: bool = False
     helper_count: int = 0
+    warnings: list[str] = Field(default_factory=list)
     steps: list[RuntimePlanStep] = Field(default_factory=list)
 
 
@@ -65,6 +66,7 @@ def _plan_service_steps(config: RuntimeConfig, *, first_order: int) -> list[Runt
 
 def build_runtime_plan(config: RuntimeConfig) -> RuntimePlan:
     """Build the core MVP startup plan without helper or privileged capabilities."""
+    warnings = _runtime_warnings(config)
     steps = [
         RuntimePlanStep(
             order=10,
@@ -73,6 +75,8 @@ def build_runtime_plan(config: RuntimeConfig) -> RuntimePlan:
             mode="core-userland-udp",
             details={
                 "schema_version": config.schema_version,
+                "security_mode": config.security.mode,
+                "warnings": warnings,
                 # This reminder is intentionally present in dry-run output so
                 # helper-heavy configs do not imply that core owns tunneling.
                 "helpers_ignored_by_core": len(config.helpers),
@@ -96,5 +100,16 @@ def build_runtime_plan(config: RuntimeConfig) -> RuntimePlan:
         node=config.node,
         role=config.role,
         helper_count=len(config.helpers),
+        warnings=warnings,
         steps=sorted(steps, key=lambda step: step.order),
     )
+
+
+def _runtime_warnings(config: RuntimeConfig) -> list[str]:
+    """Return Python-owned operator warnings for runtime state."""
+    if config.security.mode == "none":
+        return [
+            "WARNING: security.mode=none; traffic is unauthenticated and unencrypted.",
+            "WARNING: use only in local labs or controlled debugging.",
+        ]
+    return []

@@ -7,4 +7,6 @@ dist/
 .ruff_cache/
 .pytest_cache/
 .mypy_cache/
+.gatherlink/
+.lab/
 .DS_Store

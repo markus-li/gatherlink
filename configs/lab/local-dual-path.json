@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "name": "local-dual-path",
+  "scenario": "local-dual-path",
+  "description": "Two unprivileged Gatherlink instances over two root-created simulated WAN paths.",
+  "security": {
+    "mode": "none"
+  },
+  "runtime_dir": ".lab/local-dual-path",
+  "nodes": [
+    {
+      "name": "client",
+      "role": "client",
+      "config_path": "configs/examples/minimal-client.json",
+      "run_as": "current-user"
+    },
+    {
+      "name": "server",
+      "role": "server",
+      "config_path": "configs/examples/minimal-server.json",
+      "run_as": "current-user"
+    }
+  ],
+  "paths": [
+    {
+      "name": "path-a",
+      "family": "ipv4",
+      "client_address": "10.80.1.1",
+      "server_address": "10.80.1.2",
+      "subnet": "10.80.1.0/30",
+      "shape": {
+        "rate": "50mbit"
+      }
+    },
+    {
+      "name": "path-b",
+      "family": "ipv4",
+      "client_address": "10.80.2.1",
+      "server_address": "10.80.2.2",
+      "subnet": "10.80.2.0/30",
+      "shape": {
+        "rate": "50mbit"
+      }
+    }
+  ],
+  "traffic": {
+    "generator": "iperf3",
+    "listen": "127.0.0.1:55180",
+    "target": "127.0.0.1:51820",
+    "duration_seconds": 10,
+    "bandwidth": "20mbit"
+  },
+  "profiles": {
+    "clean": {
+      "path-a": {
+        "state": "up"
+      },
+      "path-b": {
+        "state": "up"
+      }
+    },
+    "rate-10mbit": {
+      "path-a": {
+        "rate": "10mbit"
+      },
+      "path-b": {
+        "rate": "10mbit"
+      }
+    },
+    "lossy-path-a": {
+      "path-a": {
+        "loss": "5%"
+      }
+    },
+    "slow-lossy-path-b": {
+      "path-b": {
+        "rate": "2mbit",
+        "delay": "80ms",
+        "jitter": "20ms",
+        "loss": "3%"
+      }
+    },
+    "mtu-1200": {
+      "path-a": {
+        "mtu": 1200
+      },
+      "path-b": {
+        "mtu": 1200
+      }
+    },
+    "path-a-down": {
+      "path-a": {
+        "state": "down"
+      }
+    },
+    "path-b-blackhole": {
+      "path-b": {
+        "blackhole": true
+      }
+    }
+  },
+  "future_features": [
+    "fixed-round-robin",
+    "path-down-recovery",
+    "netem-loss-jitter-reorder",
+    "mtu-mismatch",
+    "receiver-metrics",
+    "ipv6-dual-path"
+  ]
+}

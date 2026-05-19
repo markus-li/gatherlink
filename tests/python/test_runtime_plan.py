@@ -14,6 +14,8 @@ def test_runtime_plan_is_core_userland_udp_and_non_root() -> None:
 
     assert plan.transport_target == "core-userland-udp"
     assert plan.requires_root is False
+    assert plan.warnings
+    assert "security.mode=none" in plan.warnings[0]
     assert all(step.requires_root is False for step in plan.steps)
     assert all(step.mode in {"core-userland-udp", "core-dataplane"} for step in plan.steps)
 
@@ -46,3 +48,12 @@ def test_runtime_plan_preserves_ipv6_udp_endpoints() -> None:
     assert service_step.details["listen"] == "[::1]:55180"
     assert service_step.details["target"] == "[::1]:51820"
     assert plan.steps[-1].details["paths"][0]["source_ip"] == "2001:db8::10"
+
+
+def test_runtime_plan_includes_plaintext_warning_details() -> None:
+    runtime_config = expand_config(validate_config_file(EXAMPLES / "minimal-client.json"))
+    plan = plan_runtime_start(runtime_config)
+
+    core_step = plan.steps[0]
+    assert core_step.details["security_mode"] == "none"
+    assert core_step.details["warnings"] == plan.warnings

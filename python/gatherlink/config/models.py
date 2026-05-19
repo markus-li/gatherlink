@@ -14,6 +14,7 @@ from pydantic import Field, model_validator
 from gatherlink.shared.models import FieldTransform, GatherlinkBaseModel
 
 NodeRole = Literal["client", "server"]
+SecurityMode = Literal["none"]
 ConfigFormat = Literal["minimal-client", "minimal-server", "wireguard-client", "wireguard-server", "dns-helper"]
 
 
@@ -32,6 +33,20 @@ class ServiceConfig(GatherlinkBaseModel):
     name: str
     target: str
     listen: str | None = None
+
+
+class SecurityConfig(GatherlinkBaseModel):
+    """Transport security mode selected by the Python control plane."""
+
+    # TODO: Add authenticated modes here when packet crypto lands. Keeping the
+    # plaintext mode explicit now lets the local lab run while making the unsafe
+    # boundary visible in runtime plans and logs.
+    mode: SecurityMode = "none"
+
+
+def _security_or_default(value: dict | None) -> dict:
+    """Return explicit security config or the current plaintext lab default."""
+    return value or {}
 
 
 class WireGuardHelperConfig(GatherlinkBaseModel):
@@ -63,6 +78,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
     node: str = "local"
     role: NodeRole = "client"
     peer: str | None = None
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
     paths: list[PathConfig] = Field(default_factory=list)
     services: list[ServiceConfig] = Field(default_factory=list)
     helpers: HelpersConfig = Field(default_factory=HelpersConfig)
@@ -79,6 +95,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "node": "node",
             "role": FieldTransform("client"),
             "peer": "peer",
+            "security": FieldTransform(_security_or_default, source="security"),
             "paths": "paths",
             "services": "services",
             "helpers": FieldTransform({}),
@@ -88,6 +105,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "node": "node",
             "role": "role",
             "peer": FieldTransform(None),
+            "security": FieldTransform(_security_or_default, source="security"),
             "paths": FieldTransform([]),
             "services": "services",
             "helpers": FieldTransform({}),
@@ -97,6 +115,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "node": "node",
             "role": FieldTransform("client"),
             "peer": "peer",
+            "security": FieldTransform(_security_or_default, source="security"),
             "paths": "paths",
             "services": "services",
             "helpers": "helpers",
@@ -106,6 +125,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "node": "node",
             "role": "role",
             "peer": FieldTransform(None),
+            "security": FieldTransform(_security_or_default, source="security"),
             "paths": FieldTransform([]),
             "services": "services",
             "helpers": FieldTransform({}),
@@ -115,6 +135,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "node": FieldTransform("local"),
             "role": FieldTransform("client"),
             "peer": FieldTransform(None),
+            "security": FieldTransform(_security_or_default, source="security"),
             "paths": FieldTransform([]),
             "services": FieldTransform([]),
             "helpers": "helpers",

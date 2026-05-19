@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "name": "remote-loss-local-clean",
+  "description": "Keep local/client veth ends clean and apply loss/delay on remote/server veth ends.",
+  "targets": [
+    {
+      "path": "path-a",
+      "side": "local",
+      "clear": true
+    },
+    {
+      "path": "path-a",
+      "side": "remote",
+      "shape": {
+        "delay": "60ms",
+        "jitter": "10ms",
+        "loss": "5%"
+      }
+    },
+    {
+      "path": "path-b",
+      "side": "local",
+      "clear": true
+    },
+    {
+      "path": "path-b",
+      "side": "remote",
+      "shape": {
+        "rate": "5mbit",
+        "loss": "2%"
+      }
+    }
+  ]
+}

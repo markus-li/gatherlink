@@ -29,6 +29,10 @@ fixed round-robin, one path down, path warmup, raw UDP blocked with WSS active,
 MTU mismatch, receiver metrics loss, peer failover, DNS helper racing, bootstrap
 via cache/direct DNS/DoH, and same-subnet distinct gateway validation.
 
+The first runnable integration target is the local dual-path lab documented in
+`docs/local-dual-path-lab.md`. Lab setup and shaping tools may use root, but the
+two Gatherlink instances must run unprivileged.
+
 ## Netem scenarios
 
 Use tc/netem to simulate latency, jitter, packet loss, burst loss, reorder, rate
@@ -44,3 +48,7 @@ metrics. Avoid tests that depend on internet availability.
 The demo should prove UDP payload enters a local virtual port, packets split over
 paths, the remote emits original UDP payload, tcpdump shows both paths, path
 failure does not kill service, and diagnostics explain decisions.
+
+Before crypto/authentication exists, the demo may use explicit plaintext mode as
+documented in `docs/plaintext-security-mode.md`. That mode must warn loudly in
+Python terminal output and logs.

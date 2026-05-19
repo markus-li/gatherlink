@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from gatherlink.config.models import NodeRole
+from gatherlink.config.models import NodeRole, SecurityMode
 from gatherlink.shared.models import GatherlinkBaseModel
 
 
@@ -33,6 +33,12 @@ class RuntimeServiceConfig(GatherlinkBaseModel):
     protocol: Literal["udp"] = "udp"
     target: str
     listen: str | None = None
+
+
+class RuntimeSecurityConfig(GatherlinkBaseModel):
+    """Runtime-visible transport security mode."""
+
+    mode: SecurityMode = "none"
 
 
 class RuntimeWireGuardHelperConfig(GatherlinkBaseModel):
@@ -64,6 +70,7 @@ class RuntimeConfig(GatherlinkBaseModel):
     node: str
     role: NodeRole
     peer: str | None = None
+    security: RuntimeSecurityConfig = Field(default_factory=RuntimeSecurityConfig)
     paths: list[RuntimePathConfig] = Field(default_factory=list)
     services: list[RuntimeServiceConfig] = Field(default_factory=list)
     # Helpers are kept in the runtime contract for helper supervisors to consume,

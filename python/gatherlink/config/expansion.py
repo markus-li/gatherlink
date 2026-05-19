@@ -13,6 +13,7 @@ from gatherlink.config.runtime import (
     RuntimeConfig,
     RuntimeDnsHelperConfig,
     RuntimePathConfig,
+    RuntimeSecurityConfig,
     RuntimeServiceConfig,
     RuntimeWireGuardHelperConfig,
 )
@@ -86,6 +87,7 @@ def expand_config(config: GatherlinkConfig) -> RuntimeConfig:
         node=config.node,
         role=config.role,
         peer=config.peer,
+        security=RuntimeSecurityConfig(mode=config.security.mode),
         paths=_expand_paths(config),
         services=_expand_services(config),
         helpers=_expand_helpers(config),

@@ -7,5 +7,8 @@
       "name": "udp-main",
       "target": "127.0.0.1:51820"
     }
-  ]
+  ],
+  "security": {
+    "mode": "none"
+  }
 }

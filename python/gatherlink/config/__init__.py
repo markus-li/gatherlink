@@ -7,6 +7,7 @@ from gatherlink.config.models import (
     GatherlinkConfig,
     HelpersConfig,
     PathConfig,
+    SecurityConfig,
     ServiceConfig,
     WireGuardHelperConfig,
 )
@@ -14,6 +15,7 @@ from gatherlink.config.runtime import (
     RuntimeConfig,
     RuntimeDnsHelperConfig,
     RuntimePathConfig,
+    RuntimeSecurityConfig,
     RuntimeServiceConfig,
     RuntimeWireGuardHelperConfig,
 )
@@ -29,8 +31,10 @@ __all__ = [
     "RuntimeConfig",
     "RuntimeDnsHelperConfig",
     "RuntimePathConfig",
+    "RuntimeSecurityConfig",
     "RuntimeServiceConfig",
     "RuntimeWireGuardHelperConfig",
+    "SecurityConfig",
     "ServiceConfig",
     "WireGuardHelperConfig",
     "detect_config_format",

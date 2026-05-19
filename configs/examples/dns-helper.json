@@ -6,5 +6,8 @@
       "listen": "127.0.0.1:5353",
       "strategy": "race_first_valid"
     }
+  },
+  "security": {
+    "mode": "none"
   }
 }

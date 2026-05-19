@@ -20,5 +20,8 @@
       "enabled": true,
       "service": "wireguard-main"
     }
+  },
+  "security": {
+    "mode": "none"
   }
 }

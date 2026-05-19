@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "name": "mtu-pair-1200",
+  "description": "Apply MTU 1200 to both local and remote veth ends on both paths.",
+  "targets": [
+    {
+      "path": "path-a",
+      "side": "both",
+      "shape": {
+        "mtu": 1200
+      }
+    },
+    {
+      "path": "path-b",
+      "side": "both",
+      "shape": {
+        "mtu": 1200
+      }
+    }
+  ]
+}

@@ -14,6 +14,7 @@ def test_minimal_client_expands_to_runtime_config() -> None:
     assert runtime.metadata["runtime_model"] == "RuntimeConfig"
     assert runtime.role == "client"
     assert runtime.peer == "relay"
+    assert runtime.security.mode == "none"
     assert runtime.paths[0].name == "wan1"
     assert runtime.services[0].protocol == "udp"
     assert runtime.helpers == []

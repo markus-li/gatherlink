@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "name": "path-a-down",
+  "description": "Take both local and remote veth ends for path-a down.",
+  "targets": [
+    {
+      "path": "path-a",
+      "side": "both",
+      "shape": {
+        "state": "down"
+      }
+    }
+  ]
+}

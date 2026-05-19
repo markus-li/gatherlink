@@ -56,6 +56,10 @@ for normal operation.
 Privileged behavior is isolated into narrow helpers only, such as the optional time-helper with
 CAP_SYS_TIME.
 
+Local lab setup tools may run as root to create network namespaces, veth pairs, routes, and
+traffic shaping. That privilege belongs to the test environment, not to Gatherlink. The Gatherlink
+processes started inside the lab must still run unprivileged.
+
 ## Physical links and logical paths
 
 A physical link is an interface/source/gateway reality.
@@ -119,6 +123,10 @@ No public version mismatch replies, debug hints, or unauthenticated errors.
 Transport security uses AEAD/session envelope/replay windows.
 
 age is only for at-rest secrets and sealed config/provisioning bundles, never for packet transport.
+
+Before packet crypto is implemented, local labs may use explicit `security.mode = "none"`.
+That mode is unauthenticated and unencrypted, must produce loud Python-owned warnings, and must
+remain available later only for controlled labs or debugging.
 
 ## Obfuscation
 
@@ -194,6 +202,9 @@ Diagnostics are an event bus, not a WebSocket feature.
 Sinks may include local WebSocket, stdout, JSONL file, Prometheus, MQTT, and webhooks later.
 
 Diagnostics must never block dataplane or path-manager loops.
+
+Rust emits structured state, counters, and execution events. Python owns terminal display, logs,
+warning wording, event sinks, and mapping raw events back to operator-facing explanations.
 
 ## Hooks
 

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "name": "clear-all",
+  "description": "Clear qdisc shaping and bring every veth end back up.",
+  "targets": [
+    {
+      "path": "path-a",
+      "side": "both",
+      "clear": true
+    },
+    {
+      "path": "path-b",
+      "side": "both",
+      "clear": true
+    }
+  ]
+}
