@@ -123,6 +123,15 @@ def _security_dto(bindings: ModuleType | Any, security: Any) -> Any:
     if security.mode == "static":
         if security.send_key is None or security.receive_key is None:
             raise RustRuntimeBridgeError("security.mode=static requires compiled send_key and receive_key")
+        local_receiver_index = getattr(security, "local_receiver_index", security.receiver_index)
+        remote_receiver_index = getattr(security, "remote_receiver_index", security.receiver_index)
+        if hasattr(bindings.TransportSecurityConfig, "static_keys_v2"):
+            return bindings.TransportSecurityConfig.static_keys_v2(
+                _bounded_u32(local_receiver_index, field="security.local_receiver_index"),
+                _bounded_u32(remote_receiver_index, field="security.remote_receiver_index"),
+                security.send_key,
+                security.receive_key,
+            )
         return bindings.TransportSecurityConfig.static_keys(
             _bounded_u32(security.receiver_index, field="security.receiver_index"),
             security.send_key,

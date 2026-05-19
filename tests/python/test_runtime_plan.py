@@ -89,3 +89,25 @@ def test_runtime_plan_warns_when_service_id_is_explicit() -> None:
     service_step = next(step for step in plan.steps if step.component == "core-service:udp-main")
     assert service_step.details["service_id"] == 300
     assert service_step.details["service_id_explicit"] is True
+
+
+def test_runtime_plan_warns_when_static_security_is_used() -> None:
+    config = validate_config_file(EXAMPLES / "windows-two-node-a.json")
+    config = config.model_copy(update={"security": config.security.model_copy(update={"mode": "static"})})
+    runtime_config = expand_config(config)
+
+    plan = plan_runtime_start(runtime_config)
+
+    assert any("security.mode=static is lab/manual" in warning for warning in plan.warnings)
+
+
+def test_runtime_plan_does_not_warn_for_authenticated_security_source() -> None:
+    config = validate_config_file(EXAMPLES / "windows-two-node-a.json")
+    config = config.model_copy(update={"security": config.security.model_copy(update={"mode": "authenticated"})})
+    runtime_config = expand_config(config)
+
+    plan = plan_runtime_start(runtime_config)
+
+    assert runtime_config.security.mode == "static"
+    assert runtime_config.security.source_mode == "authenticated"
+    assert not any("security.mode=static is lab/manual" in warning for warning in plan.warnings)

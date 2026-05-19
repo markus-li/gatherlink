@@ -27,6 +27,7 @@ local 127.0.0.1:8080
 - idle timeout and connect timeout
 - clear diagnostics for refused connections, unreachable exits, and policy
   denial
+- optional JSONL diagnostics sink for stream lifecycle and failure events
 
 Implemented first slice:
 
@@ -35,6 +36,8 @@ Implemented first slice:
 - the helper uses Python `asyncio` streams only; no extra TCP proxy dependency
   is introduced
 - connection, failure, close, and byte counters are tracked in the helper
+- lifecycle and failure events are emitted as structured helper diagnostics
+  when `--diagnostics-jsonl` is provided
 - production forwarding requires an explicit Gatherlink service stream
   transport; `--lab-direct` is the only direct TCP bypass and is for local
   smoke tests
@@ -43,6 +46,10 @@ Implemented first slice:
 - `gatherlink helpers stream-exit --listen HOST:PORT --allow-host TARGET --allow-port PORT`
   runs the companion UDP exit that opens the explicit remote TCP target and
   returns response bytes through Gatherlink
+- canonical config can declare `helpers.tcp_forward` with the local listen
+  endpoint, the one-to-one remote target, and the Gatherlink service name;
+  runtime expansion resolves that service to the local Gatherlink UDP stream
+  endpoint for supervisors
 - the remote Gatherlink exit helper and stream framing use the shared helper
   transport lifecycle rather than moving TCP behavior into Rust
 

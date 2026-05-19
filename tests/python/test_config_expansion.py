@@ -41,6 +41,33 @@ def test_dns_helper_expands_to_ordered_runtime_helper() -> None:
     assert helper.strategy == "race_first_valid"
 
 
+def test_socks5_helper_expands_service_transport_and_policy() -> None:
+    config = validate_config_file(EXAMPLES / "socks5-helper.json")
+    runtime = expand_config(config)
+
+    helper = runtime.helpers[0]
+    assert helper.kind == "socks5"
+    assert helper.service == "socks5-stream"
+    assert helper.service_listen == "127.0.0.1:55190"
+    assert helper.service_target == "127.0.0.1:56190"
+    assert helper.listen == "127.0.0.1:1080"
+    assert helper.allow_hosts == ["example.com"]
+    assert helper.allow_ports == [443]
+
+
+def test_tcp_forward_helper_expands_service_transport_and_rule() -> None:
+    config = validate_config_file(EXAMPLES / "tcp-forward-helper.json")
+    runtime = expand_config(config)
+
+    helper = runtime.helpers[0]
+    assert helper.kind == "tcp_forward"
+    assert helper.service == "tcp-forward-stream"
+    assert helper.service_listen == "127.0.0.1:55191"
+    assert helper.service_target == "127.0.0.1:56191"
+    assert helper.listen == "127.0.0.1:18080"
+    assert helper.target == "10.0.0.10:80"
+
+
 def test_ipv6_service_expands_without_ipv4_assumptions() -> None:
     config = validate_config_file(EXAMPLES / "minimal-ipv6-client.json")
     runtime = expand_config(config)
@@ -62,3 +89,19 @@ def test_static_runtime_export_redacts_key_material() -> None:
     assert exported["security"]["receive_key"] == "[redacted:32 bytes]"
     assert runtime.security.send_key is not None
     assert len(runtime.security.send_key) == 32
+
+
+def test_authenticated_security_compiles_to_rust_static_executor_and_redacts() -> None:
+    config = validate_config_file(EXAMPLES / "windows-two-node-a.json")
+    authenticated_config = config.model_copy(
+        update={"security": config.security.model_copy(update={"mode": "authenticated"})}
+    )
+
+    runtime = expand_config(authenticated_config)
+    exported = runtime.export_dict()
+
+    assert runtime.security.mode == "static"
+    assert runtime.security.source_mode == "authenticated"
+    assert exported["security"]["source_mode"] == "authenticated"
+    assert exported["security"]["send_key"] == "[redacted:32 bytes]"
+    assert exported["security"]["receive_key"] == "[redacted:32 bytes]"

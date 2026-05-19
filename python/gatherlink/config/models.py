@@ -15,8 +15,16 @@ from pydantic import Field, model_validator
 from gatherlink.shared.models import FieldTransform, GatherlinkBaseModel
 
 NodeRole = Literal["client", "server"]
-SecurityMode = Literal["none", "static"]
-ConfigFormat = Literal["minimal-client", "minimal-server", "wireguard-client", "wireguard-server", "dns-helper"]
+SecurityMode = Literal["none", "static", "authenticated"]
+ConfigFormat = Literal[
+    "minimal-client",
+    "minimal-server",
+    "wireguard-client",
+    "wireguard-server",
+    "dns-helper",
+    "socks5-helper",
+    "tcp-forward-helper",
+]
 PathSchedulerState = Literal["active", "busy", "drain", "disabled"]
 SchedulerPolicy = Literal[
     "round_robin",
@@ -108,11 +116,14 @@ class ServiceConfig(GatherlinkBaseModel):
 class SecurityConfig(GatherlinkBaseModel):
     """Transport security mode selected by the Python control plane."""
 
-    # TODO(security-handshake): Replace static key material with authenticated
-    # Noise-derived sessions. The static mode exists so labs can exercise the
-    # production AEAD path before the full identity handshake is wired in.
+    # Noise IK provisioning is the normal v1 path for producing authenticated
+    # config-facing AEAD facts. Python verifies identities and compiles
+    # short-lived session material; Rust only executes those facts at packet
+    # rate. Static remains explicit lab/manual provisioning.
     mode: SecurityMode = "none"
     receiver_index: int = Field(default=1, ge=0, le=2**32 - 1)
+    local_receiver_index: int | None = Field(default=None, ge=0, le=2**32 - 1)
+    remote_receiver_index: int | None = Field(default=None, ge=0, le=2**32 - 1)
     send_key: str | None = None
     receive_key: str | None = None
 
@@ -122,7 +133,7 @@ class SecurityConfig(GatherlinkBaseModel):
         if self.mode == "none":
             return self
         if self.send_key is None or self.receive_key is None:
-            raise ValueError("security.mode=static requires send_key and receive_key")
+            raise ValueError(f"security.mode={self.mode} requires send_key and receive_key")
         for field_name, value in {"send_key": self.send_key, "receive_key": self.receive_key}.items():
             try:
                 decoded = b64decode(value, validate=True)
@@ -158,11 +169,42 @@ class DnsHelperConfig(GatherlinkBaseModel):
     strategy: str = "race_first_valid"
 
 
+class Socks5HelperConfig(GatherlinkBaseModel):
+    """Optional SOCKS5 helper configuration."""
+
+    enabled: bool = True
+    service: str
+    listen: str = "127.0.0.1:1080"
+    allow_hosts: list[str] = Field(default_factory=list)
+    allow_ports: list[int] = Field(default_factory=list)
+    connection_timeout_seconds: float = Field(default=10.0, ge=0.1)
+
+    @model_validator(mode="after")
+    def validate_allow_lists(self) -> Socks5HelperConfig:
+        """Keep SOCKS5 helper config fail-closed by requiring explicit allow-lists."""
+        if self.enabled and (not self.allow_hosts or not self.allow_ports):
+            raise ValueError("socks5 helper requires allow_hosts and allow_ports when enabled")
+        return self
+
+
+class TcpForwardHelperConfig(GatherlinkBaseModel):
+    """Optional one-to-one TCP forwarding helper configuration."""
+
+    enabled: bool = True
+    service: str
+    listen: str
+    target: str
+    connect_timeout_seconds: float = Field(default=10.0, ge=0.1)
+    idle_timeout_seconds: float = Field(default=300.0, ge=1.0)
+
+
 class HelpersConfig(GatherlinkBaseModel):
     """Optional helper configuration block."""
 
     wireguard: WireGuardHelperConfig | None = None
     dns: DnsHelperConfig | None = None
+    socks5: Socks5HelperConfig | None = None
+    tcp_forward: TcpForwardHelperConfig | None = None
 
 
 class GatherlinkConfig(GatherlinkBaseModel):
@@ -235,6 +277,26 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "services": FieldTransform([]),
             "helpers": "helpers",
         },
+        "socks5-helper": {
+            "schema_version": "schema_version",
+            "node": "node",
+            "role": FieldTransform("client"),
+            "peer": "peer",
+            "security": FieldTransform(_security_or_default, source="security"),
+            "paths": "paths",
+            "services": "services",
+            "helpers": "helpers",
+        },
+        "tcp-forward-helper": {
+            "schema_version": "schema_version",
+            "node": "node",
+            "role": FieldTransform("client"),
+            "peer": "peer",
+            "security": FieldTransform(_security_or_default, source="security"),
+            "paths": "paths",
+            "services": "services",
+            "helpers": "helpers",
+        },
     }
 
     @model_validator(mode="after")
@@ -266,5 +328,9 @@ class GatherlinkConfig(GatherlinkBaseModel):
 
         if self.helpers.wireguard and self.helpers.wireguard.service not in service_names:
             raise ValueError("wireguard helper service must reference an existing service")
+        if self.helpers.socks5 and self.helpers.socks5.service not in service_names:
+            raise ValueError("socks5 helper service must reference an existing service")
+        if self.helpers.tcp_forward and self.helpers.tcp_forward.service not in service_names:
+            raise ValueError("tcp_forward helper service must reference an existing service")
 
         return self

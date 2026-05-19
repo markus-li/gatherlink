@@ -10,6 +10,8 @@ from gatherlink.config.models import (
     SchedulerConfig,
     SecurityConfig,
     ServiceConfig,
+    Socks5HelperConfig,
+    TcpForwardHelperConfig,
     WireGuardHelperConfig,
 )
 from gatherlink.config.runtime import (
@@ -18,6 +20,8 @@ from gatherlink.config.runtime import (
     RuntimePathConfig,
     RuntimeSecurityConfig,
     RuntimeServiceConfig,
+    RuntimeSocks5HelperConfig,
+    RuntimeTcpForwardHelperConfig,
     RuntimeWireGuardHelperConfig,
 )
 from gatherlink.config.validation import detect_config_format, validate_config_dict, validate_config_file
@@ -34,10 +38,14 @@ __all__ = [
     "RuntimePathConfig",
     "RuntimeSecurityConfig",
     "RuntimeServiceConfig",
+    "RuntimeSocks5HelperConfig",
+    "RuntimeTcpForwardHelperConfig",
     "RuntimeWireGuardHelperConfig",
     "SchedulerConfig",
     "SecurityConfig",
     "ServiceConfig",
+    "Socks5HelperConfig",
+    "TcpForwardHelperConfig",
     "WireGuardHelperConfig",
     "detect_config_format",
     "expand_config",

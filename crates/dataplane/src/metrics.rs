@@ -32,6 +32,8 @@ pub struct CounterSnapshot {
     pub send_failed_bytes: u64,
     pub fanout_send_failed_packets: u64,
     pub fanout_send_failed_bytes: u64,
+    pub security_drop_packets: u64,
+    pub security_drop_bytes: u64,
 }
 
 /// Reserved-service frame counters.
@@ -56,12 +58,25 @@ pub struct ControlMetadataSnapshot {
     pub path_control: BTreeMap<u16, PathControlSnapshot>,
 }
 
+/// Local-only security drop counters.
+///
+/// Rust deliberately keeps this aggregate. The crypto envelope collapses
+/// malformed, unauthenticated, wrong-receiver, and replayed packets into one
+/// silent-drop result so the network behavior cannot reveal which check failed.
+/// Python can still turn the aggregate into operator diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SecurityDropSnapshot {
+    pub packets: u64,
+    pub bytes: u64,
+}
+
 /// Full dataplane metrics snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MetricsSnapshot {
     pub services: BTreeMap<String, CounterSnapshot>,
     pub paths: BTreeMap<u16, CounterSnapshot>,
     pub control_metadata: ControlMetadataSnapshot,
+    pub security_drops: SecurityDropSnapshot,
 }
 
 /// Runtime counters owned by the Rust dataplane.
@@ -71,6 +86,7 @@ pub struct DataplaneMetrics {
     paths: BTreeMap<u16, CounterSnapshot>,
     receive_sequences: BTreeMap<ServiceId, GlobalSequenceTracker>,
     control_metadata: ControlMetadataSnapshot,
+    security_drops: SecurityDropSnapshot,
 }
 
 impl DataplaneMetrics {
@@ -203,12 +219,27 @@ impl DataplaneMetrics {
         path.tx.bytes += frame_bytes as u64;
     }
 
+    /// Record one local-only transport/security drop.
+    ///
+    /// These packets must not generate network responses. Counting them here
+    /// gives Python enough fact data to emit diagnostics and scheduler/security
+    /// observations without teaching Rust policy or operator meaning.
+    pub fn record_security_drop(&mut self, path_id: u16, packet_bytes: usize) {
+        self.security_drops.packets += 1;
+        self.security_drops.bytes += packet_bytes as u64;
+
+        let path = self.paths.entry(path_id).or_default();
+        path.security_drop_packets += 1;
+        path.security_drop_bytes += packet_bytes as u64;
+    }
+
     /// Return an immutable snapshot suitable for Python IPC/status conversion.
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
             services: self.services.clone(),
             paths: self.paths.clone(),
             control_metadata: self.control_metadata.clone(),
+            security_drops: self.security_drops,
         }
     }
 }

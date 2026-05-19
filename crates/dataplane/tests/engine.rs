@@ -1,12 +1,48 @@
 use std::net::UdpSocket;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use gatherlink_dataplane::engine::{CoreDataplane, ReapplyOutcome};
+use gatherlink_dataplane::engine::{CoreDataplane, ForwardOutcome, ReapplyOutcome};
 use gatherlink_dataplane::runtime_config::{
     CorePathConfig, CoreRuntimeConfig, PathSchedulerState, SchedulerConfig, SchedulerMode,
 };
 use gatherlink_dataplane::udp_service::UdpServiceConfig;
 use gatherlink_protocol::control::{ControlMessage, ControlPayload, PathMetadata};
+
+fn forward_service_until(dataplane: &mut CoreDataplane, service_name: &str, expected: usize) -> Vec<ForwardOutcome> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut outcomes = Vec::new();
+    while outcomes.len() < expected && Instant::now() < deadline {
+        let remaining = expected - outcomes.len();
+        let mut next = dataplane
+            .forward_available_for_service_nonblocking(service_name, remaining)
+            .unwrap();
+        outcomes.append(&mut next);
+        if outcomes.len() < expected {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+    assert_eq!(outcomes.len(), expected);
+    outcomes
+}
+
+fn receive_target_datagram(socket: &UdpSocket, buffer: &mut [u8]) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match socket.recv_from(buffer) {
+            Ok((length, _source)) => return length,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) && Instant::now() < deadline =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("failed to receive UDP target datagram: {error}"),
+        }
+    }
+}
 
 #[test]
 fn forwards_one_udp_payload_through_core_frame_boundary() {
@@ -180,14 +216,15 @@ fn coalesces_tiny_udp_payloads_into_one_batch_frame() {
     sender.send_to(b"a", service_addr).unwrap();
     sender.send_to(b"bb", service_addr).unwrap();
     sender.send_to(b"ccc", service_addr).unwrap();
-    let outcomes = dataplane.forward_available_for_service("udp-main", 3).unwrap();
+    let outcomes = forward_service_until(&mut dataplane, "udp-main", 3);
 
     let mut received = Vec::new();
     for _ in 0..3 {
         let mut buffer = [0_u8; 8];
-        let (length, _source) = target.recv_from(&mut buffer).unwrap();
+        let length = receive_target_datagram(&target, &mut buffer);
         received.push(buffer[..length].to_vec());
     }
+    received.sort();
     assert_eq!(received, vec![b"a".to_vec(), b"bb".to_vec(), b"ccc".to_vec()]);
     assert_eq!(outcomes.len(), 3);
     assert!(outcomes.iter().all(|outcome| outcome.path_id == 7));
@@ -225,11 +262,11 @@ fn round_robin_scheduler_rotates_across_eligible_paths() {
     ] {
         sender.send_to(payload, service_addr).unwrap();
     }
-    let outcomes = dataplane.forward_available_for_service("udp-main", 4).unwrap();
+    let outcomes = forward_service_until(&mut dataplane, "udp-main", 4);
 
     for _ in 0..4 {
         let mut buffer = [0_u8; 8];
-        target.recv_from(&mut buffer).unwrap();
+        receive_target_datagram(&target, &mut buffer);
     }
     let path_ids = outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>();
     assert_eq!(path_ids, vec![10, 20, 10, 20]);
@@ -271,11 +308,11 @@ fn round_robin_scheduler_honors_compiled_path_weights_and_disabled_paths() {
     ] {
         sender.send_to(payload, service_addr).unwrap();
     }
-    let outcomes = dataplane.forward_available_for_service("udp-main", 4).unwrap();
+    let outcomes = forward_service_until(&mut dataplane, "udp-main", 4);
 
     for _ in 0..4 {
         let mut buffer = [0_u8; 8];
-        target.recv_from(&mut buffer).unwrap();
+        receive_target_datagram(&target, &mut buffer);
     }
     let path_ids = outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>();
     assert_eq!(path_ids, vec![10, 10, 20, 10]);

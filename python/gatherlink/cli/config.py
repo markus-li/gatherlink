@@ -14,6 +14,7 @@ from gatherlink.config.errors import ConfigValidationError
 from gatherlink.config.expansion import expand_config
 from gatherlink.config.loader import load_config_dict
 from gatherlink.config.validation import detect_config_format, validate_config_file
+from gatherlink.persistence.store import redact_secrets
 
 app = typer.Typer(help="Validate and inspect Gatherlink configuration files.")
 
@@ -90,4 +91,4 @@ def show(
         output = expand_config(config) if runtime else config
     except ConfigValidationError as exc:
         _render_error(exc, as_json=as_json)
-    typer.echo(json.dumps(output.export_dict(), indent=2, sort_keys=True))
+    typer.echo(json.dumps(redact_secrets(output.export_dict()), indent=2, sort_keys=True))

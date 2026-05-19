@@ -9,7 +9,7 @@ import typer
 
 from gatherlink.config.expansion import expand_config
 from gatherlink.config.validation import validate_config_file
-from gatherlink.diagnostics import DiagnosticsBus
+from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.diagnostics.sinks import JsonlDiagnosticSink
 from gatherlink.helpers.dns import DnsHelperResolver, DnsResolverPolicy, DnsUdpServer, DnsUpstream
 from gatherlink.helpers.dns.policies import DnssecMode
@@ -36,6 +36,11 @@ def dns_serve(
         "--dnssec-mode",
         help="DNSSEC policy: off, allow_unsigned, or require_ad.",
     ),
+    diagnostics_jsonl: Path | None = typer.Option(
+        None,
+        "--diagnostics-jsonl",
+        help="Append structured helper diagnostics events to this JSONL file.",
+    ),
 ) -> None:
     """Run the DNS helper as a local UDP resolver endpoint."""
     listen_host, listen_port = _parse_host_port(listen)
@@ -46,11 +51,20 @@ def dns_serve(
         for index, (host, port) in enumerate(_parse_host_port(value) for value in (upstream or ["1.1.1.1:53"]))
     ]
     policy = DnsResolverPolicy(upstreams=upstreams, dnssec_mode=cast(DnssecMode, dnssec_mode))
+    sink = JsonlDiagnosticSink(diagnostics_jsonl) if diagnostics_jsonl is not None else None
+    diagnostics_bus = DiagnosticsBus(sinks=[sink]) if sink is not None else None
     typer.echo(
         f"DNS helper listening on {listen_host}:{listen_port}; "
         f"upstreams={','.join(item.authority() for item in upstreams)}"
     )
-    DnsUdpServer((listen_host, listen_port), DnsHelperResolver(policy=policy)).serve_forever()
+    try:
+        resolver = DnsHelperResolver(policy=policy, diagnostics_bus=diagnostics_bus)
+        DnsUdpServer((listen_host, listen_port), resolver).serve_forever()
+    finally:
+        if diagnostics_bus is not None:
+            diagnostics_bus.drain()
+        if sink is not None:
+            sink.close()
 
 
 @app.command("socks5-serve")
@@ -78,6 +92,11 @@ def socks5_serve(
         "--gatherlink-service",
         help="Local Gatherlink UDP service endpoint host:port that carries helper stream frames to the exit.",
     ),
+    diagnostics_jsonl: Path | None = typer.Option(
+        None,
+        "--diagnostics-jsonl",
+        help="Append structured helper diagnostics events to this JSONL file.",
+    ),
 ) -> None:
     """Run the SOCKS5 helper as a conservative local TCP CONNECT proxy."""
     listen_host, listen_port = _parse_host_port(listen)
@@ -89,33 +108,54 @@ def socks5_serve(
         f"SOCKS5 helper listening on {listen_host}:{listen_port}; "
         f"allowed_hosts={','.join(allow_host)} allowed_ports={','.join(str(port) for port in allow_port)}"
     )
+    sink = JsonlDiagnosticSink(diagnostics_jsonl) if diagnostics_jsonl is not None else None
+    diagnostics_bus = DiagnosticsBus(sinks=[sink]) if sink is not None else None
     if lab_direct:
-        run_lab_direct_socks5_server(
-            listen_host=listen_host,
-            listen_port=listen_port,
-            allowed_hosts=allow_host,
-            allowed_ports=allow_port,
-            auth=(username, password) if username is not None and password is not None else None,
-        )
+        try:
+            run_lab_direct_socks5_server(
+                listen_host=listen_host,
+                listen_port=listen_port,
+                allowed_hosts=allow_host,
+                allowed_ports=allow_port,
+                auth=(username, password) if username is not None and password is not None else None,
+                diagnostics_bus=diagnostics_bus,
+            )
+        finally:
+            if diagnostics_bus is not None:
+                diagnostics_bus.drain()
+            if sink is not None:
+                sink.close()
         return
     exit_connector = None
     if gatherlink_service is not None:
         service_host, service_port = _parse_host_port(gatherlink_service)
         exit_connector = GatherlinkServiceExitConnector(GatherlinkUdpStreamTransport(service_host, service_port))
-    run_socks5_server(
-        listen_host=listen_host,
-        listen_port=listen_port,
-        allowed_hosts=allow_host,
-        allowed_ports=allow_port,
-        auth=(username, password) if username is not None and password is not None else None,
-        exit_connector=exit_connector,
-    )
+    try:
+        run_socks5_server(
+            listen_host=listen_host,
+            listen_port=listen_port,
+            allowed_hosts=allow_host,
+            allowed_ports=allow_port,
+            auth=(username, password) if username is not None and password is not None else None,
+            exit_connector=exit_connector,
+            diagnostics_bus=diagnostics_bus,
+        )
+    finally:
+        if diagnostics_bus is not None:
+            diagnostics_bus.drain()
+        if sink is not None:
+            sink.close()
 
 
 @app.command("wireguard-plan")
 def wireguard_plan(
     config_path: Path = typer.Argument(..., help="Gatherlink config containing a WireGuard helper."),
     peer_public_key: str | None = typer.Option(None, "--peer-public-key", help="Optional key for snippet rendering."),
+    diagnostics_jsonl: Path | None = typer.Option(
+        None,
+        "--diagnostics-jsonl",
+        help="Append structured WireGuard helper diagnostics events to this JSONL file.",
+    ),
 ) -> None:
     """Show WireGuard-over-Gatherlink service mapping and peer endpoint guidance."""
     runtime_config = expand_config(validate_config_file(config_path))
@@ -124,6 +164,8 @@ def wireguard_plan(
     if not plans:
         typer.echo("no WireGuard helper found", err=True)
         raise typer.Exit(1)
+    sink = JsonlDiagnosticSink(diagnostics_jsonl) if diagnostics_jsonl is not None else None
+    diagnostics_bus = DiagnosticsBus(sinks=[sink]) if sink is not None else None
     for plan in plans:
         diagnostics = plan.diagnostics()
         typer.echo(f"service: {diagnostics['service']}")
@@ -132,6 +174,20 @@ def wireguard_plan(
         typer.echo(f"wg tool: {tools['wg'] or 'not found'}")
         typer.echo(f"wg-quick tool: {tools['wg_quick'] or 'not found'}")
         typer.echo(render_peer_endpoint_snippet(plan, peer_public_key=peer_public_key))
+        if diagnostics_bus is not None:
+            diagnostics_bus.publish(
+                DiagnosticEvent.helper_event(
+                    code="helper.wireguard.plan",
+                    helper="wireguard",
+                    message="WireGuard-over-Gatherlink service mapping rendered",
+                    service=plan.service,
+                    details={"plan": diagnostics, "tools": tools},
+                )
+            )
+    if diagnostics_bus is not None:
+        diagnostics_bus.drain()
+    if sink is not None:
+        sink.close()
 
 
 @app.command("tcp-forward")
@@ -150,6 +206,11 @@ def tcp_forward(
         "--gatherlink-service",
         help="Local Gatherlink UDP service endpoint host:port that carries helper stream frames to the exit.",
     ),
+    diagnostics_jsonl: Path | None = typer.Option(
+        None,
+        "--diagnostics-jsonl",
+        help="Append structured helper diagnostics events to this JSONL file.",
+    ),
 ) -> None:
     """Run a narrow one-to-one TCP forwarding helper."""
     listen_host, listen_port = _parse_host_port(listen)
@@ -163,14 +224,29 @@ def tcp_forward(
         connect_timeout_seconds=connect_timeout,
         idle_timeout_seconds=idle_timeout,
     )
+    sink = JsonlDiagnosticSink(diagnostics_jsonl) if diagnostics_jsonl is not None else None
+    diagnostics_bus = DiagnosticsBus(sinks=[sink]) if sink is not None else None
     if lab_direct:
-        run_lab_direct_tcp_forwarder(config)
+        try:
+            run_lab_direct_tcp_forwarder(config, diagnostics_bus=diagnostics_bus)
+        finally:
+            if diagnostics_bus is not None:
+                diagnostics_bus.drain()
+            if sink is not None:
+                sink.close()
         return
     if gatherlink_service is not None:
         service_host, service_port = _parse_host_port(gatherlink_service)
-        run_tcp_forwarder(config, transport=GatherlinkUdpStreamTransport(service_host, service_port))
-        return
-    run_tcp_forwarder(config)
+        transport = GatherlinkUdpStreamTransport(service_host, service_port)
+    else:
+        transport = None
+    try:
+        run_tcp_forwarder(config, transport=transport, diagnostics_bus=diagnostics_bus)
+    finally:
+        if diagnostics_bus is not None:
+            diagnostics_bus.drain()
+        if sink is not None:
+            sink.close()
 
 
 @app.command("stream-exit")
@@ -220,11 +296,52 @@ def stream_exit(
 @app.command("status-http")
 def status_http(
     listen: str = typer.Option("127.0.0.1:8765", "--listen", help="HTTP listen endpoint as host:port."),
+    allow_non_loopback: bool = typer.Option(
+        False,
+        "--allow-non-loopback",
+        help="DANGER: allow binding the experimental helper outside loopback.",
+    ),
+    write_window_seconds: int = typer.Option(
+        3600,
+        "--write-window-seconds",
+        help="Seconds before experimental write APIs become read-only.",
+    ),
+    diagnostics_jsonl: Path | None = typer.Option(
+        None,
+        "--diagnostics-jsonl",
+        help="Append structured helper diagnostics events to this JSONL file.",
+    ),
 ) -> None:
-    """Run a small local HTTP helper showing Gatherlink services on this machine."""
+    """Run the EXPERIMENTAL local HTTP helper showing Gatherlink services."""
     listen_host, listen_port = _parse_host_port(listen)
-    typer.echo(f"Gatherlink status HTTP helper listening on http://{listen_host}:{listen_port}")
-    run_status_http_server(StatusHttpConfig(listen_host=listen_host, listen_port=listen_port))
+    try:
+        config = StatusHttpConfig(
+            listen_host=listen_host,
+            listen_port=listen_port,
+            allow_non_loopback=allow_non_loopback,
+            write_window_seconds=write_window_seconds,
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if allow_non_loopback:
+        typer.echo(
+            "DANGER: experimental status HTTP helper is bound outside loopback. "
+            "Do not expose this to untrusted networks.",
+            err=True,
+        )
+    typer.echo(
+        f"Gatherlink EXPERIMENTAL status HTTP helper listening on http://{listen_host}:{listen_port}; "
+        f"write window expires at {config.write_expires_at.isoformat()}"
+    )
+    sink = JsonlDiagnosticSink(diagnostics_jsonl) if diagnostics_jsonl is not None else None
+    diagnostics_bus = DiagnosticsBus(sinks=[sink]) if sink is not None else None
+    try:
+        run_status_http_server(config, diagnostics_bus=diagnostics_bus)
+    finally:
+        if diagnostics_bus is not None:
+            diagnostics_bus.drain()
+        if sink is not None:
+            sink.close()
 
 
 @app.command("relay-discover")

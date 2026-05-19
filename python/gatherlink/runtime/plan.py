@@ -121,6 +121,13 @@ def runtime_warnings(config: RuntimeConfig) -> list[str]:
                 "WARNING: use only in local labs or controlled debugging.",
             ]
         )
+    if config.security.source_mode == "static":
+        warnings.extend(
+            [
+                "WARNING: security.mode=static is lab/manual provisioning, not the normal v1 secure path.",
+                "WARNING: prefer security.mode=authenticated material produced by the signed handshake commands.",
+            ]
+        )
     for service in config.services:
         if service.service_id_explicit:
             warnings.append(

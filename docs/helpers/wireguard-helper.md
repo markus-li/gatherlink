@@ -23,6 +23,9 @@ Implemented first slice:
 - key helpers delegate to the official `wg` tool for `genkey` and `pubkey`
 - planning diagnostics report whether `wg` and `wg-quick` are available without
   invoking privileged interface operations
+- `wireguard-plan --diagnostics-jsonl ...` emits `helper.wireguard.plan` with
+  service mapping and tool availability facts, but no WireGuard private keys or
+  generated peer secrets
 - Gatherlink does not parse or implement WireGuard packets, routes, firewall
   policy, or interface lifecycle
 

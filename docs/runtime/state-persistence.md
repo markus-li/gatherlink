@@ -47,13 +47,31 @@ start from fresh authenticated session material.
 
 ## Storage location
 
-Suggested paths:
+Debian v1 paths:
 
 ```text
 /etc/gatherlink/        static config
 /var/lib/gatherlink/    persistent state/cache
 /run/gatherlink/        sockets and volatile runtime state
 /var/log/gatherlink/    optional local logs/events
+```
+
+The Python control plane exposes these through the Debian compatibility backend,
+`GatherlinkStatePaths`, and `PersistentStateStore`. Code should use those
+helpers instead of scattering literal system paths through runtime, helper, or
+CLI modules.
+
+Current first-slice subpaths:
+
+```text
+/var/lib/gatherlink/identities/*.identity.json    private node identities, 0600
+/var/lib/gatherlink/identities/*.public.json      public identity exports
+/var/lib/gatherlink/bootstrap/endpoints.json      non-authoritative endpoint cache
+/var/lib/gatherlink/bundles/*.signed.json         signed control-plane bundles
+/var/lib/gatherlink/trust-roots/*.public.json     trusted public roots
+/var/lib/gatherlink/hints/*.json                  non-authoritative runtime hints
+/var/lib/gatherlink/secrets/*.sealed.json         passphrase-sealed local secrets, 0600
+/var/log/gatherlink/*.jsonl                       durable diagnostics sinks
 ```
 
 ## Atomicity and corruption
@@ -63,8 +81,34 @@ ignore it, emit diagnostics, and continue with config/defaults.
 
 ## Secrets
 
-Secrets at rest may be age-sealed where appropriate. Runtime decrypted material
-must not be logged.
+Secrets at rest may be passphrase-sealed where appropriate. Runtime decrypted
+material must not be logged.
 
-Use JSON for non-secret state, sealed bundles for secrets, and canonical CBOR
-for signed artifacts where deterministic signing matters.
+Use JSON for non-secret state, sealed JSON envelopes for local secrets, and
+canonical CBOR for signed artifacts where deterministic signing matters.
+
+Private JSON records that contain key material, such as
+`*.identity.json` and pending handshake state, must be owner-only on Debian
+(`0600`). The control plane fails closed when a private record is group- or
+world-readable. Public identity exports and trust roots are intentionally
+shareable and may be `0644`.
+
+The v1 sealed-secret UX is intentionally noninteractive and scriptable:
+
+```bash
+export GATHERLINK_SECRET_PASSPHRASE='replace-with-local-secret'
+gatherlink secrets secret-seal node.identity.json node.identity.sealed.json --label node-identity
+gatherlink secrets secret-inspect node.identity.sealed.json
+gatherlink secrets secret-open node.identity.sealed.json node.identity.opened.json --label node-identity
+```
+
+`secret-seal` reads only owner-only input JSON. `secret-open` writes owner-only
+output JSON and prints only a redacted summary. `secret-inspect` never asks for
+a passphrase and prints only envelope metadata. Sealed secret files remain local
+operator artifacts; they are not signed topology, not session state, and not
+runtime policy.
+
+`PersistentStateStore` intentionally treats endpoint caches and runtime hints as
+non-authoritative. They may speed startup or inform scheduling, but signed
+topology, explicit config, and authenticated control context must still decide
+what is allowed.

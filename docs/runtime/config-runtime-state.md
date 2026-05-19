@@ -59,9 +59,15 @@ Reload rules:
 - invalid config keeps the last good generation active
 - new generation is applied atomically at the runtime boundary where possible
 - stale control messages for old generations are ignored
+- malformed scheduler telemetry is ignored or clamped by Python before reapply
 - removed services stop accepting new traffic
 - removed sessions/paths drain or close according to policy
 - diagnostics explain what changed and what was rejected
+
+Status/control telemetry is advisory. Non-integer, negative, or otherwise
+malformed path metrics must not destabilize the running dataplane. Python should
+fall back to the last good or configured primitive and leave Rust with compact,
+validated execution facts only.
 
 ## Introspection
 
@@ -84,6 +90,9 @@ from the same data.
 
 ## Secrets
 
-Human-facing config may reference secrets or sealed bundles, but runtime
+Human-facing config may reference secrets or sealed bundles, but config
 introspection must not dump private keys, session keys, bootstrap secrets, or
-plaintext provisioning material.
+plaintext provisioning material. Both `config show --canonical` and
+`config show --runtime` are operator views, so they redact secret-looking fields
+while preserving enough shape and length information to verify that material was
+present.

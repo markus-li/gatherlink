@@ -330,9 +330,7 @@ def test_services_cli_monitor_can_render_multiple_aggregate_rows(tmp_path: Path,
     assert "tx=3.0Mb rx=1.5Mb" in result.output
 
 
-def test_services_cli_monitor_handles_stopped_records_with_new_counter_columns(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_services_cli_monitor_handles_stopped_records_with_new_counter_columns(tmp_path: Path, monkeypatch) -> None:
     registry_path = tmp_path / "services"
     monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(registry_path))
     ServiceRegistry(registry_path).register(
@@ -410,6 +408,36 @@ def test_services_cli_close_uses_service_ipc_and_clears_pid(tmp_path: Path, monk
     assert stop_event.is_set()
     assert service.current_pid() is None
     assert service.metadata["last_status"] == "stopped"
+
+
+def test_service_registry_close_escalates_until_detached_process_exits(tmp_path: Path, monkeypatch) -> None:
+    from gatherlink.runtime import services as service_module
+
+    registry = ServiceRegistry(tmp_path / "services")
+    record = registry.register(
+        ServiceRecord(
+            name="core.stubborn",
+            kind="core",
+            pid=123_456,
+            log_file=tmp_path / "service.log",
+        )
+    )
+    kill_calls: list[tuple[int, int]] = []
+    wait_results = iter([False, False, True])
+
+    monkeypatch.setattr(service_module, "pid_is_running", lambda pid: pid == 123_456)
+    monkeypatch.setattr(service_module.os, "kill", lambda pid, sig: kill_calls.append((pid, sig)))
+    monkeypatch.setattr(service_module, "wait_for_pid_exit", lambda _pid, *, timeout_seconds: next(wait_results))
+
+    closed = registry.close(record.name)
+
+    assert closed.name == "core.stubborn"
+    assert kill_calls == [
+        (123_456, service_module.signal.SIGTERM),
+        (123_456, service_module.signal.SIGTERM),
+        (123_456, service_module.signal.SIGKILL),
+    ]
+    assert registry.resolve(record.name).current_pid() is None
 
 
 def test_services_cli_lists_systemd_records_without_process_ownership(tmp_path: Path, monkeypatch) -> None:

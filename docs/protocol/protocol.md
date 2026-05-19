@@ -329,6 +329,12 @@ instead of trying to reinterpret user traffic. This keeps future internal
 services, such as remote status, internal DNS, config apply, and auth handshakes,
 addable in Python without teaching Rust new semantics.
 
+The normal Rust-backed service runner, not only lab services, must drain this
+reserved-service queue and invoke the Python dispatcher. Decoded peer policy is
+then compiled back into narrow Rust executor primitives such as service disable
+or scheduler fanout. Rust still does not learn the meaning of the reserved
+payload.
+
 The generic control metaband currently uses reserved service id `1`. Python
 normally compiles that service's fanout to `0`, meaning every eligible path, so
 Rust emits the same payload over all paths without knowing what control metadata

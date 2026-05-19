@@ -8,6 +8,7 @@ import pytest
 from gatherlink.config.expansion import expand_config
 from gatherlink.config.models import GatherlinkConfig, PathConfig, ServiceConfig
 from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
+from gatherlink.protocol import SERVICE_ID_CONTROL_METADATA, encode_control_payload
 from gatherlink.runtime.runner import CoreRunnerState, run_core_service
 
 
@@ -48,10 +49,70 @@ class FakeDataplane:
         }
 
 
+class FakeReservedEvent:
+    def __init__(self, service_id: int, path_id: int, sequence: int, payload: bytes) -> None:
+        self._service_id = service_id
+        self._path_id = path_id
+        self._sequence = sequence
+        self._payload = payload
+
+    def service_id(self) -> int:
+        return self._service_id
+
+    def path_id(self) -> int:
+        return self._path_id
+
+    def sequence(self) -> int:
+        return self._sequence
+
+    def payload(self) -> bytes:
+        return self._payload
+
+    def frame_bytes(self) -> int:
+        return len(self._payload) + 14
+
+
+class FakeControlDataplane(FakeDataplane):
+    def __init__(self) -> None:
+        super().__init__()
+        self.disabled_services: list[tuple[int, str]] = []
+        self.scheduler_policies: list[tuple[int, int, int]] = []
+        self._reserved_events = [
+            FakeReservedEvent(
+                SERVICE_ID_CONTROL_METADATA,
+                1,
+                10,
+                encode_control_payload(
+                    {1: "path-a"},
+                    service_disables={256: "peer disabled test service"},
+                    service_scheduler_policies={256: (2, 96)},
+                ),
+            )
+        ]
+
+    def drain_reserved_service_events(self):
+        events = self._reserved_events
+        self._reserved_events = []
+        return events
+
+    def disable_service(self, service_id: int, reason: str) -> None:
+        self.disabled_services.append((service_id, reason))
+
+    def set_service_scheduler(self, service_id: int, fanout: int, fanout_below_bytes: int) -> None:
+        self.scheduler_policies.append((service_id, fanout, fanout_below_bytes))
+
+
 class PathOnlyFakeDataplane(FakeDataplane):
     def receive_available_from_paths(self, batch_size: int):
         assert batch_size == 8
         return [FakeOutcome(25)]
+
+
+class SecurityDropFakeDataplane(FakeDataplane):
+    def status_snapshot(self):
+        snapshot = super().status_snapshot()
+        snapshot["security_drops"] = {"packets": 3, "bytes": 192}
+        return snapshot
 
 
 class MemorySink:
@@ -118,6 +179,26 @@ def test_core_runner_emits_lifecycle_diagnostics() -> None:
     assert sink.events[3].details["rx_packets"] == 1
 
 
+def test_core_runner_emits_structured_security_drop_diagnostics() -> None:
+    sink = MemorySink()
+    bus = DiagnosticsBus(sinks=[sink])
+
+    run_core_service(
+        _runtime_config(),
+        dataplane_factory=lambda _runtime_config: SecurityDropFakeDataplane(),
+        max_iterations=2,
+        batch_size=8,
+        diagnostics_bus=bus,
+    )
+    bus.drain()
+
+    drop_events = [event for event in sink.events if event.kind == "drop"]
+    assert len(drop_events) == 1
+    assert drop_events[0].code == "crypto.auth_failed"
+    assert drop_events[0].details["packets"] == 3
+    assert drop_events[0].details["delta_packets"] == 3
+
+
 def test_core_runner_state_exposes_ipc_status_from_rust_snapshot() -> None:
     state = CoreRunnerState(
         node="local",
@@ -139,6 +220,34 @@ def test_core_runner_state_exposes_ipc_status_from_rust_snapshot() -> None:
     assert status["rx_packets"] == 1
     assert status["path_stats"]["path-a"]["tx_bytes"] == 10
     assert status["control_metadata"]["sent"]["frames"] == 1
+
+
+def test_core_runner_drains_python_reserved_services_and_applies_policy() -> None:
+    dataplane = FakeControlDataplane()
+    state = CoreRunnerState(
+        node="local",
+        security_mode="none",
+        service_names=["udp-main"],
+        stop_event=Event(),
+    )
+
+    run_core_service(
+        _runtime_config(),
+        dataplane_factory=lambda _runtime_config: dataplane,
+        max_iterations=1,
+        batch_size=8,
+        runner_state=state,
+    )
+    status = state.snapshot()
+
+    assert dataplane.disabled_services == [(256, "peer disabled test service")]
+    assert dataplane.scheduler_policies == [(256, 2, 96)]
+    assert status["control_metadata"]["received"]["frames"] == 1
+    assert status["control_metadata"]["service_disables"]["256"] == "peer disabled test service"
+    assert status["control_metadata"]["service_scheduler_policies"]["256"] == {
+        "fanout": 2,
+        "fanout_below_bytes": 96,
+    }
 
 
 def test_core_runner_runs_scheduler_reapply_loop_from_status(monkeypatch) -> None:

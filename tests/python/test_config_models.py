@@ -17,7 +17,7 @@ def test_all_example_configs_validate() -> None:
         config = validate_config_file(path)
         assert config.schema_version == 1
         assert config.helpers is not None
-        assert config.security.mode in {"none", "static"}
+        assert config.security.mode in {"none", "static", "authenticated"}
 
 
 def test_supported_schema_versions_are_registered() -> None:
@@ -162,6 +162,25 @@ def test_config_show_cli_can_print_canonical_json() -> None:
     assert '"dns"' in result.output
     assert '"runtime_model"' not in result.output
     assert '"schema_version": 1' in result.output
+
+
+def test_config_show_cli_redacts_canonical_security_keys() -> None:
+    result = CliRunner().invoke(app, ["config", "show", "--canonical", str(EXAMPLES / "windows-two-node-a.json")])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["security"]["send_key"] == "[redacted:44 chars]"
+    assert payload["security"]["receive_key"] == "[redacted:44 chars]"
+    assert "kJiywLJJjRWSIX7ZGttO1R7SKITfnefGyfsawZ5XNxI=" not in result.output
+
+
+def test_config_show_cli_preserves_runtime_redaction_marker() -> None:
+    result = CliRunner().invoke(app, ["config", "show", "--runtime", str(EXAMPLES / "windows-two-node-a.json")])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["security"]["send_key"] == "[redacted:32 bytes]"
+    assert payload["security"]["receive_key"] == "[redacted:32 bytes]"
 
 
 def test_ipv6_example_config_preserves_bracketed_udp_endpoints() -> None:

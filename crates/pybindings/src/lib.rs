@@ -7,6 +7,7 @@ use pyo3::prelude::*;
 pub mod dto;
 pub mod engine_api;
 pub mod errors;
+pub mod relay_api;
 
 /// Python extension module for the Gatherlink Rust dataplane.
 #[pymodule]
@@ -20,5 +21,6 @@ fn gatherlink_pybindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<dto::PyReservedServiceEvent>()?;
     module.add_class::<dto::PyReapplyOutcome>()?;
     module.add_class::<engine_api::PyCoreDataplane>()?;
+    module.add_class::<relay_api::PyRelayHopForwarder>()?;
     Ok(())
 }

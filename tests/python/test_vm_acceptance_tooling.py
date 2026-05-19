@@ -1,0 +1,82 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+VM_TOOLS = REPO_ROOT / "tools" / "vm_acceptance"
+
+
+def test_vm_acceptance_scripts_are_syntax_valid(tmp_path) -> None:
+    script = VM_TOOLS / "run_acceptance.sh"
+    validator = VM_TOOLS / "validate_jsonl.py"
+
+    subprocess.run(["bash", "-n", str(script)], check=True)
+    subprocess.run(
+        [
+            "python3",
+            "-c",
+            (
+                "import py_compile, sys; "
+                "py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)"
+            ),
+            str(validator),
+            str(tmp_path / "validate_jsonl.pyc"),
+        ],
+        check=True,
+    )
+
+
+def test_vm_acceptance_dry_run_does_not_contact_vms(tmp_path) -> None:
+    output = tmp_path / "vm-report"
+    script = VM_TOOLS / "run_acceptance.sh"
+
+    result = subprocess.run(
+        [str(script), "--dry-run", "--out", str(output)],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    commands = (output / "commands.log").read_text(encoding="utf-8")
+    report = (output / "report.md").read_text(encoding="utf-8")
+    assert "VM acceptance dry-run complete" in result.stdout
+    assert "valid:" in result.stdout
+    assert "ssh debian-vm-a" in commands
+    assert "ssh debian-vm-b" in commands
+    assert "[validate-node-a]" in commands
+    assert "[monitor-node-a]" in commands
+    assert "[diagnostics-node-a]" in commands
+    assert "validate_jsonl.py" in commands
+    assert "mode: dry-run" in report
+    assert "configs validated locally" in report
+    assert "diagnostics JSONL are checked" in report
+    assert (output / "node-a.json").exists()
+    assert (output / "node-b.json").exists()
+
+
+def test_vm_acceptance_execute_refuses_committed_example_keys(tmp_path) -> None:
+    output = tmp_path / "vm-report"
+    script = VM_TOOLS / "run_acceptance.sh"
+
+    result = subprocess.run(
+        [str(script), "--execute", "--out", str(output)],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0
+    assert "refusing --execute with example or placeholder authenticated session key" in result.stderr
+    assert not (output / "commands.log").exists()
+
+
+def test_vm_acceptance_committed_files_do_not_contain_private_lab_hosts() -> None:
+    combined = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in VM_TOOLS.rglob("*")
+        if path.is_file() and path.name != "README.md" and "__pycache__" not in path.parts
+    )
+
+    assert ("markus" + "@") not in combined
+    assert ("10.10." + "18.51") not in combined

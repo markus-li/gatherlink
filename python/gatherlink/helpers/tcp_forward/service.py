@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import Any
 
+from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.helpers.transport import (
     HelperStreamTarget,
     HelperStreamTransport,
@@ -56,9 +58,16 @@ class TcpForwarder:
     accident.
     """
 
-    def __init__(self, config: TcpForwardConfig, *, transport: HelperStreamTransport | None = None) -> None:
+    def __init__(
+        self,
+        config: TcpForwardConfig,
+        *,
+        transport: HelperStreamTransport | None = None,
+        diagnostics_bus: DiagnosticsBus | None = None,
+    ) -> None:
         self.config = config
         self.transport = transport or UnconfiguredGatherlinkStreamTransport()
+        self.diagnostics_bus = diagnostics_bus
         self.stats = TcpForwardStats()
         self._server: asyncio.AbstractServer | None = None
 
@@ -84,13 +93,20 @@ class TcpForwarder:
                 HelperStreamTarget(self.config.target_host, self.config.target_port),
                 timeout_seconds=self.config.connect_timeout_seconds,
             )
-        except (OSError, TimeoutError, RuntimeError):
+        except (OSError, TimeoutError, RuntimeError) as exc:
             self.stats.failed += 1
+            self._publish_event(
+                code="helper.stream.unreachable",
+                severity="warning",
+                message="TCP forward helper target unreachable",
+                error=str(exc),
+            )
             writer.close()
             await writer.wait_closed()
             return
 
         self.stats.connected += 1
+        self._publish_event(code="helper.stream.opened", message="TCP forward helper stream opened")
         try:
             await asyncio.gather(
                 self._pipe(reader, stream.writer, "up"),
@@ -98,6 +114,12 @@ class TcpForwarder:
             )
         finally:
             self.stats.closed += 1
+            self._publish_event(
+                code="helper.stream.closed",
+                message="TCP forward helper stream closed",
+                bytes_up=self.stats.bytes_up,
+                bytes_down=self.stats.bytes_down,
+            )
             stream.writer.close()
             writer.close()
             await asyncio.gather(stream.writer.wait_closed(), writer.wait_closed(), return_exceptions=True)
@@ -117,12 +139,41 @@ class TcpForwarder:
             writer.write(data)
             await writer.drain()
 
+    def _publish_event(self, *, code: str, message: str, severity: str = "info", **details: Any) -> None:
+        # TODO(helper-diagnostics): Keep helper stream events as lifecycle and
+        # policy facts, not per-packet traces, so diagnostics never slow payload
+        # movement or drown useful operator signals.
+        if self.diagnostics_bus is None:
+            return
+        self.diagnostics_bus.publish(
+            DiagnosticEvent.helper_event(
+                code=code,
+                helper="tcp_forward",
+                severity=severity,
+                message=message,
+                details={
+                    "listen": f"{self.config.listen_host}:{self.config.listen_port}",
+                    "target": f"{self.config.target_host}:{self.config.target_port}",
+                    **details,
+                },
+            )
+        )
 
-def run_tcp_forwarder(config: TcpForwardConfig, *, transport: HelperStreamTransport | None = None) -> None:
+
+def run_tcp_forwarder(
+    config: TcpForwardConfig,
+    *,
+    transport: HelperStreamTransport | None = None,
+    diagnostics_bus: DiagnosticsBus | None = None,
+) -> None:
     """Run the TCP forwarding helper in the foreground."""
-    asyncio.run(TcpForwarder(config, transport=transport).serve_forever())
+    asyncio.run(TcpForwarder(config, transport=transport, diagnostics_bus=diagnostics_bus).serve_forever())
 
 
-def run_lab_direct_tcp_forwarder(config: TcpForwardConfig) -> None:
+def run_lab_direct_tcp_forwarder(
+    config: TcpForwardConfig,
+    *,
+    diagnostics_bus: DiagnosticsBus | None = None,
+) -> None:
     """Run TCP forwarding with lab-only direct TCP transport."""
-    run_tcp_forwarder(config, transport=LabDirectTcpStreamTransport())
+    run_tcp_forwarder(config, transport=LabDirectTcpStreamTransport(), diagnostics_bus=diagnostics_bus)

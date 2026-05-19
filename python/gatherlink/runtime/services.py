@@ -132,15 +132,34 @@ class ServiceRegistry:
             raise ValueError(f"{service.name} is managed by systemd unit {service.systemd_unit or '[unknown]'}")
         pid = service.current_pid()
         if pid is not None and service.is_running():
-            try:
-                request_service(service, "stop")
-            except ServiceIpcError:
-                os.kill(pid, signal.SIGTERM)
-            if pid != os.getpid() and not wait_for_pid_exit(pid, timeout_seconds=2.0):
-                os.kill(pid, signal.SIGTERM)
-                wait_for_pid_exit(pid, timeout_seconds=2.0)
+            self._stop_process_service(service, pid)
         self.mark_stopped(service.name)
         return service
+
+    def _stop_process_service(self, service: ServiceRecord, pid: int) -> None:
+        """
+        Stop a process-managed service without pretending a live PID is closed.
+
+        The normal path is cooperative IPC. If IPC is absent or the process does
+        not exit, the registry escalates to TERM and finally KILL for detached
+        child processes. Tests may register the current process; that record is
+        marked stopped after IPC because killing ourselves would be nonsense.
+        """
+        try:
+            request_service(service, "stop")
+        except ServiceIpcError:
+            os.kill(pid, signal.SIGTERM)
+        if pid == os.getpid():
+            return
+        if wait_for_pid_exit(pid, timeout_seconds=2.0):
+            return
+        os.kill(pid, signal.SIGTERM)
+        if wait_for_pid_exit(pid, timeout_seconds=2.0):
+            return
+        os.kill(pid, signal.SIGKILL)
+        if wait_for_pid_exit(pid, timeout_seconds=2.0):
+            return
+        raise ValueError(f"{service.name} did not stop after TERM/KILL escalation")
 
     def resolve(self, query: str) -> ServiceRecord:
         """Resolve an exact, prefix, or unique substring service name."""

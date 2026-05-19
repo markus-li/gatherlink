@@ -36,6 +36,44 @@ Relay session state should include:
 The relay does not need endpoint `service_id`, endpoint `path_id`, endpoint
 payload, endpoint address, tenant name, or plaintext route metadata.
 
+The first implementation models this as Python-owned
+`RelaySessionAuthorization` state. Python validates topology membership, relay
+role, revocation, direction, expiry, packet-size limits, receiver indexes, and
+next-hop identity before any compact runtime DTO is produced. Rust should only
+execute the resulting relay-hop packet checks and counters; it must not infer
+relay authorization from plaintext labels.
+
+The current v1 implementation has the first half of that split:
+
+- Python `RelaySessionAuthorization` validates signed-topology relay policy and
+  exports socket-ready `RelayExecutorConfig` records with receiver index, expiry,
+  UDP next-hop address, next-hop receiver index, direction, generation, and
+  optional limits.
+- Expired relay authorizations are omitted from the compiled executor set, so
+  stale relay state fails closed before Rust receives it.
+- Rust `RelaySessionExecutor` accepts only those compiled facts and checks
+  receiver index, expiry, packet size, packet limits, byte limits, and counters.
+- Rust also has a compact hop AEAD outer-envelope unwrap/reseal primitive for
+  an already authorized relay-hop session. It authenticates/decrypts only the
+  hop envelope, applies the compiled checks, and reseals the same opaque
+  endpoint-encrypted packet bytes for the next hop receiver index without
+  learning endpoint service or routing meaning.
+- Rust has a narrow compiled next-hop UDP forwarding primitive for this relay
+  executor. Python still chooses the next-hop endpoint, keys, expiry, limits,
+  and authorization; Rust only polls the relay socket, drops invalid packets
+  without a network response, reseals valid opaque bytes, and sends to the
+  compiled next-hop address.
+- The executor config deliberately omits endpoint `service_id`, endpoint
+  `path_id`, route labels, and payload meaning.
+
+Python orchestration now has foreground and process-managed relay runners for
+the compiled Rust primitive. The runner loads one already-authorized relay
+executor config, binds the Rust hop forwarder, drains local diagnostics, exposes
+service IPC status/stop, and reports lifecycle/counter facts. It still does not
+authorize topology, choose peers, decode endpoint payloads, or route by
+plaintext labels in Rust. Multi-session relay supervision can build on the same
+config shape by launching one or more compiled relay-hop services.
+
 ## Forwarding rules
 
 On receive, the relay:
@@ -49,7 +87,7 @@ check relay replay window
 if replay: silent drop
 check direction, expiry, generation, limits, authorization
 if invalid: silent drop
-forward authenticated inner packet to configured next hop/session
+reseal opaque endpoint packet bytes and send to Python-compiled next hop/session
 ```
 
 Every failure increments local counters and may emit rate-limited diagnostics.
@@ -96,6 +134,7 @@ Relay diagnostics should use stable event codes, including:
 - `relay.expired_session`
 - `relay.generation_stale`
 - `relay.limit_exceeded`
+- `relay.packet_too_large`
 
 Diagnostics are local. The relay remains stealth on the network for invalid
 packets.

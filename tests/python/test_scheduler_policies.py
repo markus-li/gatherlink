@@ -76,6 +76,23 @@ def test_adaptive_scheduler_prefers_live_telemetry_over_startup_hints() -> None:
     assert path.weight > 1
 
 
+def test_scheduler_telemetry_ignores_invalid_or_negative_control_values() -> None:
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {"path-a": {"tx_bps": "bad", "rx_bps": -1}},
+            "path_latency": {"path-a": {"tx_current_us": -10, "tx_mean_us": "also-bad"}},
+        },
+        default_path_ids={"path-a": 0},
+    )
+
+    metrics = telemetry.paths["path-a"]
+
+    assert metrics.tx_capacity_bps is None
+    assert metrics.rx_capacity_bps is None
+    assert metrics.tx_latency_current_us is None
+    assert metrics.tx_latency_mean_us is None
+
+
 def test_python_scheduler_policies_compile_to_distinct_rust_targets() -> None:
     expected = {
         "round_robin": "round_robin",

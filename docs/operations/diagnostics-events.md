@@ -42,10 +42,22 @@ Silent network drops still increment local counters. Invalid crypto, relay, and
 replay inputs must not trigger network responses, but operators should be able
 to see local rate-limited counters and event samples.
 
+For transport security, Rust reports aggregate silent-drop counters only. It
+does not reveal whether a packet failed because it was malformed, used an
+unknown receiver index, failed authentication, or hit replay protection. Python
+turns counter increments into structured `crypto.auth_failed` diagnostics with a
+`drop_family` of `transport_security`; finer labels may be added only when they
+do not change fail-closed wire behavior.
+
 Foreground service startup failures should emit structured diagnostics when a
 sink is configured. Terminal text remains concise, while JSONL keeps facts such
 as config path, error type, and normalized validation details for scripts and
 later operator tooling.
+
+Process-managed helper launches should emit helper lifecycle diagnostics into
+the helper service diagnostics JSONL file. The runtime supervisor owns only the
+process fact (`started` or `start_failed`); helper behavior such as stream
+allow/deny, target reachability, and close counters stays inside the helper.
 
 ## Stable Event Codes
 
@@ -57,14 +69,20 @@ Suggested initial codes include:
 - `crypto.unknown_receiver_index`
 - `relay.auth_failed`
 - `relay.replay_drop`
+- `relay.unknown_receiver_index`
 - `relay.unauthorized_next_hop`
 - `relay.expired_session`
 - `relay.generation_stale`
+- `relay.limit_exceeded`
+- `relay.packet_too_large`
 - `runtime.start_failed`
 - `dns.dnssec_bogus`
 - `dns.policy_denied`
-- `helper.time.ntp_agent_active`
+- `dns.upstream_failed`
 - `helper.time.set_failed`
+- `helper.wireguard.plan`
+- `helper.lifecycle.started`
+- `helper.lifecycle.start_failed`
 - `helper.stream.opened`
 - `helper.stream.closed`
 - `helper.stream.denied`
@@ -72,6 +90,8 @@ Suggested initial codes include:
 - `helper.stream.invalid_frame`
 - `socks.exit_denied`
 - `socks.exit_unreachable`
+- `helper.status_http.started`
+- `helper.status_http.non_loopback_bind`
 
 Helper warnings use the same event bus as dataplane warnings. This keeps
 operator views, JSONL logs, and future metrics consistent.
@@ -136,8 +156,9 @@ gatherlink services close lab.local-dual-path
 
 For process-managed services, `status` and graceful `close` use JSON messages
 over the service's `control.sock`. If IPC is unavailable during close, the
-control plane may fall back to signalling the recorded PID and then clear the
-PID slot.
+control plane falls back to signalling the recorded PID. A process-managed
+service is not marked stopped until the PID exits; the fallback escalates from
+TERM to KILL for detached child processes before clearing the PID slot.
 
 Systemd-managed records are visible in the same list, but direct lifecycle
 control stays with systemd. They should be registered from the same config used
@@ -160,5 +181,9 @@ The first implementation should start with a small model:
 - `packet_forwarded`
 - `counter_snapshot`
 - `shutdown`
+- `drop`
 
 This is enough for the local lab and leaves room for richer path metrics later.
+Drop events are local diagnostics for silent network drops such as failed AEAD,
+replay rejection, unknown receiver index, or relay authorization failure. They
+must not imply that a packet-level error response was sent to the peer.

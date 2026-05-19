@@ -409,7 +409,11 @@ impl CoreDataplane {
         for received in frames {
             let decoded = match self.transport_security.unprotect_packet(&received.bytes) {
                 Ok(frame) => frame,
-                Err(CryptoError::SilentDrop) => continue,
+                Err(CryptoError::SilentDrop) => {
+                    self.metrics
+                        .record_security_drop(received.path_id, received.bytes.len());
+                    continue;
+                }
                 Err(error) => return Err(DataplaneError::Crypto(error)),
             };
             let frame_bytes_len = received.bytes.len();

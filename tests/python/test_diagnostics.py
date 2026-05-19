@@ -62,6 +62,22 @@ def test_runtime_start_failed_factory_exports_stable_error() -> None:
     assert event.severity == "error"
 
 
+def test_drop_event_factory_exports_local_silent_drop_fact() -> None:
+    event = DiagnosticEvent.drop_event(
+        code="crypto.auth_failed",
+        message="invalid encrypted packet dropped",
+        node="node-a",
+        path="path-a",
+        peer="node-b",
+        details={"receiver_index": "unknown"},
+    )
+
+    assert event.stable_code
+    assert event.kind == "drop"
+    assert event.severity == "warning"
+    assert event.details == {"receiver_index": "unknown"}
+
+
 def test_diagnostics_bus_drops_oldest_without_blocking() -> None:
     sink = MemorySink()
     bus = DiagnosticsBus(max_queue_size=2, sinks=[sink])

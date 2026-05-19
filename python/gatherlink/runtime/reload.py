@@ -146,4 +146,9 @@ def _int_or_zero(value: object) -> int:
     """Convert loose status counters to an integer without trusting their source."""
     if value is None:
         return 0
-    return int(value)
+    try:
+        converted = int(value)
+    except (TypeError, ValueError):
+        logger.warning("scheduler status counter ignored non-integer value", extra={"value": repr(value)})
+        return 0
+    return max(0, converted)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import select
-import subprocess
 import sys
 import termios
 import time
@@ -1093,9 +1092,8 @@ def _print_systemd_log(unit: str | None, *, follow: bool, tail: int) -> None:
     if not unit:
         typer.echo("systemd service has no unit name recorded", err=True)
         raise typer.Exit(1)
-    command = default_debian_backend().journalctl_command(unit, follow=follow, tail=tail)
     try:
-        subprocess.run(command, check=False)
+        default_debian_backend().run_journalctl(unit, follow=follow, tail=tail)
     except FileNotFoundError as exc:
         typer.echo("journalctl is not available on this host", err=True)
         raise typer.Exit(1) from exc

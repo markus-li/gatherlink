@@ -56,6 +56,8 @@ class FakeSchedulerConfig:
 class FakeTransportSecurityConfig:
     mode: str
     receiver_index: int | None = None
+    local_receiver_index: int | None = None
+    remote_receiver_index: int | None = None
     send_key: bytes | None = None
     receive_key: bytes | None = None
 
@@ -65,7 +67,23 @@ class FakeTransportSecurityConfig:
 
     @staticmethod
     def static_keys(receiver_index: int, send_key: bytes, receive_key: bytes) -> FakeTransportSecurityConfig:
-        return FakeTransportSecurityConfig("static", receiver_index, send_key, receive_key)
+        return FakeTransportSecurityConfig("static", receiver_index, receiver_index, receiver_index, send_key, receive_key)
+
+    @staticmethod
+    def static_keys_v2(
+        local_receiver_index: int,
+        remote_receiver_index: int,
+        send_key: bytes,
+        receive_key: bytes,
+    ) -> FakeTransportSecurityConfig:
+        return FakeTransportSecurityConfig(
+            "static",
+            remote_receiver_index,
+            local_receiver_index,
+            remote_receiver_index,
+            send_key,
+            receive_key,
+        )
 
 
 class FakeBindings:
@@ -155,6 +173,8 @@ def test_static_security_config_compiles_to_rust_binding_dto_and_inner_mtu() -> 
         security={
             "mode": "static",
             "receiver_index": 123,
+            "local_receiver_index": 321,
+            "remote_receiver_index": 123,
             "send_key": send_key,
             "receive_key": receive_key,
         },
@@ -175,6 +195,8 @@ def test_static_security_config_compiles_to_rust_binding_dto_and_inner_mtu() -> 
 
     assert dtos.security == FakeTransportSecurityConfig(
         "static",
+        123,
+        321,
         123,
         bytes([0x11]) * 32,
         bytes([0x22]) * 32,

@@ -8,12 +8,12 @@ should receive already-validated runtime state and should not contain business l
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 from pydantic import Field
 
+from gatherlink.persistence.store import atomic_write_json, load_json_or_default
 from gatherlink.shared.logging import get_logger
 from gatherlink.shared.models import GatherlinkBaseModel
 
@@ -74,16 +74,12 @@ class BootstrapCache(GatherlinkBaseModel):
 
     @classmethod
     def load(cls, path: Path) -> BootstrapCache:
-        """Load a bootstrap cache file, returning an empty cache when absent."""
-        if not path.exists():
-            return cls()
-        with path.open("r", encoding="utf-8") as handle:
-            return cls.model_validate(json.load(handle))
+        """Load a bootstrap cache file, returning an empty cache when absent or corrupt."""
+        return cls.model_validate(load_json_or_default(path, {}))
 
     def save(self, path: Path) -> None:
-        """Write the cache atomically enough for local CLI usage."""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.export_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        """Write the cache atomically for local CLI and service usage."""
+        atomic_write_json(path, self.export_dict(), mode=0o600)
 
     def get(self, peer: str) -> list[BootstrapEndpoint]:
         """Return cached endpoints for a peer."""

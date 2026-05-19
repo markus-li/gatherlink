@@ -18,6 +18,8 @@ from gatherlink.config.runtime import (
     RuntimePathSchedulerConfig,
     RuntimeSecurityConfig,
     RuntimeServiceConfig,
+    RuntimeSocks5HelperConfig,
+    RuntimeTcpForwardHelperConfig,
     RuntimeWireGuardHelperConfig,
 )
 from gatherlink.scheduling.compiler import compile_scheduler, compile_service_priority
@@ -63,12 +65,16 @@ def _expand_paths(
 def _expand_security(config: GatherlinkConfig) -> RuntimeSecurityConfig:
     """Compile user-facing security config into runtime key bytes."""
     if config.security.mode == "none":
-        return RuntimeSecurityConfig(mode="none")
+        return RuntimeSecurityConfig(mode="none", source_mode="none")
     if config.security.send_key is None or config.security.receive_key is None:
-        raise ValueError("security.mode=static requires send_key and receive_key")
+        raise ValueError(f"security.mode={config.security.mode} requires send_key and receive_key")
+    runtime_mode = "static" if config.security.mode == "authenticated" else config.security.mode
     return RuntimeSecurityConfig(
-        mode="static",
+        mode=runtime_mode,
+        source_mode=config.security.mode,
         receiver_index=config.security.receiver_index,
+        local_receiver_index=config.security.local_receiver_index or config.security.receiver_index,
+        remote_receiver_index=config.security.remote_receiver_index or config.security.receiver_index,
         send_key=b64decode(config.security.send_key, validate=True),
         receive_key=b64decode(config.security.receive_key, validate=True),
     )
@@ -119,10 +125,22 @@ def _allocate_service_ids(services: list[ServiceConfig]) -> list[int]:
     return assigned
 
 
-def _expand_helpers(config: GatherlinkConfig) -> list[RuntimeWireGuardHelperConfig | RuntimeDnsHelperConfig]:
+def _expand_helpers(
+    config: GatherlinkConfig,
+) -> list[
+    RuntimeWireGuardHelperConfig
+    | RuntimeDnsHelperConfig
+    | RuntimeSocks5HelperConfig
+    | RuntimeTcpForwardHelperConfig
+]:
     """Expand optional helper blocks into ordered runtime helper records."""
     services = _service_by_name(config.services)
-    helpers: list[RuntimeWireGuardHelperConfig | RuntimeDnsHelperConfig] = []
+    helpers: list[
+        RuntimeWireGuardHelperConfig
+        | RuntimeDnsHelperConfig
+        | RuntimeSocks5HelperConfig
+        | RuntimeTcpForwardHelperConfig
+    ] = []
 
     if config.helpers.wireguard:
         service = services[config.helpers.wireguard.service]
@@ -141,6 +159,34 @@ def _expand_helpers(config: GatherlinkConfig) -> list[RuntimeWireGuardHelperConf
                 enabled=config.helpers.dns.enabled,
                 listen=config.helpers.dns.listen,
                 strategy=config.helpers.dns.strategy,
+            )
+        )
+    if config.helpers.socks5:
+        service = services[config.helpers.socks5.service]
+        helpers.append(
+            RuntimeSocks5HelperConfig(
+                enabled=config.helpers.socks5.enabled,
+                service=config.helpers.socks5.service,
+                service_target=service.target,
+                service_listen=service.listen,
+                listen=config.helpers.socks5.listen,
+                allow_hosts=config.helpers.socks5.allow_hosts,
+                allow_ports=config.helpers.socks5.allow_ports,
+                connection_timeout_seconds=config.helpers.socks5.connection_timeout_seconds,
+            )
+        )
+    if config.helpers.tcp_forward:
+        service = services[config.helpers.tcp_forward.service]
+        helpers.append(
+            RuntimeTcpForwardHelperConfig(
+                enabled=config.helpers.tcp_forward.enabled,
+                service=config.helpers.tcp_forward.service,
+                service_target=service.target,
+                service_listen=service.listen,
+                listen=config.helpers.tcp_forward.listen,
+                target=config.helpers.tcp_forward.target,
+                connect_timeout_seconds=config.helpers.tcp_forward.connect_timeout_seconds,
+                idle_timeout_seconds=config.helpers.tcp_forward.idle_timeout_seconds,
             )
         )
 

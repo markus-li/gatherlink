@@ -249,6 +249,7 @@ impl PyCoreDataplane {
             "control_metadata",
             control_metadata_dict(py, snapshot.control_metadata)?,
         )?;
+        root.set_item("security_drops", security_drop_dict(py, snapshot.security_drops)?)?;
         let disabled_services = PyDict::new_bound(py);
         for (service_id, reason) in self.inner.disabled_services_snapshot() {
             disabled_services.set_item(service_id.to_string(), reason)?;
@@ -279,6 +280,8 @@ fn counter_dict(
     output.set_item("send_failed_bytes", counters.send_failed_bytes)?;
     output.set_item("fanout_send_failed_packets", counters.fanout_send_failed_packets)?;
     output.set_item("fanout_send_failed_bytes", counters.fanout_send_failed_bytes)?;
+    output.set_item("security_drop_packets", counters.security_drop_packets)?;
+    output.set_item("security_drop_bytes", counters.security_drop_bytes)?;
     Ok(output)
 }
 
@@ -315,6 +318,16 @@ fn control_metadata_dict(py: Python<'_>, metadata: ControlMetadataSnapshot) -> P
     output.set_item("path_latency", path_latency)?;
     output.set_item("path_mtu", path_mtu)?;
     output.set_item("path_control", path_control)?;
+    Ok(output)
+}
+
+fn security_drop_dict(
+    py: Python<'_>,
+    counters: gatherlink_dataplane::metrics::SecurityDropSnapshot,
+) -> PyResult<Bound<'_, PyDict>> {
+    let output = PyDict::new_bound(py);
+    output.set_item("packets", counters.packets)?;
+    output.set_item("bytes", counters.bytes)?;
     Ok(output)
 }
 

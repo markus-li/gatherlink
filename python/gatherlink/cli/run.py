@@ -24,6 +24,8 @@ from gatherlink.config.validation import validate_config_file
 from gatherlink.dataplane.rust_backend import RustDataplaneUnavailableError, RustRuntimeBridgeError
 from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.diagnostics.sinks import JsonlDiagnosticSink
+from gatherlink.runtime.helper_supervisor import HelperLaunchPlan, build_helper_launch_plans
+from gatherlink.runtime.relay_runner import RelayRunnerState, RelayRuntimeConfig, run_relay_service
 from gatherlink.runtime.runner import CoreRunnerState, run_core_service
 from gatherlink.runtime.services import ServiceIpcServer, ServiceRecord, ServiceRegistry, service_name
 from gatherlink.runtime.supervisor import plan_runtime_start
@@ -107,6 +109,7 @@ def service(
                         "node": runtime_config.node,
                         "role": runtime_config.role,
                         "security_mode": runtime_config.security.mode,
+                        "security_source_mode": runtime_config.security.source_mode,
                     },
                 )
             )
@@ -150,12 +153,171 @@ def service(
     )
 
 
+@app.command("relay-service")
+def relay_service(
+    path: Path,
+    max_iterations: int | None = typer.Option(
+        None,
+        help="Stop after this many relay poll iterations; intended for smoke tests.",
+    ),
+    diagnostics_jsonl: Path | None = typer.Option(
+        None,
+        help="Append structured diagnostics events to this JSONL file.",
+    ),
+    service_name_override: str | None = typer.Option(
+        None,
+        "--service-name",
+        help="Register this foreground relay under a specific process-managed service name.",
+    ),
+    service_log: Path | None = typer.Option(
+        None,
+        "--service-log",
+        help="Log file path recorded in the service registry when --service-name is used.",
+    ),
+) -> None:
+    """Run a foreground Rust-backed secure relay-hop service from compiled runtime config."""
+    sink = JsonlDiagnosticSink(diagnostics_jsonl) if diagnostics_jsonl is not None else None
+    diagnostics_bus = DiagnosticsBus(sinks=[sink]) if sink is not None else None
+    ipc: ServiceIpcServer | None = None
+    runner_state: RelayRunnerState | None = None
+    try:
+        relay_config = RelayRuntimeConfig.load(path)
+        if service_name_override is not None:
+            runner_state = RelayRunnerState(
+                name=relay_config.name,
+                listen=relay_config.listen,
+                next_hop=relay_config.executor.next_hop_address,
+                direction=relay_config.executor.direction,
+                stop_event=Event(),
+            )
+            record = ServiceRegistry().register(
+                ServiceRecord(
+                    name=service_name_override,
+                    kind="relay",
+                    pid=os.getpid(),
+                    log_file=service_log or Path(".gatherlink/logs") / f"{service_name_override}.log",
+                    detached_from_console=False,
+                    command=sys.argv,
+                    metadata={
+                        "config": str(path),
+                        "relay_name": relay_config.name,
+                        "listen": relay_config.listen,
+                        "next_hop": relay_config.executor.next_hop_address,
+                        "direction": relay_config.executor.direction,
+                    },
+                )
+            )
+            ipc = ServiceIpcServer(record, status=runner_state.snapshot, stop=runner_state.stop)
+            ipc.start()
+        result = run_relay_service(
+            relay_config,
+            max_iterations=max_iterations,
+            diagnostics_bus=diagnostics_bus,
+            stop_event=runner_state.stop_event if runner_state is not None else None,
+            runner_state=runner_state,
+        )
+    except (RustDataplaneUnavailableError, ValueError) as exc:
+        _publish_start_failed(
+            diagnostics_bus,
+            message=f"cannot start relay service: {exc}",
+            details={"path": str(path), "error_type": type(exc).__name__},
+        )
+        typer.echo(f"cannot start relay service: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    finally:
+        if ipc is not None:
+            ipc.close()
+        if sink is not None:
+            sink.close()
+    typer.echo(
+        "relay service stopped: "
+        f"iterations={result.iterations} "
+        f"forwarded_packets={result.forwarded_packets} forwarded_bytes={result.forwarded_bytes} "
+        f"dropped_packets={result.dropped_packets} "
+        f"emitted_packets={result.emitted_packets} emitted_bytes={result.emitted_bytes}"
+    )
+
+
+@app.command("relay-start")
+def relay_start(
+    path: Path,
+    name: str | None = typer.Option(None, "--name", help="Override the managed relay service name."),
+    diagnostics_jsonl: Path | None = typer.Option(
+        None,
+        help="Append structured diagnostics events to this JSONL file.",
+    ),
+) -> None:
+    """Start a process-managed Rust-backed secure relay-hop service in the background."""
+    try:
+        relay_config = RelayRuntimeConfig.load(path)
+    except ValueError as exc:
+        typer.echo(f"cannot start relay service: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    service_record_name = name or service_name("relay", relay_config.name)
+    registry = ServiceRegistry()
+    with suppress(ValueError):
+        existing = registry.resolve(service_record_name)
+        if existing.manager != "process":
+            typer.echo(
+                f"cannot replace {existing.name}: service is managed by {existing.manager}",
+                err=True,
+            )
+            raise typer.Exit(1)
+        registry.close(existing.name)
+    service_dir = registry.path / service_record_name
+    log_path = service_dir / "service.log"
+    diagnostics_path = diagnostics_jsonl or service_dir / "diagnostics.jsonl"
+    command = [
+        sys.executable,
+        "-m",
+        "gatherlink.cli.main",
+        "run",
+        "relay-service",
+        str(path),
+        "--diagnostics-jsonl",
+        str(diagnostics_path),
+        "--service-name",
+        service_record_name,
+        "--service-log",
+        str(log_path),
+    ]
+    service_dir.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as log_handle:
+        process = subprocess.Popen(
+            command,
+            cwd=Path.cwd(),
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    registry.register(
+        ServiceRecord(
+            name=service_record_name,
+            kind="relay",
+            pid=process.pid,
+            log_file=log_path,
+            command=command,
+            metadata={
+                "config": str(path),
+                "relay_name": relay_config.name,
+                "listen": relay_config.listen,
+                "next_hop": relay_config.executor.next_hop_address,
+                "direction": relay_config.executor.direction,
+                "diagnostics_jsonl": str(diagnostics_path),
+            },
+        )
+    )
+    typer.echo(f"started {service_record_name} pid={process.pid} log={log_path}")
+
+
 @app.command("start")
 def start(
     path: Path,
     name: str | None = typer.Option(None, "--name", help="Override the managed service name."),
     batch_size: int = typer.Option(32, help="Maximum UDP datagrams to drain per service step."),
-    diagnostics_jsonl: Path | None = typer.Option(None, help="Append structured diagnostics events to this JSONL file."),
+    diagnostics_jsonl: Path | None = typer.Option(
+        None, help="Append structured diagnostics events to this JSONL file."
+    ),
     scheduler_reapply_interval: float | None = typer.Option(
         None,
         "--scheduler-reapply-interval",
@@ -220,11 +382,83 @@ def start(
                 "node": runtime_config.node,
                 "role": runtime_config.role,
                 "security_mode": runtime_config.security.mode,
+                "security_source_mode": runtime_config.security.source_mode,
                 "diagnostics_jsonl": str(diagnostics_path),
             },
         )
     )
     typer.echo(f"started {service_record_name} pid={process.pid} log={log_path}")
+
+
+@app.command("helpers-start")
+def helpers_start(
+    path: Path,
+    name_prefix: str | None = typer.Option(None, "--name-prefix", help="Override the helper service name prefix."),
+) -> None:
+    """Start process-managed helpers declared by a config file."""
+    try:
+        runtime_config = expand_config(validate_config_file(path))
+        registry = ServiceRegistry()
+        plans = build_helper_launch_plans(runtime_config, registry_dir=registry.path, name_prefix=name_prefix)
+    except (ConfigValidationError, ValueError) as exc:
+        if isinstance(exc, ConfigValidationError):
+            _render_error(exc)
+        typer.echo(f"cannot start helpers: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if not plans:
+        typer.echo("no startable helpers declared")
+        return
+    for plan in plans:
+        with suppress(ValueError):
+            existing = registry.resolve(plan.name)
+            if existing.manager != "process":
+                typer.echo(
+                    f"cannot replace {existing.name}: service is managed by {existing.manager}",
+                    err=True,
+                )
+                raise typer.Exit(1)
+            registry.close(existing.name)
+        plan.log_file.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with plan.log_file.open("a", encoding="utf-8") as log_handle:
+                process = subprocess.Popen(
+                    plan.command,
+                    cwd=Path.cwd(),
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                )
+        except OSError as exc:
+            _publish_helper_lifecycle_event(
+                plan,
+                code="helper.lifecycle.start_failed",
+                message=f"cannot start helper {plan.name}: {exc}",
+                severity="error",
+                details={"error_type": type(exc).__name__, "error": str(exc)},
+            )
+            typer.echo(f"cannot start helper {plan.name}: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        registry.register(
+            ServiceRecord(
+                name=plan.name,
+                kind=plan.kind,
+                pid=process.pid,
+                log_file=plan.log_file,
+                command=plan.command,
+                metadata={
+                    "config": str(path),
+                    **plan.metadata,
+                    **({"diagnostics_jsonl": str(plan.diagnostics_jsonl)} if plan.diagnostics_jsonl else {}),
+                },
+            )
+        )
+        _publish_helper_lifecycle_event(
+            plan,
+            code="helper.lifecycle.started",
+            message=f"helper {plan.name} started",
+            details={"pid": process.pid, "log_file": str(plan.log_file)},
+        )
+        typer.echo(f"started {plan.name} pid={process.pid} log={plan.log_file}")
 
 
 def _publish_start_failed(
@@ -238,3 +472,41 @@ def _publish_start_failed(
         return
     diagnostics_bus.publish(DiagnosticEvent.runtime_start_failed(message=message, details=details))
     diagnostics_bus.drain()
+
+
+def _publish_helper_lifecycle_event(
+    plan: HelperLaunchPlan,
+    *,
+    code: str,
+    message: str,
+    severity: str = "info",
+    details: dict[str, object] | None = None,
+) -> None:
+    """
+    Persist process-supervisor helper lifecycle facts next to helper diagnostics.
+
+    The helper process owns helper behavior. The runtime CLI only owns the
+    process-management fact that a helper was started or could not be started.
+    """
+    if plan.diagnostics_jsonl is None:
+        return
+    sink = JsonlDiagnosticSink(plan.diagnostics_jsonl)
+    try:
+        bus = DiagnosticsBus(sinks=[sink])
+        bus.publish(
+            DiagnosticEvent.helper_event(
+                code=code,
+                helper=plan.kind.removeprefix("helper:"),
+                severity=severity,
+                message=message,
+                details={
+                    "service_name": plan.name,
+                    "log_file": str(plan.log_file),
+                    **plan.metadata,
+                    **(details or {}),
+                },
+            )
+        )
+        bus.drain()
+    finally:
+        sink.close()

@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "node": "vm-node-b",
+  "role": "server",
+  "peer": "vm-node-a",
+  "paths": [
+    {
+      "name": "vm-path-a",
+      "interface": "{{PATH_A_INTERFACE}}",
+      "transport_bind": "{{PATH_A_NODE_B_BIND}}",
+      "transport_remote": "{{PATH_A_NODE_A_BIND}}",
+      "scheduler": {
+        "mtu": {{PATH_MTU}},
+        "tx_capacity_bps": {{PATH_CAPACITY_BPS}},
+        "rx_capacity_bps": {{PATH_CAPACITY_BPS}}
+      }
+    },
+    {
+      "name": "vm-path-b",
+      "interface": "{{PATH_B_INTERFACE}}",
+      "transport_bind": "{{PATH_B_NODE_B_BIND}}",
+      "transport_remote": "{{PATH_B_NODE_A_BIND}}",
+      "scheduler": {
+        "mtu": {{PATH_MTU}},
+        "tx_capacity_bps": {{PATH_CAPACITY_BPS}},
+        "rx_capacity_bps": {{PATH_CAPACITY_BPS}}
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "udp-main",
+      "listen": "{{NODE_B_SERVICE_LISTEN}}",
+      "target": "{{NODE_B_SERVICE_TARGET}}"
+    }
+  ],
+  "security": {
+    "mode": "authenticated",
+    "receiver_index": {{NODE_B_RECEIVER_INDEX}},
+    "send_key": "{{NODE_B_SEND_KEY}}",
+    "receive_key": "{{NODE_B_RECEIVE_KEY}}"
+  }
+}

@@ -103,5 +103,12 @@ def _optional_int(value: object) -> int | None:
     """Convert loose status metadata into an optional integer."""
     if value is None:
         return None
-    return int(value)
-
+    try:
+        converted = int(value)
+    except (TypeError, ValueError):
+        logger.warning("scheduler telemetry ignored non-integer value", extra={"value": repr(value)})
+        return None
+    if converted < 0:
+        logger.warning("scheduler telemetry ignored negative value", extra={"value": converted})
+        return None
+    return converted

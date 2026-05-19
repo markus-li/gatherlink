@@ -22,6 +22,7 @@ from gatherlink.config.models import (
 )
 from gatherlink.shared.models import GatherlinkBaseModel
 
+RuntimeSecurityExecutionMode = Literal["none", "static"]
 SchedulerMode = Literal[
     "round_robin",
     "weighted_round_robin",
@@ -91,8 +92,11 @@ class RuntimeServiceConfig(GatherlinkBaseModel):
 class RuntimeSecurityConfig(GatherlinkBaseModel):
     """Runtime-visible transport security mode."""
 
-    mode: SecurityMode = "none"
+    mode: RuntimeSecurityExecutionMode = "none"
+    source_mode: SecurityMode = "none"
     receiver_index: int = 1
+    local_receiver_index: int = 1
+    remote_receiver_index: int = 1
     send_key: bytes | None = None
     receive_key: bytes | None = None
 
@@ -135,7 +139,40 @@ class RuntimeDnsHelperConfig(GatherlinkBaseModel):
     strategy: str
 
 
-RuntimeHelperConfig = RuntimeWireGuardHelperConfig | RuntimeDnsHelperConfig
+class RuntimeSocks5HelperConfig(GatherlinkBaseModel):
+    """Runtime-ready SOCKS5 helper settings outside the core runner."""
+
+    kind: Literal["socks5"] = "socks5"
+    enabled: bool = True
+    service: str
+    service_target: str
+    service_listen: str | None = None
+    listen: str
+    allow_hosts: list[str] = Field(default_factory=list)
+    allow_ports: list[int] = Field(default_factory=list)
+    connection_timeout_seconds: float = 10.0
+
+
+class RuntimeTcpForwardHelperConfig(GatherlinkBaseModel):
+    """Runtime-ready one-to-one TCP forwarding helper settings outside the core runner."""
+
+    kind: Literal["tcp_forward"] = "tcp_forward"
+    enabled: bool = True
+    service: str
+    service_target: str
+    service_listen: str | None = None
+    listen: str
+    target: str
+    connect_timeout_seconds: float = 10.0
+    idle_timeout_seconds: float = 300.0
+
+
+RuntimeHelperConfig = (
+    RuntimeWireGuardHelperConfig
+    | RuntimeDnsHelperConfig
+    | RuntimeSocks5HelperConfig
+    | RuntimeTcpForwardHelperConfig
+)
 
 
 class RuntimeConfig(GatherlinkBaseModel):

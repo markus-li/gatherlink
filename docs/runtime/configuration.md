@@ -91,7 +91,9 @@ size, letting Python build policies such as `duplicate_small`.
 `config show --canonical` prints the validated user-facing config after schema
 version and format normalization. `config show --runtime` prints the explicit
 runtime contract from `python/gatherlink/config/runtime.py`; this is the boundary
-future runner, helper, and dataplane code should consume.
+future runner, helper, and dataplane code should consume. Both views are
+operator introspection, so secret-looking fields are redacted in the output even
+when the source config file stores explicit session material.
 
 Runtime JSON is also the first operator/automation view for compiled state.
 Human terminal tables may be added later, but they should be derived from the

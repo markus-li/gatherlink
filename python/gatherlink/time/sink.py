@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 
+from gatherlink.platform.debian import default_debian_backend
 from gatherlink.time.sources.direct_ntp import DirectNtpSample, query_direct_ntp
 from gatherlink.time.sources.https_time import query_https_date_time
 
@@ -91,17 +91,4 @@ def read_bootstrap_sink_time_sample() -> DirectNtpSample | None:
 
 def read_system_ntp_status() -> str:
     """Read system NTP synchronization status without attempting to set time."""
-    try:
-        result = subprocess.run(
-            ["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=1,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return "unknown"
-    value = result.stdout.strip().lower()
-    if result.returncode != 0 or value not in {"yes", "no"}:
-        return "unknown"
-    return "synchronized" if value == "yes" else "unsynchronized"
+    return default_debian_backend().ntp_synchronization_state()

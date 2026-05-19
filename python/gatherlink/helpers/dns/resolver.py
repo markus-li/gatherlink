@@ -20,6 +20,7 @@ import dns.rcode
 import dns.rdataclass
 import dns.rdatatype
 
+from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.helpers.dns.cache import DnsCacheKey, DnsResponseCache
 from gatherlink.helpers.dns.dnssec import DnssecDiagnostic, evaluate_dnssec
 from gatherlink.helpers.dns.domain_sets import normalize_qname
@@ -59,6 +60,7 @@ class DnsHelperResolver:
     policy: DnsResolverPolicy = field(default_factory=DnsResolverPolicy)
     cache: DnsResponseCache | None = None
     upstream_resolver: UpstreamResolver | None = None
+    diagnostics_bus: DiagnosticsBus | None = None
 
     def __post_init__(self) -> None:
         """Install default cache and direct resolver dependencies."""
@@ -97,10 +99,29 @@ class DnsHelperResolver:
                 response = self._query_upstream(query, upstream)
             except (OSError, dns.exception.DNSException, NotImplementedError) as exc:
                 logger.debug("DNS helper upstream failed", extra={"upstream": upstream.authority(), "error": str(exc)})
+                self._publish_event(
+                    code="dns.upstream_failed",
+                    severity="warning",
+                    message="DNS helper upstream failed",
+                    qname=qname,
+                    qtype=dns.rdatatype.to_text(question.rdtype),
+                    upstream=upstream.authority(),
+                    error=str(exc),
+                )
                 continue
 
             dnssec = evaluate_dnssec(response, self.policy.dnssec_mode)
             if not dnssec.accepted:
+                self._publish_event(
+                    code="dns.dnssec_bogus",
+                    severity="warning",
+                    message="DNS helper rejected upstream response by DNSSEC policy",
+                    qname=qname,
+                    qtype=dns.rdatatype.to_text(question.rdtype),
+                    upstream=upstream.authority(),
+                    dnssec_status=dnssec.status,
+                    reason=dnssec.message,
+                )
                 return self._error_response(query, dns.rcode.SERVFAIL, dnssec.message, qname=qname, dnssec=dnssec)
             response.id = query.id
             if self.cache is not None:
@@ -117,6 +138,20 @@ class DnsHelperResolver:
             )
 
         return self._error_response(query, dns.rcode.SERVFAIL, "all configured DNS upstreams failed", qname=qname)
+
+    def _publish_event(self, *, code: str, message: str, severity: str = "info", **details: object) -> None:
+        """Publish structured DNS helper facts without blocking resolution."""
+        if self.diagnostics_bus is None:
+            return
+        self.diagnostics_bus.publish(
+            DiagnosticEvent.helper_event(
+                code=code,
+                helper="dns",
+                severity=severity,
+                message=message,
+                details=details,
+            )
+        )
 
     def _query_upstream(self, query: dns.message.Message, upstream: DnsUpstream) -> dns.message.Message:
         if upstream.kind == "direct":

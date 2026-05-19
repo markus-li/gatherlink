@@ -371,9 +371,21 @@ impl PyTransportSecurityConfig {
     /// Static authenticated encryption material compiled by Python.
     #[staticmethod]
     pub fn static_keys(receiver_index: u32, send_key: &[u8], receive_key: &[u8]) -> PyResult<Self> {
+        Self::static_keys_v2(receiver_index, receiver_index, send_key, receive_key)
+    }
+
+    /// Static authenticated encryption material with distinct local/remote receiver indexes.
+    #[staticmethod]
+    pub fn static_keys_v2(
+        local_receiver_index: u32,
+        remote_receiver_index: u32,
+        send_key: &[u8],
+        receive_key: &[u8],
+    ) -> PyResult<Self> {
         Ok(Self {
             inner: TransportSecurityConfig::Static {
-                receiver_index,
+                local_receiver_index,
+                remote_receiver_index,
                 send_key: key_bytes(send_key, "send_key")?,
                 receive_key: key_bytes(receive_key, "receive_key")?,
             },

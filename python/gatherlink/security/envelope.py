@@ -31,13 +31,22 @@ class TransportKeys:
     receiver_index: int
     send_key: bytes
     receive_key: bytes
+    local_receiver_index: int | None = None
+    remote_receiver_index: int | None = None
     next_send_counter: int = 0
     replay_window: ReplayWindow = field(default_factory=ReplayWindow)
+
+    def __post_init__(self) -> None:
+        """Preserve old shared-index configs while supporting real session indexes."""
+        if self.local_receiver_index is None:
+            self.local_receiver_index = self.receiver_index
+        if self.remote_receiver_index is None:
+            self.remote_receiver_index = self.receiver_index
 
     def encrypt_frame(self, plaintext_frame: bytes) -> bytes:
         """Encrypt an encoded Gatherlink frame using the next transport counter."""
         packet = encrypt_frame_with_counter(
-            self.receiver_index,
+            self.remote_receiver_index,
             self.send_key,
             self.next_send_counter,
             plaintext_frame,
@@ -48,7 +57,7 @@ class TransportKeys:
     def decrypt_packet(self, packet: bytes) -> DecryptedPacket:
         """Authenticate, decrypt, and replay-check one transport packet."""
         decrypted = decrypt_packet_without_replay(self.receive_key, packet)
-        if decrypted.receiver_index != self.receiver_index:
+        if decrypted.receiver_index != self.local_receiver_index:
             raise ValueError("receiver index mismatch")
         if not self.replay_window.accept(decrypted.counter):
             raise ValueError("replayed transport counter")

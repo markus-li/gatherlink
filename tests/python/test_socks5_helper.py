@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from asyncio_socks_server import Address, Connection
 from gatherlink.cli.main import app
+from gatherlink.diagnostics import DiagnosticsBus
 from gatherlink.helpers.socks5 import (
     GatherlinkServiceExitConnector,
     GatherlinkSocks5Addon,
@@ -56,9 +57,11 @@ def test_socks5_policy_allows_explicit_host_and_port() -> None:
 
 def test_socks5_addon_uses_exit_connector_for_allowed_connect() -> None:
     connector = FakeConnector()
+    bus = DiagnosticsBus()
     addon = GatherlinkSocks5Addon(
         policy=Socks5Policy.allow(hosts=["example.test"], ports=[443]),
         exit_connector=connector,
+        diagnostics_bus=bus,
     )
 
     connection = asyncio.run(addon.on_connect(FakeFlow(FakeDestination("example.test", 443))))
@@ -67,10 +70,15 @@ def test_socks5_addon_uses_exit_connector_for_allowed_connect() -> None:
     assert connector.opened == [("example.test", 443, 10.0)]
     assert addon.stats.accepted == 1
     assert addon.stats.opened == 1
+    assert bus.queued_events == 1
 
 
 def test_socks5_addon_rejects_denied_connect() -> None:
-    addon = GatherlinkSocks5Addon(policy=Socks5Policy.allow(hosts=["example.test"], ports=[443]))
+    bus = DiagnosticsBus()
+    addon = GatherlinkSocks5Addon(
+        policy=Socks5Policy.allow(hosts=["example.test"], ports=[443]),
+        diagnostics_bus=bus,
+    )
 
     try:
         asyncio.run(addon.on_connect(FakeFlow(FakeDestination("blocked.test", 443))))
@@ -80,6 +88,7 @@ def test_socks5_addon_rejects_denied_connect() -> None:
         raise AssertionError("expected denied SOCKS5 CONNECT to raise PermissionError")
 
     assert addon.stats.denied == 1
+    assert bus.queued_events == 1
 
 
 def test_socks5_default_exit_requires_gatherlink_transport() -> None:
@@ -201,3 +210,32 @@ def test_socks5_cli_can_use_gatherlink_udp_service_transport(monkeypatch) -> Non
     assert isinstance(connector.transport, GatherlinkUdpStreamTransport)
     assert connector.transport.service_host == "127.0.0.1"
     assert connector.transport.service_port == 55180
+
+
+def test_socks5_cli_wires_jsonl_diagnostics(monkeypatch, tmp_path) -> None:
+    captured = {}
+
+    def fake_run(**kwargs):
+        captured.update(kwargs)
+        kwargs["diagnostics_bus"].publish_warning("socks5 warning")
+
+    monkeypatch.setattr("gatherlink.cli.helpers.run_socks5_server", fake_run)
+    output = tmp_path / "socks5.jsonl"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "helpers",
+            "socks5-serve",
+            "--allow-host",
+            "example.test",
+            "--allow-port",
+            "443",
+            "--diagnostics-jsonl",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["diagnostics_bus"] is not None
+    assert '"message":"socks5 warning"' in output.read_text(encoding="utf-8")

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from base64 import b64decode, b64encode
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import cbor2
 
+from gatherlink.persistence.store import atomic_write_json
 from gatherlink.security.keys import NodeIdentity, verify_document
 
 
@@ -50,6 +53,22 @@ class SignedDocument:
             "signer_public_key": b64encode(self.signer_public_key).decode("ascii"),
             "signature": b64encode(self.signature).decode("ascii"),
         }
+
+    def save(self, path: Path, *, force: bool = False, mode: int = 0o644) -> None:
+        """Persist a signed control-plane document atomically."""
+        if path.exists() and not force:
+            raise FileExistsError(f"{path} already exists")
+        atomic_write_json(path, self.export_dict(), mode=mode)
+
+    @classmethod
+    def load(cls, path: Path) -> SignedDocument:
+        """Load and verify a signed control-plane document from disk."""
+        try:
+            document = cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
+        except OSError as exc:
+            raise FileNotFoundError(path) from exc
+        document.verify()
+        return document
 
 
 def canonical_cbor(body: dict[str, Any]) -> bytes:

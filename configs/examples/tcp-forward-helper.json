@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "node": "tcp-forward-client",
+  "role": "client",
+  "peer": "tcp-forward-exit",
+  "paths": [
+    {
+      "name": "path-a",
+      "interface": "lo",
+      "transport_bind": "127.0.0.1:55230",
+      "transport_remote": "127.0.0.1:55231"
+    }
+  ],
+  "services": [
+    {
+      "name": "tcp-forward-stream",
+      "listen": "127.0.0.1:55191",
+      "target": "127.0.0.1:56191"
+    }
+  ],
+  "helpers": {
+    "tcp_forward": {
+      "enabled": true,
+      "service": "tcp-forward-stream",
+      "listen": "127.0.0.1:18080",
+      "target": "10.0.0.10:80"
+    }
+  }
+}

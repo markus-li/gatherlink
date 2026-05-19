@@ -1,6 +1,6 @@
 # Project Living Assessment
 
-Last updated: 2026-05-18
+Last updated: 2026-05-19
 
 This is the living project assessment for Gatherlink. Keep it current as the
 implementation changes. It should answer four questions quickly:
@@ -53,17 +53,29 @@ Since the previous assessment, several important implementation steps landed:
 - `route_id` was removed from the active Python/Rust hot path, DTOs, scheduler
   reapply, and tests.
 - Diagnostics gained normalized event DTOs, a bounded bus, a JSONL sink, and
-  foreground runner lifecycle event wiring.
+  foreground runner lifecycle, helper lifecycle, helper stream, status HTTP,
+  scheduler reapply, counter, shutdown, and transport security-drop producer
+  wiring.
 - SOCKS5/TCP helper transport boundaries were tightened and now include a
   Gatherlink UDP service stream adapter plus companion exit; direct TCP is
   explicit lab-only smoke behavior.
 - The Rust-backed core now has a managed `gatherlink run start` path with
   service registry, IPC status/monitor/close, JSONL diagnostics, and visible
   static/plaintext warnings.
-- A two-instance Windows/WSL preparation path exists and has carried an
-  encrypted UDP payload between `gatherlink-dev` and `gatherlink-peer`.
+- A two-instance Windows/WSL preparation path exists and the WSL MVP acceptance
+  gate carries encrypted UDP payloads across three shaped paths, drops and
+  recovers a path, validates monitor counters and JSONL diagnostics, and closes
+  services cleanly.
 - A local status HTTP helper exists for read-only machine/service discovery,
   including `.hidden` service entries.
+- Noise IK style authenticated session setup exists as the normal v1
+  provisioning path for producing config-compatible authenticated AEAD facts.
+- Production relay-hop orchestration now has a foreground and process-managed
+  Python runner around the narrow Rust hop executor, including service IPC
+  status/stop and structured relay diagnostics.
+- Local secret UX now includes passphrase-sealed JSON envelopes with
+  `secret-seal`, `secret-inspect`, and `secret-open`; opened output is
+  owner-only and CLI output remains redacted.
 
 The strongest part of the project is the boundary discipline:
 
@@ -82,49 +94,64 @@ and small sites, with Debian as the only supported platform. Debian-specific
 behavior must still sit behind compatibility interfaces so future platforms can
 be added without rewriting runtime or helper logic.
 
-Several important v1 parts exist as docs, narrow interfaces, or
-test-only/manual paths:
+Several important v1 parts are now implemented locally but still need real
+deployment mileage before a release tag:
 
-- authenticated session setup is not implemented; static session material is
-  the current secure transport path
-- relay sessions are documented but not implemented
+- authenticated session planning, the older signed ephemeral X25519 bridge, and
+  Noise IK style session setup exist in Python; local/remote receiver indexes
+  are split in compiled security state; CLI commands can create, accept, and
+  complete Noise IK into config-compatible `security.mode=authenticated` blocks;
+  Rust still executes only compact AEAD facts; static session material remains
+  an explicit lab/manual fallback
+- relay session authorization models exist in Python, and Rust has compiled
+  relay-hop executor primitives for receiver-index, expiry, size, packet, byte,
+  counter checks, and hop AEAD outer-envelope unwrap/reseal of opaque endpoint
+  packet bytes; Python now also has foreground and process-managed relay-hop
+  runners that bind those compiled facts, expose service IPC, and emit local
+  diagnostics without moving relay policy into Rust
 - the diagnostics event bus has DTO/bus/JSONL primitives and core lifecycle,
-  counter, reapply, shutdown, and helper-stream producers; broader helper and
-  security drop producer coverage remains v1 hardening work
-- helper services exist, including first SOCKS5/TCP stream-over-Gatherlink
-  adapters and a shared companion UDP stream exit
-- carrier modules beyond local UDP path sockets are placeholders
+  helper lifecycle, counter, reapply, shutdown, helper-stream, status HTTP
+  helper, and transport security-drop producers; broader helper-specific
+  producer coverage remains v1 hardening work
+- the production Rust-backed runner drains reserved-service payloads through
+  the Python dispatcher and applies decoded peer control policy, so control
+  metadata and future auth/control reserved services are no longer lab-only
+- helper services exist, including SOCKS5/TCP stream-over-Gatherlink adapters,
+  structured helper diagnostics, a shared companion UDP stream exit, and TCP
+  forward acceptance coverage through that adapter/exit path
+- carrier modules beyond local UDP path sockets are placeholders and remain
+  outside the current v1 target unless explicitly promoted later
 - live scheduler reapply is wired into the managed runner with cadence,
   diagnostics, and validation, but still needs longer production soak tests
-- Python tests are green after the managed runner, status HTTP helper,
-  two-node config, runtime JSON redaction, and process restart fixes.
+- Python and Rust tests are green after the managed runner, status HTTP helper,
+  two-node config, config/runtime JSON redaction, helper lifecycle diagnostics,
+  and managed close hardening.
 
 The project is at MVP-complete shape for local/lab validation if the scope stays
 narrow: a two-node, unprivileged, Rust-backed UDP service over configured UDP
-path sockets, with explicit config, static AEAD transport, clear warnings,
-service monitoring, diagnostics, deterministic tests, and repeatable local lab
-proof. A true two-VM Windows acceptance run is prepared but still needs two
-distinct Debian VM network identities rather than WSL instances sharing the
-same WSL virtual network.
+path sockets, with explicit authenticated config-facing AEAD material, static
+lab/manual fallback, clear warnings, service monitoring, diagnostics,
+deterministic tests, and repeatable local lab proof. A true two-VM Debian
+acceptance harness now exists under
+`tools/vm_acceptance/`. Its dry run renders authenticated-mode configs and
+validates them locally without contacting VMs, and execute mode refuses
+committed example keys. It still needs project-owner-provided VM access,
+generated session material, and distinct Debian VM network identities before it
+can be counted as a passed v1
+gate.
 
 The v1 release should be a real Git tag, expected to be `v1.0.0`, after the v1
 acceptance gates pass.
 
 ## Current Verification
 
-Verified on 2026-05-18:
+Verified on 2026-05-19:
 
 ```text
 cargo test
 ```
 
 Result: passed.
-
-Note: the first full Rust run in this pass hit a transient failure in two
-`gatherlink-dataplane` duplicate/dedupe tests. The focused
-`gatherlink-dataplane --test path_transport` rerun passed, and the following
-full `cargo test` passed. Track this as a possible flaky timing test if it
-recurs.
 
 Coverage observed:
 
@@ -147,12 +174,12 @@ Python tests:
 .venv/bin/pytest -q
 ```
 
-Result: passed, `208 passed in 3.47s`.
+Result: passed on the latest full local run, currently `298 passed`.
 
-The previous config CLI JSON fix is now committed. `config show --runtime
---json` is accepted, the runtime marker is asserted under
-`metadata.runtime_model`, and static runtime key bytes are redacted in operator
-JSON output.
+The config CLI JSON path now redacts both canonical and runtime operator views.
+`config show --runtime --json` is accepted, the runtime marker is asserted under
+`metadata.runtime_model`, and static/authenticated runtime key bytes are
+redacted in operator JSON output.
 
 Plain `pytest` was not on PATH in the WSL shell; the repo virtualenv command
 works.
@@ -161,9 +188,9 @@ Additional verification in this pass:
 
 ```text
 gatherlink lab helpers-smoke
-gatherlink lab rust-smoke configs/lab/local-dual-path.json --count 4
-gatherlink lab rust-smoke configs/lab/local-dual-path-encrypted.json --count 4
-gatherlink lab rust-smoke configs/lab/local-three-path.json --count 4
+gatherlink lab rust-smoke configs/lab/local-dual-path.json --count 8
+gatherlink lab rust-smoke configs/lab/local-dual-path-encrypted.json --count 8
+gatherlink lab rust-smoke configs/lab/local-three-path.json --count 8
 gatherlink lab cleanup/up/smoke/apply-network-mode/send/cleanup configs/lab/local-dual-path.json
 gatherlink lab cleanup/up/smoke/apply-network-mode/send/cleanup configs/lab/local-dual-path-encrypted.json
 gatherlink lab cleanup/up/smoke/send/cleanup configs/lab/local-three-path.json
@@ -179,8 +206,8 @@ WSL MVP acceptance gate:
 powershell.exe -ExecutionPolicy Bypass -File tools/run_wsl_mvp_acceptance.ps1
 ```
 
-Result: passed on 2026-05-18. It configures the WSL private address shim, syncs
-`gatherlink-peer`, validates both static-AEAD node configs, applies three shaped
+Result: passed on 2026-05-19. It configures the WSL private address shim, syncs
+`gatherlink-peer`, validates both authenticated-mode node configs, applies three shaped
 carrier links, starts both managed services, sends counted UDP payloads, drops
 one carrier path, verifies degraded delivery, restores shaping, verifies exact
 recovery delivery, validates per-path status/monitor counters, validates JSONL
@@ -277,7 +304,7 @@ Watch:
   plus authenticated relay session state, not by endpoint packet fields or
   runtime route labels.
 
-### Crypto And Replay
+### Crypto, Sessions, And Replay
 
 Done:
 
@@ -290,7 +317,9 @@ Done:
   - tag
 - AEAD associated data includes a domain separator and public header.
 - Replay window implemented and tested.
-- Static transport security mode exists.
+- Static transport security mode exists for lab/manual use.
+- Authenticated config-facing security mode exists; Python compiles Noise IK
+  session output into the same narrow AEAD executor facts used by Rust.
 - Static key derivation from identity material exists in Python.
 - Silent-drop behavior is represented as `CryptoError::SilentDrop`.
 - Rust dataplane can protect frames as v2 and unprotect encrypted packets back
@@ -304,13 +333,12 @@ and tests.
 
 Not production-complete:
 
-- no Noise-style authenticated session handshake yet
 - no session rekey lifecycle
 - no receiver-index rotation lifecycle
 - no trust-root/topology enforcement in packet setup
-- no relay-hop crypto/session implementation yet
-- static key config is suitable for lab/manual testing, not the final security
-  story
+- static key config is suitable for lab/manual testing and now warns as such;
+  Noise IK authenticated config-facing material is preferred for v1-style
+  secure runs
 
 ### Rust Dataplane
 
@@ -326,6 +354,9 @@ Done:
 - Rust applies Python-compiled scheduler primitives.
 - Rust supports service disable/enable from Python-owned policy.
 - Rust queues reserved service payloads for Python instead of interpreting them.
+- The production runner drains those reserved payloads through the same
+  Python-owned dispatcher used by lab services, then compiles decoded peer
+  policy back into narrow Rust executor primitives.
 - Rust exposes status snapshots for service/path/control counters.
 - Rust supports full config reapply and narrower scheduler-only reapply.
 - Rust validates DTO boundaries such as service id ranges and path ids.
@@ -357,6 +388,8 @@ Done:
   - `wireguard-client`
   - `wireguard-server`
   - `dns-helper`
+  - `socks5-helper`
+  - `tcp-forward-helper`
 - Schema version is explicit and currently version `1`.
 - Config validation catches duplicate service names, service ids, listen
   addresses, path names, and invalid helper references.
@@ -375,9 +408,9 @@ small; the runtime contract is explicit.
 
 Needs change or care:
 
-- Helper config models are still very narrow: WireGuard and DNS are modeled;
-  SOCKS5/TCP/relay helper config needs to be represented when those helpers are
-  integrated into normal service startup.
+- Helper config models now cover WireGuard, DNS, SOCKS5, and TCP forward.
+  Relay helper config still needs representation when relay forwarding moves
+  beyond discovery/health and compiled executor primitives.
 - Schema migration scaffolding exists by documentation and version modules, but
   there is no real multi-version config migration pressure yet.
 - Numeric ids are allowed and validated, but operator warnings and runtime
@@ -457,8 +490,9 @@ operator-facing shape.
 Needs change or care:
 
 - The diagnostics event bus has first primitives, foreground runner lifecycle
-  events, startup failure events, and helper stream lifecycle/policy events.
-  Most remaining producers still need to be routed through it.
+  events, startup failure events, helper stream lifecycle/policy events, status
+  HTTP helper startup events, and transport security-drop events. Some
+  helper-specific producers still need to be routed through it.
 - Process supervision is still limited. The product needs a clean story for
   starting, stopping, IPC, logs, and live reload outside lab scenarios.
 - Human CLI output exists, but `--json` consistency should be checked command by
@@ -515,6 +549,9 @@ Done:
 - Foreground core startup failures can publish `runtime.start_failed` events
   with config path, error type, and validation details when a JSONL sink is
   configured.
+- Process-managed helper startup and startup failure publish
+  `helper.lifecycle.started` and `helper.lifecycle.start_failed` events into
+  the helper service diagnostics JSONL file.
 - Helper UDP stream exits can publish open, close, denied target, unreachable
   target, and invalid frame events through the same bus.
 - `gatherlink helpers stream-exit --diagnostics-jsonl PATH` can append helper
@@ -522,10 +559,11 @@ Done:
 
 Not done:
 
-- Rust status/counters, crypto drops, config reload results, and service
-  monitor requests still need broader producer integration.
-- DNS/time/SOCKS5/TCP helper-specific warnings still need broader structured
-  diagnostics coverage beyond the shared UDP stream companion exit.
+- DNS/time/SOCKS5/TCP helper-specific warnings still need more scenario-level
+  structured diagnostics beyond shared lifecycle and stream events.
+- Transport security silent drops now count in Rust and publish local
+  structured diagnostics through Python without changing fail-closed network
+  behavior.
 - Operator "why" explanations are not yet generated from structured facts.
 
 Assessment:
@@ -551,6 +589,11 @@ Done:
   transport adapter is supplied.
 - A first Gatherlink UDP service stream adapter and companion stream exit are
   implemented for SOCKS5 and TCP forwarding helpers.
+- SOCKS5 and TCP forward helper config/runtime records now make their
+  Gatherlink service transport endpoints explicit for supervisors and labs.
+- `gatherlink run helpers-start CONFIG` can now start process-managed DNS,
+  SOCKS5, and TCP forward helper processes from runtime helper records. WireGuard
+  remains planning/config guidance until its lifecycle is finalized.
 - Lab-only direct TCP stream transport exists for local smoke tests.
 - WireGuard helper files and tests exist.
 - Relay fabric models/discovery/health files exist.
@@ -567,10 +610,9 @@ The current helper code is useful scaffold and in some cases runnable.
 Important caveat:
 
 - SOCKS5 and TCP forwarding no longer silently default to direct TCP, which is
-  good. The first Gatherlink UDP stream adapter and companion exit exist, but
-  they still need supervisor/config integration, structured diagnostics,
-  explicit operator configuration, and broader cross-process lab acceptance
-  coverage.
+  good. The first Gatherlink UDP stream adapter and companion exit exist. TCP
+  forward now has stream-adapter acceptance coverage in process; SOCKS5 still
+  needs the same breadth around the new helper process launch path.
 - The current helper UDP stream frames are JSON/base64 control/data frames over
   a configured Gatherlink UDP service. That is appropriate for the helper
   adapter slice, but it should be treated as a helper transport framing layer,
@@ -578,8 +620,11 @@ Important caveat:
 - DNSSEC currently trusts upstream AD-bit validation. Full local chain
   validation is not implemented yet.
 - DNS helper direct upstream works; tunnel and DoH upstream kinds are TODO.
-- Relay fabric discovery/health is separate from the secure relay session
-  lifecycle, which is documented but not implemented.
+- Relay fabric discovery/health is separate from secure relay packet execution.
+  Python relay authorization state exists, Rust has narrow hop AEAD and
+  next-hop UDP primitives, and Python now has foreground/process-managed relay
+  hop orchestration. Multi-hop policy automation and real deployment acceptance
+  remain future/VM-gated work.
 
 ### Bootstrap, Identity, And Secrets
 
@@ -587,8 +632,17 @@ Done:
 
 - Node identity records exist.
 - Public identity records exist.
-- Signed documents and age-related secret handling exist.
+- Signed documents and sealed-secret handling exist.
 - Static session key derivation exists.
+- Signed topology/provisioning bundles exist with canonical JSON, generation,
+  validity, service, tamper, and trust-root checks.
+- Topology-bound authenticated session plans and Noise IK setup exist.
+- Signed ephemeral X25519 handshake documents exist and compile inverse AEAD
+  traffic keys plus local/remote receiver indexes after
+  topology/signature/expiry checks.
+- Noise IK setup compiles inverse AEAD traffic keys plus local/remote receiver
+  indexes after topology, revocation, expiry, wrong-peer, and tamper checks.
+- Sealed local secret UX exists for owner-only JSON payloads.
 - Bootstrap endpoint cache/probe/challenge scaffolding exists.
 - Authenticated bootstrap proof can verify signed challenge material against an
   expected peer identity and endpoint.
@@ -596,16 +650,17 @@ Done:
 
 Assessment:
 
-This is a good bridge between plaintext lab work and future authenticated
+This is a practical v1 local/manual provisioning path for authenticated
 deployment. It is not yet a complete enrollment/control-plane system.
 
 Not production-complete:
 
-- no signed topology/provisioning bundle lifecycle implementation
-- no trust-root management flow
-- no revocation generation enforcement wired through session setup
+- no complete trust-root lifecycle management UX
+- revocation generation enforcement exists in topology/session planning and
+  Noise setup, but still needs live rekey/rotation automation around running
+  services
 - no bootstrap-token redemption flow
-- no Noise handshake or dynamic peer enrollment
+- no dynamic peer enrollment
 
 ### Time
 
@@ -621,11 +676,14 @@ Assessment:
 
 This is good. The boundary is narrow and security-conscious.
 
-Needs change or care:
+Needs care:
 
-- Production integration should detect/warn when another NTP agent is active.
 - The helper should remain explicit opt-in and never become automatic by
   accident.
+- The helper should warn that host wall-clock management is normally owned by
+  the platform or an operator-managed time service. It must not try to detect,
+  police, or fail closed based on guessed NTP-agent state because that is brittle
+  across real deployments.
 
 ## What Is Great
 
@@ -661,6 +719,14 @@ construction, systemd active-state checks, and interface MTU sysfs reads through
 a Debian-only compatibility backend. This is not yet the full platform layer;
 standard Debian config/state/log paths, capability checks, and broader helper
 integration still need to move behind the same boundary.
+
+The persistence layer has started.
+
+The first v1 persistence slice formalizes the Debian path layout, atomic JSON
+writes, corruption-tolerant JSON cache reads, private identity file permissions,
+and redaction helpers for operator-facing summaries. This is deliberately
+mechanical: persisted hints remain subordinate to explicit config and signed
+control-plane documents.
 
 The lab-first posture is healthy.
 
@@ -704,7 +770,7 @@ production behavior.
 Diagnostics are still behind the rest of the system.
 
 The first bus/DTO/JSONL primitives exist, so the next risk is producer drift:
-helpers, runtime lifecycle, config reloads, crypto drops, service counters, and
+helper-specific warnings, broader runtime reload facts, service counters, and
 relay/security drops should route through structured events instead of adding
 new ad hoc status shapes.
 
@@ -728,7 +794,7 @@ SOCKS5 and TCP direct connectors are useful for lab tests, and the first
 Gatherlink UDP service stream adapter now exists. The remaining risk is not
 basic adapter shape; it is operational integration: explicit config, companion
 exit supervision, allow-list diagnostics, backpressure/loss behavior, and
-cross-process lab coverage.
+broader cross-process lab coverage.
 
 Security docs are ahead of implementation.
 
@@ -843,8 +909,8 @@ Status:
 - Rust AEAD path works
 - Python static key derivation exists
 - encrypted path tests pass
-- static mode is suitable for MVP lab/manual use, but not the final v1 security
-  story
+- authenticated config-facing material is now preferred for v1-style secure
+  runs; static mode remains explicit lab/manual provisioning
 
 ### MVP P0: Route Id Removed
 
@@ -930,40 +996,55 @@ Status:
 
 - docs are clear
 - first helper stream adapter/exit code exists and emits structured diagnostics
-- normal helper supervisor/config integration still incomplete
+- normal helper config/runtime models and process launch integration exist for
+  DNS, SOCKS5, and TCP forward; broader cross-process helper acceptance remains
+  v1 hardening
 
 ## Remaining Work For v1
 
 ### V1: Authenticated Session Handshake
 
-Needed:
+Done:
 
-- Noise-style or equivalent authenticated session setup
-- receiver-index allocation/rotation
-- rekey
-- key phase handling
-- replay window reset semantics
-- signed transcript/context binding
-- downgrade/capability handling
 - no public oracle behavior
+- Noise IK style setup is the normal v1 provisioning path for authenticated
+  config-facing AEAD material
+- signed topology-bound ephemeral X25519 initiation/response documents
+- config-compatible initiator/responder security block outputs
+- distinct local/remote receiver indexes
+- opaque non-zero receiver-index generation by default for Noise and the older
+  signed bridge, with explicit indexes still available for deterministic tests
+- fail-closed signature, topology, expiry, generation, and intended-peer checks
+- replay window reset semantics are represented by replacement traffic-key and
+  receiver-index state; Rust starts a fresh replay window for each compiled
+  session
 
-This is the biggest security milestone after MVP.
+Remaining:
+
+- live rekey/receiver-index rotation automation around already-running managed
+  services
+- overlapping old/new receive-session grace windows
+- dynamic peer enrollment beyond out-of-band signed topology/provisioning
 
 ### V1: Signed Topology And Trust Root Lifecycle
 
-Needed:
+Done:
 
-- trust root creation/import/export
 - signed topology/provisioning bundles
 - topology generations
 - revocation generation enforcement
+- signed bundle persistence primitives
+- trust root export/import/list UX
+
+Needed:
+
 - identity rotation with signed transition
 - bootstrap token redemption
 - audit-friendly state
 
 ### V1: Secure Relay Sessions
 
-Needed:
+Done:
 
 - relay-hop session provisioning from signed topology/control context
 - relay receiver indexes and relay replay windows
@@ -971,34 +1052,52 @@ Needed:
 - authorization checks: direction, next hop, expiry, generation, limits
 - local diagnostics for invalid relay packets
 - tests proving invalid packets are not forwarded and get no network response
+- Python signed-topology relay authorization and compact executor export
+- Rust compiled relay executor checks for receiver index, expiry, packet size,
+  packet limits, byte limits, and counters
+- foreground and process-managed Python relay-hop runner with service IPC
+  status/stop
+- no endpoint service/path labels or `route_id` in relay executor facts
+
+Remaining:
+
+- full multi-hop relay policy automation and real deployment acceptance
 
 ### V1: Control Context
 
-Needed:
+Done:
 
 - authenticated control message format
 - generation ids
 - service mapping updates
-- helper-control wrapper for small helper commands
 - reserved-service decoder registry in Python
 - stale generation rejection
 - no endpoint IP/port changes through control context
 
+Remaining:
+
+- helper-control wrapper for small helper commands, if still needed after the
+  current helper stream adapter work
+- broader cross-process validation of control-policy changes in VM acceptance
+
 ### V1: Diagnostics And Operator UX
 
-Needed:
+Done:
 
 - stable event codes everywhere
 - JSONL first
 - consistent `--json` outputs
-- `gatherlink doctor`
 - structured "why" explanations
 - event-driven helper warnings
+
+Remaining:
+
+- `gatherlink doctor`
 - Prometheus/WebSocket later if useful
 
 ### V1: Debian Compatibility Backend
 
-Needed:
+Done:
 
 - Debian-only support statement for v1
 - platform compatibility package with a Debian backend
@@ -1013,7 +1112,7 @@ diagnostics code.
 
 ### V1: Experimental Local REST Helper
 
-Needed:
+Done:
 
 - optional REST helper started explicitly from CLI
 - bind to `127.0.0.1` by default
@@ -1028,7 +1127,7 @@ Needed:
 The REST service is a helper/control-plane sidecar, not core runtime or
 dataplane logic.
 
-### V1: Peer Failover
+### Future: Peer Failover
 
 Needed:
 
@@ -1040,7 +1139,7 @@ Needed:
 - minimum dwell windows
 - diagnostics explaining peer choice
 
-### V1: Carrier Expansion
+### Future: Carrier Expansion
 
 Needed:
 
@@ -1057,49 +1156,58 @@ Needed:
 
 - DNS tunnel/DoH upstream support if still wanted
 - full local DNSSEC validation if upstream-AD is not enough
-- production helper config/supervisor integration for the SOCKS5 Gatherlink UDP
-  stream adapter and companion exit
-- production helper config/supervisor integration for the TCP forward
-  Gatherlink UDP stream adapter and companion exit
+- cross-process helper acceptance for the SOCKS5 Gatherlink UDP stream adapter
+  and companion exit
+- cross-process helper acceptance for the TCP forward Gatherlink UDP stream
+  adapter and companion exit
 - helper stream backpressure, timeout, and cross-process lab hardening
 - WireGuard helper config generation and lifecycle integration
 - relay fabric discovery feeding authenticated topology/control state
 
 ### V1: Real VM Acceptance
 
+Done:
+
+- simple Bash/SSH dry-run-first harness under `tools/vm_acceptance/`
+- config templates, inventory template, report format, and runbook
+- tests proving the harness syntax and dry-run behavior do not contact VMs
+- dry-run config rendering validates locally with committed non-secret example
+  keys, while execute mode refuses those example keys
+
 Needed:
 
 - two Debian VMs with distinct network identities
-- simple Bash/SSH deploy scripts under `tools/vm_acceptance/`
-- no Ansible requirement for v1
-- build VM scripts, configs, report format, and docs now, but do not ask for
-  VM access or attempt real VM operations until the project owner provides
-  access
-- AI-assisted deploy allowed only when it produces auditable scripts/configs
-- VM acceptance report with commands, configs with secrets removed, logs,
-  diagnostics, monitor output, and pass/fail state
+- project-owner-provided inventory and non-placeholder static/session material
+- actual `--execute` run and captured VM acceptance report
 - traffic, monitor, diagnostics, service close, and path degradation/recovery
   checks equivalent to the WSL gate where the VM network can model them
 
 ### V1: Persistence
 
+Done:
+
+- Debian config/state/runtime/log path model
+- persisted private node identities with owner-only permissions
+- persisted public identities/trust roots
+- persisted signed topology/provisioning bundles
+- persisted endpoint caches and non-authoritative hints
+- persisted sealed local secret envelopes
+- corruption-tolerant reads for non-authoritative cache/hint state
+- config/status/REST/operator redaction helpers that avoid leaking private
+  keys, session keys, tokens, passwords, or bootstrap secrets
+
 Needed:
 
-- persisted node identities
-- trust roots
-- signed topology/provisioning bundles
-- last-known endpoints
-- relay health hints
-- non-authoritative caches
-- sealed secrets
-- canonical signed artifacts where needed
+- richer trust-root lifecycle UX
+- endpoint cache refresh policy from authenticated control facts
+- relay health hints wired into production relay/session selection
 
 ## What Needs To Change Soon
 
 1. Broaden diagnostics producers before adding many more features.
 
 The bus and MVP producers exist now. The next job is broadening helper-specific
-and security/drop producers so v1 features do not invent local status shapes.
+producers so v1 features do not invent local status shapes.
 
 2. Keep the MVP runner path boring and green.
 
@@ -1129,16 +1237,16 @@ Static AEAD is useful and tested. It is not the final identity/session protocol.
 1. Run the WSL MVP acceptance gate on every operational change.
 2. Move from WSL shared-namespace proof to true two-VM proof with distinct
    network identities.
-3. Add the Debian compatibility backend boundary before platform-specific work
-   spreads.
-4. Add the real-VM acceptance deploy scripts and report format.
-5. Add the experimental local REST helper with one-hour write expiry.
-6. Broaden diagnostics producer coverage for helper-specific and security/drop
-   events.
-7. Soak the live scheduler reapply loop under longer traffic and path-flap runs.
-8. Helper supervisor/config integration for the active helpers, especially the
+3. Execute the real-VM acceptance harness with project-owner-provided inventory
+   and generated session material.
+4. Broaden diagnostics producer coverage for helper-specific events and relay
+   drops.
+5. Soak the live scheduler reapply loop under longer traffic and path-flap runs.
+6. Helper supervisor/config integration for the active helpers, especially the
    Gatherlink UDP stream adapter and companion exit for SOCKS5/TCP helpers.
-9. Begin authenticated control/session design implementation.
+7. Add live authenticated session rotation/rekey orchestration.
+8. Extend secure relay orchestration into real multi-hop acceptance once VM
+   access exists.
 
 ## Feature Status Table
 
@@ -1156,23 +1264,23 @@ Static AEAD is useful and tested. It is not the final identity/session protocol.
 | Config validation/expansion | Implemented and tested | Needs helper expansion |
 | Runtime reload | Implemented for scheduler reapply | Broader config reload remains v1 |
 | Service registry/monitor | Implemented and tested | WSL gate validates status/monitor/close |
-| Diagnostics event bus | MVP slice implemented and tested | Broader producer integration remains v1 |
+| Diagnostics event bus | Implemented and tested | Core lifecycle/counters/reapply/shutdown, helper lifecycle/stream/status HTTP, and crypto-drop producers exist; more scenario-level helper events remain |
 | Local lab | Implemented for MVP | Helper smoke, Rust smokes, and WSL MVP gate pass |
 | Static identity/session material | Implemented | Lab/manual stepping stone |
-| Authenticated handshake | Not implemented | v1 critical |
-| Signed topology/trust roots | Not implemented | v1 critical |
-| Relay sessions | Not implemented | Docs only |
+| Authenticated session planning/exchange | Implemented bridge | Signed ephemeral exchange and receiver-index split exist; Noise packet handshake remains |
+| Signed topology/provisioning | Implemented | Trust-root lifecycle UX remains |
+| Relay sessions | Authorization model implemented | Hop AEAD/reseal and next-hop UDP primitive exist; production relay service orchestration remains |
 | Relay fabric discovery/health | Scaffolded | Helper first scope |
 | DNS helper | Implemented first slice | Direct upstream, cache, AD-bit DNSSEC |
-| SOCKS5 helper | Implemented first slice | Gatherlink UDP stream adapter and companion exit exist; needs supervisor/config integration |
-| TCP forwarding helper | Implemented first slice | Gatherlink UDP stream adapter and companion exit exist; needs supervisor/config integration |
-| WireGuard helper | Implemented first slice | Planning/config helpers and smoke coverage exist |
+| SOCKS5 helper | Implemented first slice | Gatherlink UDP stream adapter, companion exit, config/runtime model, managed launch, and diagnostics exist; needs cross-process acceptance |
+| TCP forwarding helper | Implemented first slice | Gatherlink UDP stream adapter, companion exit, config/runtime model, managed launch, diagnostics, and stream-adapter acceptance coverage exist |
+| WireGuard helper | Implemented first slice | Planning/config helpers, smoke coverage, and structured plan diagnostics exist |
 | Time helper | Implemented first slice | Narrow privileged helper |
 | QUIC/WSS/TCP carriers | Placeholder | Future |
 | Obfuscation profiles | Placeholder | Future |
 | Peer failover | Docs/scaffold | v1 |
-| Persistence | Docs mostly | Implementation needed |
-| Test status | Green on current worktree | Rust passes; Python has 208 passing tests |
+| Persistence | Implemented first v1 slice | Debian paths, identity/trust-root/bundle/cache/hint persistence, owner-only secret reads, and redaction proof exist; sealed secret UX remains |
+| Test status | Green on current worktree | Rust passes; Python has 284 passing tests; helper smoke, rust smoke labs, and WSL MVP acceptance pass |
 
 ## Final Assessment
 

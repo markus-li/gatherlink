@@ -53,6 +53,19 @@ Build the scripts, config templates, report format, and runbook now. Do not ask
 for VM access as part of this implementation work, and do not try to contact
 real VMs yet. The project owner will provide VM access later.
 
+Current harness:
+
+- `tools/vm_acceptance/run_acceptance.sh`
+- `tools/vm_acceptance/inventory.example.env`
+- `tools/vm_acceptance/config-node-a.json.template`
+- `tools/vm_acceptance/config-node-b.json.template`
+- `tools/vm_acceptance/README.md`
+
+The harness defaults to `--dry-run`, which renders configs, validates them
+locally, and writes the planned command transcript without contacting VMs.
+`--execute` is required for SSH/SCP actions and refuses placeholder or committed
+example static keys.
+
 Document the runbook here and keep generated reports under an ignored output
 directory such as:
 
@@ -98,5 +111,6 @@ A v1 real-VM run is healthy when:
 - traffic crosses the VM boundary
 - monitor counters show transmit and receive activity
 - diagnostics JSONL is present and parseable
+- one-shot monitor output is captured in the VM report directory
 - service close leaves no orphan Gatherlink process
 - the generated report lists commands run and pass/fail state

@@ -36,7 +36,8 @@ pub enum TransportSecurityConfig {
     /// Python-compiled handshakes. Production handshakes should compile into
     /// this same low-level shape rather than teaching Rust identity policy.
     Static {
-        receiver_index: u32,
+        local_receiver_index: u32,
+        remote_receiver_index: u32,
         send_key: [u8; 32],
         receive_key: [u8; 32],
     },

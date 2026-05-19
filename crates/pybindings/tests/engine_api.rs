@@ -1,4 +1,5 @@
 use std::net::UdpSocket;
+use std::thread;
 use std::time::Duration;
 
 use gatherlink_protocol::control::{
@@ -9,6 +10,24 @@ use gatherlink_pybindings::dto::{PyPathConfig, PySchedulerConfig, PyUdpServiceCo
 use gatherlink_pybindings::engine_api::PyCoreDataplane;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+
+fn recv_with_retry(socket: &UdpSocket, buffer: &mut [u8]) -> (usize, std::net::SocketAddr) {
+    for _ in 0..20 {
+        match socket.recv_from(buffer) {
+            Ok(received) => return received,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => panic!("failed to receive UDP datagram: {error}"),
+        }
+    }
+    socket.recv_from(buffer).unwrap()
+}
 
 #[test]
 fn python_facing_dataplane_forwards_one_udp_payload() {
@@ -33,7 +52,7 @@ fn python_facing_dataplane_forwards_one_udp_payload() {
     let outcome = dataplane.forward_one_for_service("udp-main").unwrap();
 
     let mut buffer = [0_u8; 64];
-    let (length, _source) = target.recv_from(&mut buffer).unwrap();
+    let (length, _source) = recv_with_retry(&target, &mut buffer);
     assert_eq!(&buffer[..length], b"python-bridge-core");
     assert_eq!(outcome.service(), "udp-main");
     assert_eq!(outcome.payload_len(), b"python-bridge-core".len());
@@ -154,6 +173,17 @@ fn python_facing_status_exposes_received_control_metadata() {
         let rx_value = path_three_control.get_item("rx").unwrap().unwrap();
         let rx = rx_value.downcast::<PyDict>().unwrap();
         assert_eq!(rx.get_item("frames").unwrap().unwrap().extract::<u64>().unwrap(), 1);
+        let security_drops_value = root.get_item("security_drops").unwrap().unwrap();
+        let security_drops = security_drops_value.downcast::<PyDict>().unwrap();
+        assert_eq!(
+            security_drops
+                .get_item("packets")
+                .unwrap()
+                .unwrap()
+                .extract::<u64>()
+                .unwrap(),
+            0
+        );
     });
 }
 
@@ -329,8 +359,8 @@ fn python_facing_dataplane_accepts_scheduler_config() {
     let outcomes = dataplane.forward_available_for_service("udp-main", 2).unwrap();
 
     let mut buffer = [0_u8; 8];
-    target.recv_from(&mut buffer).unwrap();
-    target.recv_from(&mut buffer).unwrap();
+    recv_with_retry(&target, &mut buffer);
+    recv_with_retry(&target, &mut buffer);
     assert_eq!(outcomes[0].path_id(), 5);
     assert_eq!(outcomes[1].path_id(), 6);
 }

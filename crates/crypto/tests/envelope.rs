@@ -37,3 +37,16 @@ fn transport_keys_reject_replayed_counter() {
     assert_eq!(server.decrypt_packet(&packet).unwrap().plaintext, b"frame");
     assert!(server.decrypt_packet(&packet).is_err());
 }
+
+#[test]
+fn transport_keys_use_distinct_local_and_remote_receiver_indexes() {
+    let client_to_server = [1u8; 32];
+    let server_to_client = [2u8; 32];
+    let mut client = TransportKeys::new_with_receiver_indexes(10, 20, client_to_server, server_to_client);
+    let mut server = TransportKeys::new_with_receiver_indexes(20, 10, server_to_client, client_to_server);
+
+    let packet = client.encrypt_frame(b"frame").unwrap();
+    let clear = decrypt_packet_without_replay(&client_to_server, &packet).unwrap();
+    assert_eq!(clear.receiver_index, 20);
+    assert_eq!(server.decrypt_packet(&packet).unwrap().plaintext, b"frame");
+}

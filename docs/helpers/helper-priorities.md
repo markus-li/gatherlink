@@ -162,17 +162,29 @@ Not-yet scope:
 
 ### 7. Local Status HTTP Helper
 
-The status HTTP helper is a tiny local observability endpoint for labs and VM
-bring-up. It reports the address it is listening on and the Gatherlink services
-registered on the same machine, including `.hidden` records used for remote IPC
-tests.
+The status HTTP helper is the first experimental local REST/status sidecar for
+labs, VM bring-up, and future local automation. It reports the address it is
+listening on and the Gatherlink services registered on the same machine,
+including `.hidden` records used for remote IPC tests.
 
 First scope:
 
 - explicit local HTTP listen endpoint
 - `/json` machine-readable status
+- `/v1/status` machine-readable experimental REST status
 - `/` and `/text` human-readable status
 - service registry records including hidden records
+- explicit `EXPERIMENTAL` metadata in every status payload
+- loopback-only bind by default
+- non-loopback bind only through a loud danger flag
+- structured helper diagnostics, including startup and non-loopback bind events
+- write-window metadata so future write APIs can expire without changing the
+  helper contract
+- POST/write requests fail closed once the write window has expired, even
+  though write operations themselves are still intentionally unimplemented
+- redacted service metadata so status responses cannot leak private keys,
+  session keys, tokens, passwords, or bootstrap secrets accidentally carried in
+  registry records
 
 Not-yet scope:
 
@@ -192,8 +204,8 @@ V1 scope:
 - explicit CLI startup
 - bind to `127.0.0.1` by default
 - non-loopback bind only with a loud danger flag
-- read APIs for service list/status/monitor-style structured facts
-- write APIs for selected CLI-equivalent operations
+- read APIs for service list/status structured facts
+- write-window metadata for selected CLI-equivalent operations
 - write APIs expire after one hour by default unless the helper is restarted
   from CLI
 - responses must not expose secret key material
@@ -202,6 +214,7 @@ V1 scope:
 Not-yet scope:
 
 - remote unauthenticated management
+- implemented write operations
 - replacing the CLI
 - stable public API guarantees
 - browser UI as part of v1

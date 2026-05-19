@@ -103,7 +103,8 @@ fn secure_config(
         paths,
         SchedulerConfig::default(),
         TransportSecurityConfig::Static {
-            receiver_index,
+            local_receiver_index: receiver_index,
+            remote_receiver_index: receiver_index,
             send_key,
             receive_key,
         },
@@ -268,6 +269,12 @@ fn encrypted_path_transport_carries_aead_packet_and_receiver_decrypts_frame() {
         .unwrap();
     sniffer.send_to(&plaintext, server_path_addr).unwrap();
     assert!(server.receive_available_from_paths(8).unwrap().is_empty());
+    let snapshot = server.metrics_snapshot();
+    assert_eq!(snapshot.security_drops.packets, 1);
+    assert_eq!(snapshot.security_drops.bytes, plaintext.len() as u64);
+    assert_eq!(snapshot.paths[&7].rx_packets, 1);
+    assert_eq!(snapshot.paths[&7].security_drop_packets, 1);
+    assert_eq!(snapshot.paths[&7].security_drop_bytes, plaintext.len() as u64);
 
     // The packet format itself is validated by the crypto crate: clear type,
     // receiver index, counter, ciphertext, and tag around the inner frame.
@@ -481,15 +488,29 @@ fn reserved_service_fanout_keeps_each_copy_for_python() {
 
     let plans = client.transmit_service_payload(1, b"control-copy".to_vec()).unwrap();
     assert_eq!(plans.len(), 2);
-    let delivered = server.receive_available_from_paths(8).unwrap();
+    let delivered = receive_paths_with_retry(&mut server, 8);
     assert!(delivered.is_empty());
-    let events = server.drain_reserved_service_events();
+    let events = drain_reserved_events_with_retry(&mut server, 2);
     assert_eq!(events.len(), 2);
     assert!(events.iter().all(|event| event.payload == b"control-copy"));
     assert_eq!(
         events.iter().map(|event| event.sequence).collect::<Vec<_>>(),
         vec![1, 1]
     );
+}
+
+fn drain_reserved_events_with_retry(
+    dataplane: &mut CoreDataplane,
+    expected_events: usize,
+) -> Vec<gatherlink_dataplane::engine::ReservedServiceEvent> {
+    for _ in 0..20 {
+        let events = dataplane.drain_reserved_service_events();
+        if events.len() >= expected_events {
+            return events;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    dataplane.drain_reserved_service_events()
 }
 
 #[test]

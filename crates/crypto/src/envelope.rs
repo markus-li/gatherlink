@@ -30,7 +30,8 @@ pub struct DecryptedPacket {
 /// Directional transport encryption state.
 #[derive(Debug, Clone)]
 pub struct TransportKeys {
-    receiver_index: u32,
+    local_receiver_index: u32,
+    remote_receiver_index: u32,
     send_key: [u8; 32],
     receive_key: [u8; 32],
     next_send_counter: u64,
@@ -41,8 +42,20 @@ impl TransportKeys {
     /// Create compiled transport keys for one peer session.
     #[must_use]
     pub fn new(receiver_index: u32, send_key: [u8; 32], receive_key: [u8; 32]) -> Self {
+        Self::new_with_receiver_indexes(receiver_index, receiver_index, send_key, receive_key)
+    }
+
+    /// Create compiled transport keys with distinct local and remote receiver indexes.
+    #[must_use]
+    pub fn new_with_receiver_indexes(
+        local_receiver_index: u32,
+        remote_receiver_index: u32,
+        send_key: [u8; 32],
+        receive_key: [u8; 32],
+    ) -> Self {
         Self {
-            receiver_index,
+            local_receiver_index,
+            remote_receiver_index,
             send_key,
             receive_key,
             next_send_counter: 0,
@@ -54,13 +67,13 @@ impl TransportKeys {
     pub fn encrypt_frame(&mut self, plaintext_frame: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let counter = self.next_send_counter;
         self.next_send_counter = self.next_send_counter.checked_add(1).ok_or(CryptoError::InvalidInput)?;
-        encrypt_frame_with_counter(self.receiver_index, &self.send_key, counter, plaintext_frame)
+        encrypt_frame_with_counter(self.remote_receiver_index, &self.send_key, counter, plaintext_frame)
     }
 
     /// Authenticate/decrypt one packet and apply replay protection.
     pub fn decrypt_packet(&mut self, packet: &[u8]) -> Result<DecryptedPacket, CryptoError> {
         let decrypted = decrypt_packet_without_replay(&self.receive_key, packet)?;
-        if decrypted.receiver_index != self.receiver_index {
+        if decrypted.receiver_index != self.local_receiver_index {
             return Err(CryptoError::SilentDrop);
         }
         if !self.replay_window.accept(decrypted.counter) {

@@ -205,7 +205,8 @@ No public version mismatch replies, debug hints, or unauthenticated errors.
 
 Transport security uses AEAD/session envelope/replay windows.
 
-age is only for at-rest secrets and sealed config/provisioning bundles, never for packet transport.
+Sealed-secret UX is only for at-rest local secrets and sealed config/provisioning
+bundles, never for packet transport.
 
 Before packet crypto is implemented, local labs may use explicit `security.mode = "none"`.
 That mode is unauthenticated and unencrypted, must produce loud Python-owned warnings, and must

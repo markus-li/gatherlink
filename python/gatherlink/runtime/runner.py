@@ -17,8 +17,12 @@ from typing import Any
 
 from gatherlink.config.models import GatherlinkConfig
 from gatherlink.config.runtime import RuntimeConfig
+from gatherlink.control.metadata import empty_control_metadata
+from gatherlink.control.policy import apply_control_policy_to_dataplane
+from gatherlink.control.reserved import drain_reserved_service_events
 from gatherlink.dataplane.rust_backend import bind_core_dataplane
 from gatherlink.dataplane.status import (
+    merge_control_metadata,
     merge_disabled_service_errors,
     named_rust_control_metadata,
     named_rust_path_stats,
@@ -60,6 +64,7 @@ class CoreRunnerState:
     delivered_bytes: int = 0
     path_stats: dict[str, dict[str, int]] | None = None
     control_metadata: dict[str, object] | None = None
+    security_drops: dict[str, int] | None = None
 
     def snapshot(self) -> dict[str, object]:
         """Return a service-monitor-friendly status payload."""
@@ -78,6 +83,8 @@ class CoreRunnerState:
             payload["path_stats"] = self.path_stats
         if self.control_metadata is not None:
             payload["control_metadata"] = self.control_metadata
+        if self.security_drops is not None:
+            payload["security_drops"] = self.security_drops
         return payload
 
     def stop(self) -> None:
@@ -150,7 +157,12 @@ def run_core_service(
     delivered_packets = 0
     delivered_bytes = 0
     last_counter_snapshot: tuple[int, int, int, int] | None = None
+    last_security_drop_packets = 0
     next_counter_snapshot_at = 0.0
+    decoded_control_metadata = empty_control_metadata()
+    applied_disabled_services: set[str] = set()
+    path_names_by_id = {path.scheduler.path_id: path.name for path in runtime_config.paths}
+    local_targets_by_service_id = {service.service_id: service.target for service in runtime_config.services}
 
     while not stop_event.is_set():
         if max_iterations is not None and iterations >= max_iterations:
@@ -173,8 +185,27 @@ def run_core_service(
         delivered_bytes += sum(int(outcome.payload_len()) for outcome in delivered)
         state.delivered_packets = delivered_packets
         state.delivered_bytes = delivered_bytes
-        _refresh_runner_state_from_dataplane(state, dataplane, runtime_config)
+        if _drain_python_reserved_services(
+            dataplane,
+            decoded_control_metadata,
+            path_names_by_id=path_names_by_id,
+            local_targets_by_service_id=local_targets_by_service_id,
+        ):
+            apply_control_policy_to_dataplane(
+                dataplane,
+                decoded_control_metadata,
+                applied_disabled_services=applied_disabled_services,
+                logger=logger.warning,
+            )
+        _refresh_runner_state_from_dataplane(state, dataplane, runtime_config, decoded_control_metadata)
         if diagnostics_bus is not None:
+            last_security_drop_packets = _publish_security_drop_diagnostics(
+                diagnostics_bus,
+                state,
+                node=runtime_config.node,
+                peer=runtime_config.peer,
+                last_packets=last_security_drop_packets,
+            )
             current_counter_snapshot = (forwarded_packets, forwarded_bytes, delivered_packets, delivered_bytes)
             if (
                 current_counter_snapshot != last_counter_snapshot
@@ -250,6 +281,7 @@ def _refresh_runner_state_from_dataplane(
     state: CoreRunnerState,
     dataplane: Any,
     runtime_config: RuntimeConfig,
+    decoded_control_metadata: dict[str, object] | None = None,
 ) -> None:
     """Copy Rust status counters into the Python-owned status shape when available."""
     status_snapshot = getattr(dataplane, "status_snapshot", None)
@@ -263,7 +295,100 @@ def _refresh_runner_state_from_dataplane(
     disabled_services = snapshot.get("disabled_services")
     if isinstance(disabled_services, dict):
         merge_disabled_service_errors(control_metadata, disabled_services)
+    if decoded_control_metadata is not None and _has_decoded_control_metadata(decoded_control_metadata):
+        merge_control_metadata(control_metadata, decoded_control_metadata)
     state.control_metadata = control_metadata
+    security_drops = snapshot.get("security_drops")
+    if isinstance(security_drops, dict):
+        state.security_drops = {
+            "packets": int(security_drops.get("packets", 0) or 0),
+            "bytes": int(security_drops.get("bytes", 0) or 0),
+        }
+
+
+def _publish_security_drop_diagnostics(
+    diagnostics_bus: DiagnosticsBus,
+    state: CoreRunnerState,
+    *,
+    node: str,
+    peer: str | None,
+    last_packets: int,
+) -> int:
+    """
+    Emit a structured sample when Rust reports new silent security drops.
+
+    Rust only exposes aggregate counters so malformed/auth/replay failures stay
+    indistinguishable on the wire. Python adds operator meaning here without
+    changing network behavior or pushing policy into the dataplane.
+    """
+    security_drops = state.security_drops
+    if not security_drops:
+        return last_packets
+    packets = int(security_drops.get("packets", 0) or 0)
+    if packets <= last_packets:
+        return last_packets
+    diagnostics_bus.publish(
+        DiagnosticEvent.drop_event(
+            code="crypto.auth_failed",
+            node=node,
+            peer=peer,
+            message="transport security silently dropped invalid packets",
+            details={
+                "packets": packets,
+                "bytes": int(security_drops.get("bytes", 0) or 0),
+                "delta_packets": packets - last_packets,
+                "drop_family": "transport_security",
+            },
+        )
+    )
+    return packets
+
+
+def _has_decoded_control_metadata(control_metadata: dict[str, object]) -> bool:
+    """Return whether Python decoded any peer control facts worth overlaying."""
+    received = control_metadata.get("received")
+    if isinstance(received, dict) and int(received.get("frames") or 0) > 0:
+        return True
+    for count_name in [
+        "path_metadata_count",
+        "service_metadata_count",
+        "service_endpoint_assertion_count",
+        "service_disable_count",
+        "service_scheduler_policy_count",
+        "path_capacity_count",
+        "path_latency_count",
+        "path_mtu_count",
+        "service_endpoint_mismatch_count",
+    ]:
+        if int(control_metadata.get(count_name) or 0) > 0:
+            return True
+    return False
+
+
+def _drain_python_reserved_services(
+    dataplane: Any,
+    control_metadata: dict[str, object],
+    *,
+    path_names_by_id: dict[int, str],
+    local_targets_by_service_id: dict[int, str],
+) -> int:
+    """
+    Drain reserved service payloads that Rust intentionally forwards to Python.
+
+    This keeps the production runner on the same boundary as the lab runner:
+    Rust recognizes reserved ids and preserves bytes; Python decodes control,
+    auth, diagnostics, remote-status, and future reserved services.
+    """
+    drain = getattr(dataplane, "drain_reserved_service_events", None)
+    if not callable(drain):
+        return 0
+    return drain_reserved_service_events(
+        dataplane,
+        control_metadata,
+        path_names_by_id=path_names_by_id,
+        local_targets_by_service_id=local_targets_by_service_id,
+        logger=logger.warning,
+    )
 
 
 def _forward_available_for_service(dataplane: Any, service_name: str, batch_size: int) -> list[Any]:

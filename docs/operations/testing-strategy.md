@@ -98,6 +98,8 @@ The demo should prove UDP payload enters a local virtual port, packets split ove
 paths, the remote emits original UDP payload, tcpdump shows both paths, path
 failure does not kill service, and diagnostics explain decisions.
 
-Before crypto/authentication exists, the demo may use explicit plaintext mode as
-documented in `docs/protocol/plaintext-security-mode.md`. That mode must warn loudly in
-Python terminal output and logs.
+Local demos may still use explicit plaintext mode when they are testing lab
+plumbing rather than security behavior, as documented in
+`docs/protocol/plaintext-security-mode.md`. That mode must warn loudly in Python
+terminal output and logs. Secure demos should use authenticated Noise-generated
+config material or the explicit encrypted lab/manual configs.

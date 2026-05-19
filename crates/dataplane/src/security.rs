@@ -22,11 +22,17 @@ impl TransportSecurity {
         match config {
             TransportSecurityConfig::None => Self::None,
             TransportSecurityConfig::Static {
-                receiver_index,
+                local_receiver_index,
+                remote_receiver_index,
                 send_key,
                 receive_key,
             } => Self::Static {
-                keys: TransportKeys::new(*receiver_index, *send_key, *receive_key),
+                keys: TransportKeys::new_with_receiver_indexes(
+                    *local_receiver_index,
+                    *remote_receiver_index,
+                    *send_key,
+                    *receive_key,
+                ),
             },
         }
     }

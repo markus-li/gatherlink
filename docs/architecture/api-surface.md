@@ -36,6 +36,7 @@ dataplane logic.
 
 Rules:
 
+- start with `gatherlink helpers status-http`
 - bind to `127.0.0.1` by default
 - require an explicit danger flag for any non-loopback bind
 - mark the server and docs as `EXPERIMENTAL`
@@ -43,13 +44,15 @@ Rules:
 - derive responses from the same structured facts used by CLI/status output
 - keep CLI as the primary supported control surface
 
-Writable REST APIs are allowed in v1, but only with an expiry guard:
+The current helper exposes read-only status on `/json` and `/v1/status`.
+Writable REST APIs are allowed later in v1, but only with an expiry guard:
 
 - writes are enabled only when started explicitly from the CLI
 - write operations stop working after one hour by default
 - restarting the REST helper from the CLI resets the write window
 - read-only operations may continue after the write window expires
 - the API must report whether writes are enabled and when they expire
+- until concrete write endpoints are added, mutation requests must fail closed
 
 The goal is to make local automation and future UI work possible without
 turning unauthenticated HTTP into a long-lived remote management surface.

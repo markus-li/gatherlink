@@ -10,9 +10,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from asyncio_socks_server import Addon, Address, Connection, Flow, Server
 
+from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.helpers.transport import (
     HelperStreamTarget,
     HelperStreamTransport,
@@ -108,12 +110,20 @@ class LabDirectTcpExitConnector(GatherlinkServiceExitConnector):
     def __init__(self) -> None:
         super().__init__(LabDirectTcpStreamTransport())
 
+
 class GatherlinkSocks5Addon(Addon):
     """SOCKS5 server addon that applies Gatherlink policy and exit behavior."""
 
-    def __init__(self, *, policy: Socks5Policy, exit_connector: Socks5ExitConnector | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        policy: Socks5Policy,
+        exit_connector: Socks5ExitConnector | None = None,
+        diagnostics_bus: DiagnosticsBus | None = None,
+    ) -> None:
         self.policy = policy
         self.exit_connector = exit_connector or GatherlinkServiceExitConnector()
+        self.diagnostics_bus = diagnostics_bus
         self.stats = Socks5ConnectionStats()
 
     async def on_connect(self, flow: Flow) -> Connection | None:
@@ -122,6 +132,13 @@ class GatherlinkSocks5Addon(Addon):
         if not decision.allowed:
             self.stats.denied += 1
             logger.warning("SOCKS5 CONNECT denied", extra={"target": f"{flow.dst.host}:{flow.dst.port}"})
+            self._publish_event(
+                code="socks.exit_denied",
+                severity="warning",
+                message="SOCKS5 CONNECT denied by policy",
+                target=f"{flow.dst.host}:{flow.dst.port}",
+                reason=decision.reason,
+            )
             raise PermissionError(decision.reason)
         self.stats.accepted += 1
         try:
@@ -130,10 +147,22 @@ class GatherlinkSocks5Addon(Addon):
                 flow.dst.port,
                 timeout_seconds=self.policy.connection_timeout_seconds,
             )
-        except (OSError, TimeoutError, RuntimeError):
+        except (OSError, TimeoutError, RuntimeError) as exc:
             self.stats.failed += 1
+            self._publish_event(
+                code="socks.exit_unreachable",
+                severity="warning",
+                message="SOCKS5 CONNECT target unreachable",
+                target=f"{flow.dst.host}:{flow.dst.port}",
+                error=str(exc),
+            )
             raise
         self.stats.opened += 1
+        self._publish_event(
+            code="helper.stream.opened",
+            message="SOCKS5 CONNECT stream opened",
+            target=f"{flow.dst.host}:{flow.dst.port}",
+        )
         return connection
 
     async def on_flow_close(self, flow: Flow) -> None:
@@ -141,6 +170,28 @@ class GatherlinkSocks5Addon(Addon):
         self.stats.closed += 1
         self.stats.bytes_up += int(getattr(flow, "bytes_up", 0))
         self.stats.bytes_down += int(getattr(flow, "bytes_down", 0))
+        self._publish_event(
+            code="helper.stream.closed",
+            message="SOCKS5 CONNECT stream closed",
+            bytes_up=int(getattr(flow, "bytes_up", 0)),
+            bytes_down=int(getattr(flow, "bytes_down", 0)),
+        )
+
+    def _publish_event(self, *, code: str, message: str, severity: str = "info", **details: Any) -> None:
+        # TODO(helper-diagnostics): Keep SOCKS policy decisions visible through
+        # structured diagnostics while keeping the helper independent from core
+        # transport policy.
+        if self.diagnostics_bus is None:
+            return
+        self.diagnostics_bus.publish(
+            DiagnosticEvent.helper_event(
+                code=code,
+                helper="socks5",
+                severity=severity,
+                message=message,
+                details=details,
+            )
+        )
 
 
 def build_socks5_server(
@@ -150,9 +201,10 @@ def build_socks5_server(
     policy: Socks5Policy,
     exit_connector: Socks5ExitConnector | None = None,
     auth: tuple[str, str] | None = None,
+    diagnostics_bus: DiagnosticsBus | None = None,
 ) -> Server:
     """Build a SOCKS5 TCP CONNECT server with Gatherlink policy hooks."""
-    addon = GatherlinkSocks5Addon(policy=policy, exit_connector=exit_connector)
+    addon = GatherlinkSocks5Addon(policy=policy, exit_connector=exit_connector, diagnostics_bus=diagnostics_bus)
     return Server(host=listen_host, port=listen_port, addons=[addon], auth=auth)
 
 
@@ -164,6 +216,7 @@ def run_socks5_server(
     allowed_ports: Sequence[int],
     auth: tuple[str, str] | None = None,
     exit_connector: Socks5ExitConnector | None = None,
+    diagnostics_bus: DiagnosticsBus | None = None,
 ) -> None:
     """Run the SOCKS5 helper foreground server."""
     policy = Socks5Policy.allow(hosts=allowed_hosts, ports=allowed_ports)
@@ -173,6 +226,7 @@ def run_socks5_server(
         policy=policy,
         exit_connector=exit_connector,
         auth=auth,
+        diagnostics_bus=diagnostics_bus,
     )
     server.run()
 
@@ -184,6 +238,7 @@ def run_lab_direct_socks5_server(
     allowed_hosts: Sequence[str],
     allowed_ports: Sequence[int],
     auth: tuple[str, str] | None = None,
+    diagnostics_bus: DiagnosticsBus | None = None,
 ) -> None:
     """Run SOCKS5 with lab-only direct TCP exit transport."""
     run_socks5_server(
@@ -193,4 +248,5 @@ def run_lab_direct_socks5_server(
         allowed_ports=allowed_ports,
         auth=auth,
         exit_connector=LabDirectTcpExitConnector(),
+        diagnostics_bus=diagnostics_bus,
     )

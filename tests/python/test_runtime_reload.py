@@ -69,3 +69,24 @@ def test_hot_reapply_scheduler_from_status_calls_reapply_with_updated_runtime() 
 
     assert updated is calls[0][1]
     assert calls[0][0] == "dataplane"
+
+
+def test_recompile_runtime_from_status_ignores_invalid_loss_counters() -> None:
+    config = _config()
+    runtime = expand_config(config)
+
+    updated = recompile_runtime_from_status(
+        config,
+        runtime,
+        {
+            "path_stats": {
+                "path-a": {
+                    "packets": "not-a-number",
+                    "missed_packets": -5,
+                    "qdisc_dropped_packets": object(),
+                }
+            }
+        },
+    )
+
+    assert updated.paths[0].scheduler.loss_ppm == 0

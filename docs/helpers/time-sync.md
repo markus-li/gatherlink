@@ -97,4 +97,5 @@ Library posture:
 
 - prefer OS APIs or narrow platform commands over adding a Python dependency
 - keep privilege handling explicit and isolated in the helper
-- do not hide NTP-agent detection behind a broad framework
+- do not try to detect host NTP agents as a policy gate; warn clearly and let
+  the operator decide whether explicit correction is appropriate

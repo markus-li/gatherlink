@@ -26,6 +26,10 @@ def detect_config_format(data: dict[str, Any]) -> ConfigFormat:
     # checks once it is normalized.
     if helpers.get("dns") and not data.get("services"):
         return "dns-helper"
+    if helpers.get("socks5"):
+        return "socks5-helper"
+    if helpers.get("tcp_forward"):
+        return "tcp-forward-helper"
 
     has_wireguard = bool(helpers.get("wireguard")) or any(
         isinstance(service, dict) and str(service.get("name", "")).startswith("wireguard") for service in services

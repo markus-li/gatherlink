@@ -45,7 +45,7 @@
     }
   ],
   "security": {
-    "mode": "static",
+    "mode": "authenticated",
     "receiver_index": 101,
     "send_key": "kJiywLJJjRWSIX7ZGttO1R7SKITfnefGyfsawZ5XNxI=",
     "receive_key": "j25NmSQURl1GzZtqpwPXmGmhudM6iT1E31xeZDb0csw="

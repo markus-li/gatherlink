@@ -178,3 +178,63 @@ def test_run_start_closes_existing_process_service_before_replacing(monkeypatch,
     assert result.exit_code == 0
     assert close_calls == ["core.test-client"]
     assert launched["command"]
+
+
+def test_run_helpers_start_registers_configured_helper_process(monkeypatch, tmp_path) -> None:
+    from gatherlink.cli import run as run_cli
+    from gatherlink.runtime.services import SERVICE_REGISTRY_ENV, ServiceRegistry
+
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(tmp_path / "services"))
+    launched = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            launched["command"] = command
+            launched["kwargs"] = kwargs
+            self.pid = os.getpid()
+
+    monkeypatch.setattr(run_cli.subprocess, "Popen", FakePopen)
+    result = CliRunner().invoke(
+        app,
+        ["run", "helpers-start", str(EXAMPLES / "socks5-helper.json")],
+    )
+
+    assert result.exit_code == 0
+    record = ServiceRegistry().resolve("helper.socks5-client.socks5")
+    assert record.kind == "helper:socks5"
+    assert record.pid == os.getpid()
+    assert record.metadata["service"] == "socks5-stream"
+    assert "--gatherlink-service" in launched["command"]
+    assert "--diagnostics-jsonl" in launched["command"]
+    assert launched["kwargs"]["start_new_session"] is True
+    rows = [
+        json.loads(line) for line in Path(record.metadata["diagnostics_jsonl"]).read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["code"] == "helper.lifecycle.started"
+    assert rows[0]["helper"] == "socks5"
+    assert rows[0]["details"]["service_name"] == "helper.socks5-client.socks5"
+
+
+def test_run_helpers_start_writes_start_failure_diagnostic(monkeypatch, tmp_path) -> None:
+    from gatherlink.cli import run as run_cli
+    from gatherlink.runtime.services import SERVICE_REGISTRY_ENV
+
+    registry_path = tmp_path / "services"
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(registry_path))
+
+    class FailingPopen:
+        def __init__(self, _command, **_kwargs):
+            raise OSError("cannot exec helper")
+
+    monkeypatch.setattr(run_cli.subprocess, "Popen", FailingPopen)
+    result = CliRunner().invoke(
+        app,
+        ["run", "helpers-start", str(EXAMPLES / "socks5-helper.json")],
+    )
+
+    diagnostics_path = registry_path / "helper.socks5-client.socks5" / "diagnostics.jsonl"
+    rows = [json.loads(line) for line in diagnostics_path.read_text(encoding="utf-8").splitlines()]
+    assert result.exit_code == 1
+    assert rows[0]["code"] == "helper.lifecycle.start_failed"
+    assert rows[0]["severity"] == "error"
+    assert rows[0]["details"]["error_type"] == "OSError"

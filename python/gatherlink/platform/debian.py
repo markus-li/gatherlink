@@ -14,6 +14,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+DEBIAN_CONFIG_DIR = Path("/etc/gatherlink")
+DEBIAN_STATE_DIR = Path("/var/lib/gatherlink")
+DEBIAN_RUNTIME_DIR = Path("/run/gatherlink")
+DEBIAN_LOG_DIR = Path("/var/log/gatherlink")
+
 
 class CommandRunner(Protocol):
     """Small command runner interface used by platform adapters and tests."""
@@ -28,6 +33,10 @@ class SubprocessCommandRunner:
     def run(self, command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
         """Run one command."""
         return subprocess.run(command, check=check, text=True, capture_output=True)
+
+    def run_passthrough(self, command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        """Run one interactive command without capturing terminal output."""
+        return subprocess.run(command, check=check, text=True)
 
 
 @dataclass(frozen=True)
@@ -83,10 +92,56 @@ class DebianCompatibilityBackend:
             command.append("-f")
         return command
 
+    def run_journalctl(self, unit: str, *, follow: bool = False, tail: int = 100) -> subprocess.CompletedProcess[str]:
+        """Stream systemd-owned service logs through the operator terminal."""
+        runner = self.command_runner()
+        command = self.journalctl_command(unit, follow=follow, tail=tail)
+        passthrough = getattr(runner, "run_passthrough", None)
+        if callable(passthrough):
+            return passthrough(command, check=False)
+        return runner.run(command, check=False)
+
     def systemd_is_active(self, unit: str) -> bool:
         """Return whether systemd reports a unit as active on this Debian host."""
-        result = self.command_runner().run(["systemctl", "is-active", "--quiet", unit], check=False)
+        try:
+            result = self.command_runner().run(["systemctl", "is-active", "--quiet", unit], check=False)
+        except OSError:
+            return False
         return result.returncode == 0
+
+    def ntp_synchronization_state(self) -> str:
+        """Return the host NTP sync state reported by Debian ``timedatectl``."""
+        try:
+            result = self.command_runner().run(
+                ["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                check=False,
+            )
+        except OSError:
+            return "unknown"
+        value = result.stdout.strip().lower()
+        if result.returncode != 0 or value not in {"yes", "no"}:
+            return "unknown"
+        return "synchronized" if value == "yes" else "unsynchronized"
+
+    @property
+    def config_dir(self) -> Path:
+        """Return the Debian static config directory for v1."""
+        return DEBIAN_CONFIG_DIR
+
+    @property
+    def state_dir(self) -> Path:
+        """Return the Debian persistent state/cache directory for v1."""
+        return DEBIAN_STATE_DIR
+
+    @property
+    def runtime_dir(self) -> Path:
+        """Return the Debian volatile runtime directory for v1."""
+        return DEBIAN_RUNTIME_DIR
+
+    @property
+    def log_dir(self) -> Path:
+        """Return the Debian local log/event directory for v1."""
+        return DEBIAN_LOG_DIR
 
 
 def default_debian_backend(*, runner: CommandRunner | None = None) -> DebianCompatibilityBackend:

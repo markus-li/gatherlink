@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
@@ -76,3 +77,26 @@ def test_wireguard_plan_cli_renders_mapping() -> None:
     assert "service: wireguard-main" in result.output
     assert "wireguard local listen: 127.0.0.1:51820" in result.output
     assert "Endpoint = 127.0.0.1:55180" in result.output
+
+
+def test_wireguard_plan_cli_emits_structured_diagnostics(tmp_path) -> None:
+    diagnostics_path = tmp_path / "wireguard.jsonl"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "helpers",
+            "wireguard-plan",
+            str(EXAMPLES / "wireguard-client.json"),
+            "--diagnostics-jsonl",
+            str(diagnostics_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    event = json.loads(diagnostics_path.read_text(encoding="utf-8").splitlines()[0])
+    assert event["code"] == "helper.wireguard.plan"
+    assert event["helper"] == "wireguard"
+    assert event["service"] == "wireguard-main"
+    assert event["details"]["plan"]["wireguard_local_listen"] == "127.0.0.1:51820"
+    assert "peer-public-key" not in json.dumps(event)

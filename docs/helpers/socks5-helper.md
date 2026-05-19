@@ -57,6 +57,7 @@ ASSOCIATE is part of the MVP.
 - byte counters
 - backpressure behavior
 - clear diagnostics for refused targets, unreachable exits, and policy denial
+- optional JSONL diagnostics sink for policy decisions and stream lifecycle
 
 Implemented first slice:
 
@@ -71,8 +72,14 @@ Implemented first slice:
 - `gatherlink helpers stream-exit --listen HOST:PORT --allow-host TARGET --allow-port PORT`
   runs the companion UDP exit that receives those helper stream frames from the
   peer's Gatherlink service target
+- canonical config can declare `helpers.socks5` with the local SOCKS5 listen
+  endpoint, the Gatherlink service name, and explicit `allow_hosts` /
+  `allow_ports`; runtime expansion resolves that service to the local
+  Gatherlink UDP stream endpoint for supervisors
 - empty allow-lists deny all traffic so the helper cannot silently become an
   open proxy
+- policy denials, unreachable exits, stream opens, and stream closes are emitted
+  as structured helper diagnostics when `--diagnostics-jsonl` is provided
 - `LabDirectTcpExitConnector` is available for local smoke tests; the connector
   interface remains the boundary between SOCKS5 policy and Gatherlink stream
   transport

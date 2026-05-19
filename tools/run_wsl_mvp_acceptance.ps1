@@ -45,11 +45,20 @@ function Invoke-WslText {
     $arguments += @("--", "bash", "-lc", $Command)
     $oldErrorActionPreference = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
+    $previousLocation = Get-Location
     try {
+        # WSL emits "failed to translate \\wsl.localhost\..." when a Windows
+        # process starts from a UNC-backed WSL path and then launches another
+        # distro. That diagnostic is useful interactively but poisons JSON
+        # command output in this acceptance harness, so run the host-side WSL
+        # process from a neutral Windows directory and let the explicit bash
+        # command choose the Linux repo path.
+        Set-Location $env:TEMP
         $output = & wsl @arguments 2>&1
         $exitCode = $LASTEXITCODE
     }
     finally {
+        Set-Location $previousLocation
         $ErrorActionPreference = $oldErrorActionPreference
     }
     $text = ($output | ForEach-Object { "$_" }) -join "`n"

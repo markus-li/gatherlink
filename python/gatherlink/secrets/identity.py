@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from base64 import b64decode, b64encode
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from gatherlink.persistence.store import atomic_write_json, load_secret_json, redact_secrets
 from gatherlink.security.keys import NodeIdentity
 
 
@@ -66,6 +69,21 @@ class IdentityRecord:
             "x25519_public": self.x25519_public,
             "x25519_private": self.x25519_private,
         }
+
+    def export_redacted_dict(self) -> dict[str, Any]:
+        """Return an operator-safe identity summary without private key material."""
+        return redact_secrets(self.export_dict())
+
+    def save(self, path: Path, *, force: bool = False) -> None:
+        """Persist private identity material atomically with owner-only permissions."""
+        if path.exists() and not force:
+            raise FileExistsError(f"{path} already exists")
+        atomic_write_json(path, self.export_dict(), mode=0o600)
+
+    @classmethod
+    def load(cls, path: Path) -> IdentityRecord:
+        """Load a private identity record from disk."""
+        return cls.from_dict(load_secret_json(path))
 
 
 @dataclass(frozen=True)
@@ -132,6 +150,17 @@ class IdentityPublicRecord:
             "ed25519_public": self.ed25519_public,
             "x25519_public": self.x25519_public,
         }
+
+    def save(self, path: Path, *, force: bool = False) -> None:
+        """Persist public identity material atomically."""
+        if path.exists() and not force:
+            raise FileExistsError(f"{path} already exists")
+        atomic_write_json(path, self.export_dict(), mode=0o644)
+
+    @classmethod
+    def load(cls, path: Path) -> IdentityPublicRecord:
+        """Load a public identity record from disk."""
+        return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
 
 
 def _b64(value: bytes) -> str:

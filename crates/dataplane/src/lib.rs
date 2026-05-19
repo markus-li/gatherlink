@@ -10,6 +10,7 @@ pub mod metrics;
 pub mod mtu;
 pub mod queues;
 pub mod receive;
+pub mod relay;
 pub mod reorder;
 pub mod runtime_config;
 mod scheduler;

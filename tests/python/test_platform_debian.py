@@ -5,13 +5,22 @@ from gatherlink.platform.debian import DebianCompatibilityBackend
 
 
 class RecordingRunner:
-    def __init__(self, *, stdout: str = "", returncode: int = 0) -> None:
+    def __init__(self, *, stdout: str = "", returncode: int = 0, error: OSError | None = None) -> None:
         self.stdout = stdout
         self.returncode = returncode
+        self.error = error
         self.commands: list[list[str]] = []
 
     def run(self, command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
         self.commands.append(command)
+        if self.error is not None:
+            raise self.error
+        return subprocess.CompletedProcess(command, self.returncode, stdout=self.stdout, stderr="")
+
+    def run_passthrough(self, command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        self.commands.append(command)
+        if self.error is not None:
+            raise self.error
         return subprocess.CompletedProcess(command, self.returncode, stdout=self.stdout, stderr="")
 
 
@@ -60,6 +69,17 @@ def test_debian_backend_builds_journalctl_command() -> None:
     ]
 
 
+def test_debian_backend_streams_journalctl_through_runner() -> None:
+    runner = RecordingRunner()
+    backend = DebianCompatibilityBackend(runner=runner)
+
+    backend.run_journalctl("gatherlink-core@test.service", follow=False, tail=10)
+
+    assert runner.commands == [
+        ["journalctl", "-u", "gatherlink-core@test.service", "--no-pager", "-n", "10"],
+    ]
+
+
 def test_debian_backend_queries_systemd_active_state() -> None:
     runner = RecordingRunner(returncode=0)
     backend = DebianCompatibilityBackend(runner=runner)
@@ -73,3 +93,19 @@ def test_debian_backend_reports_inactive_systemd_unit() -> None:
     backend = DebianCompatibilityBackend(runner=runner)
 
     assert backend.systemd_is_active("missing.service") is False
+
+
+def test_debian_backend_treats_missing_systemctl_as_inactive() -> None:
+    runner = RecordingRunner(error=FileNotFoundError("systemctl"))
+    backend = DebianCompatibilityBackend(runner=runner)
+
+    assert backend.systemd_is_active("missing.service") is False
+
+
+def test_debian_backend_reads_ntp_synchronization_state() -> None:
+    assert DebianCompatibilityBackend(runner=RecordingRunner(stdout="yes\n")).ntp_synchronization_state() == "synchronized"
+    assert (
+        DebianCompatibilityBackend(runner=RecordingRunner(stdout="no\n")).ntp_synchronization_state()
+        == "unsynchronized"
+    )
+    assert DebianCompatibilityBackend(runner=RecordingRunner(stdout="maybe\n")).ntp_synchronization_state() == "unknown"

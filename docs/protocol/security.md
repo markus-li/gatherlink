@@ -19,7 +19,7 @@ model:
 - handshake pattern: Noise IK when the peer is known from signed topology,
   Noise XX only for explicit enrollment/bootstrap flows
 - packet AEAD: `ChaCha20-Poly1305`
-- hash/KDF: `BLAKE2s`/HKDF as provided by the selected Noise implementation
+- hash/KDF: SHA-256/HKDF for the current Python-owned Noise IK style setup
 - packet counters: per-direction monotonically increasing `u64`
 - replay defense: sliding replay window per session/direction
 - public receive behavior: no response unless the input is authenticated as a
@@ -36,14 +36,20 @@ The current Rust dataplane can run path transports in two modes:
 
 - `security.mode=none`: plaintext Gatherlink frames on path UDP sockets. This is
   intentionally retained for local labs and diagnostics and must log loudly.
-- `security.mode=static`: Python supplies already-compiled directional
-  ChaCha20-Poly1305 keys and a receiver index to Rust. Rust encrypts encoded
-  Gatherlink frames before path-socket send, decrypts/authenticates path packets
-  before frame parsing, and applies transport replay protection.
+- `security.mode=authenticated`: the normal v1 config-facing secure path.
+  Python verifies signed topology/session documents, compiles short-lived
+  directional ChaCha20-Poly1305 keys plus local/remote receiver indexes, and
+  hands only those packet-rate facts to Rust. Rust still sees the compact AEAD
+  executor state; it does not learn topology or identity policy.
+- `security.mode=static`: explicit lab/manual provisioning. It uses the same
+  Rust AEAD executor as authenticated mode, but the operator supplied the
+  directional keys directly or through static-session tooling. It must stay
+  warning-heavy and should not be treated as the normal v1 secure path.
 
 Static mode is not the final production trust model. It exists so labs can
 exercise the production AEAD packet path before Noise handshake orchestration is
-complete. The intended production path is:
+complete. The intended production path, now represented by
+`security.mode=authenticated`, is:
 
 ```text
 Python verifies identity/topology/authentication policy
@@ -63,12 +69,131 @@ gatherlink secrets static-session --local ./local.identity.json --peer ./peer.id
 gatherlink secrets static-session --local ./peer.identity.json --peer ./local.identity.json --role responder
 ```
 
+For v1 provisioning, Python also creates and verifies signed topology bundles:
+
+```bash
+gatherlink secrets identity-create ./issuer.identity.json
+gatherlink secrets identity-create ./node-a.identity.json
+gatherlink secrets topology-create \
+  --issuer ./issuer.identity.json \
+  --output ./topology.signed.json \
+  --generation 1 \
+  --node node-a=./node-a.identity.json \
+  --service wireguard=node-a=256
+gatherlink secrets topology-verify ./topology.signed.json --trust-root ./issuer.identity.json
+```
+
+Topology bundles are Python-owned control-plane artifacts. They authorize names,
+roles, services, generations, and validity windows. Rust receives only the
+compiled session/runtime facts derived after Python verifies those artifacts.
+
+Trust roots can also be exported and imported as public-only state:
+
+```bash
+gatherlink secrets trust-root-export ./issuer.identity.json ./issuer.public.json
+gatherlink secrets trust-root-import lab-root ./issuer.public.json --state-dir .gatherlink/state
+gatherlink secrets trust-root-list --state-dir .gatherlink/state
+```
+
+The import path stores only public identity material under the state
+`trust-roots/` directory. Private identity files remain explicit local inputs
+and must not be exposed through diagnostics, REST, reports, or config display.
+
 The two `static-session` outputs are inverse security blocks: the initiator
 `send_key` is the responder `receive_key`, and vice versa. This command still
 produces `security.mode=static`; it is provisioning glue for the current AEAD
 path, not a replacement for the authenticated Noise handshake. Python owns the
 identity files, public identity exchange, transcript context, and eventual
 trust policy. Rust receives only the compiled receiver index and traffic keys.
+
+The v1 implementation now has a Python-owned Noise IK style authenticated
+session setup. It consumes a verified topology bundle, confirms both identities
+are present and not revoked, binds the prologue/transcript to the topology
+generation and issuer, encrypts the initiator static X25519 key after the `es`
+DH, and compiles short-lived directional AEAD facts for Rust. Rust still sees
+only receiver indexes, traffic keys, counters, replay windows, and compact
+packet execution state.
+
+The operator-facing Noise IK path is available under `gatherlink secrets`:
+
+```text
+gatherlink secrets noise-init \
+  --local node-a.identity.json \
+  --peer node-b.public.json \
+  --topology topology.signed.json \
+  --trust-root root.public.json \
+  --initiation-output node-a-to-b.noise-init.json \
+  --pending-output node-a-to-b.noise.pending.secret.json
+
+gatherlink secrets noise-accept \
+  --local node-b.identity.json \
+  --topology topology.signed.json \
+  --trust-root root.public.json \
+  --initiation node-a-to-b.noise-init.json \
+  --response-output node-b-to-a.noise-response.json \
+  --security-output node-b.security.secret.json
+
+gatherlink secrets noise-complete \
+  --local node-a.identity.json \
+  --topology topology.signed.json \
+  --trust-root root.public.json \
+  --pending node-a-to-b.noise.pending.secret.json \
+  --response node-b-to-a.noise-response.json \
+  --security-output node-a.security.secret.json
+```
+
+The public initiation contains the initiator ephemeral key and encrypted
+initiator static X25519 key. The public response contains the responder
+ephemeral key, receiver index, expiry, and initiation hash. The pending
+initiator state and generated security blocks contain secret material and must
+be stored with owner-only permissions. The generated security blocks are
+config-compatible authenticated AEAD blocks with distinct local and remote
+receiver indexes. Noise commands generate opaque non-zero receiver indexes by
+default; `--receiver-index` exists only for deterministic tests and explicit
+manual provisioning. When expanded for runtime, Python records the source mode
+as `authenticated` and compiles the executor mode to Rust's static AEAD
+primitive. Malformed, expired, tampered, wrong-peer, wrong-generation, or
+revoked inputs fail closed locally and must not produce unauthenticated network
+errors.
+
+The older signed ephemeral document bridge remains as a compatibility/manual
+tool while Noise IK becomes the normal v1 path:
+
+```text
+gatherlink secrets handshake-init \
+  --local node-a.identity.json \
+  --peer node-b.public.json \
+  --topology topology.signed.json \
+  --trust-root root.public.json \
+  --initiation-output node-a-to-b.init.signed.json \
+  --pending-output node-a-to-b.pending.secret.json
+
+gatherlink secrets handshake-accept \
+  --local node-b.identity.json \
+  --topology topology.signed.json \
+  --trust-root root.public.json \
+  --initiation node-a-to-b.init.signed.json \
+  --response-output node-b-to-a.response.signed.json \
+  --security-output node-b.security.secret.json
+
+gatherlink secrets handshake-complete \
+  --local node-a.identity.json \
+  --topology topology.signed.json \
+  --trust-root root.public.json \
+  --pending node-a-to-b.pending.secret.json \
+  --response node-b-to-a.response.signed.json \
+  --security-output node-a.security.secret.json
+```
+
+The signed bridge also produces config-compatible authenticated AEAD blocks with
+distinct local and remote receiver indexes, but new v1 workflows should use the
+Noise IK commands above.
+
+Compiled transport security now distinguishes local and remote receiver
+indexes. The local receiver index is what this process accepts on inbound
+encrypted packets; the remote receiver index is what this process writes into
+outbound encrypted packets for the peer. Older static lab configs may still use
+one shared `receiver_index`, which expands to both values.
 
 The Rust dataplane must not learn identity policy, topology authority rules,
 peer allow/deny decisions, or control metadata semantics. Those stay in Python.
@@ -526,8 +651,8 @@ UDP traffic without ICMP port-unreachable responses.
 ## Nonces And Counters
 
 Never use random nonces for packet encryption. Each traffic key has a
-per-direction `u64` counter. The AEAD nonce is derived from the Noise traffic
-secret's nonce base plus the encoded counter.
+per-direction `u64` counter. The AEAD nonce is derived from the traffic
+key/session context plus the encoded counter.
 
 Rules:
 
@@ -542,43 +667,50 @@ Rules:
 
 ## Rekeying
 
-Sessions should support WireGuard-like rekeying:
+Sessions should support WireGuard-like replacement:
 
 - time-based rekey before traffic keys get old
 - volume-based rekey before counters get large
-- explicit key phase in the packet envelope
-- short receive grace period for the previous key phase
+- a fresh receiver index for each replacement receive session
+- new Rust traffic-key/replay state when Python compiles a replacement session
+- an optional short receive grace period for the previous receiver index once
+  the service lifecycle supports overlapping sessions
 
-Exact intervals can be tuned later, but the implementation must assume keys are
-temporary session material.
+V1 keeps the public packet header compact and does not add a plaintext key-phase
+field. Rekey/rotation is represented by Python creating a replacement
+authenticated session with a new receiver index and then hot-reapplying compiled
+traffic-key facts to Rust. Exact intervals can be tuned later, but the
+implementation must assume keys are temporary session material.
 
 ## Implementation Boundary
 
-Rust `gatherlink-crypto` owns deterministic packet security:
+Rust `gatherlink-crypto` and `gatherlink-dataplane` own deterministic packet
+security execution:
 
-- handshake state machine or wrapper around the selected Noise implementation
-- traffic key derivation outputs
+- traffic keys and receiver-index lookup facts compiled by Python
 - envelope encrypt/decrypt
 - nonce construction
 - replay window
-- key phase and rekey mechanics
+- counter exhaustion failure
 - constant-shaped validation failures for public packets
 
 Python owns control-plane trust and policy:
 
 - signed topology/config artifacts
+- Noise IK style authenticated session setup
 - enrollment and provisioning UX
 - trust root and revocation policy
 - mapping node identities to allowed services, relays, exits, and paths
 - compiling validated session inputs for Rust
+- rekey cadence, receiver-index rotation policy, and hot reapply orchestration
 
 This boundary matches the rest of Gatherlink: Rust is the fast deterministic
 dataplane; Python is the policy/control plane.
 
-## age Boundary
+## Sealed-Secret Boundary
 
-`age` may seal provisioning bundles, exported node identities, topology packages
-with embedded secrets, bootstrap tokens, and backups.
+Sealed-secret UX may protect provisioning bundles, exported node identities,
+topology packages with embedded secrets, bootstrap tokens, and backups at rest.
 
-`age` is not packet transport crypto and must not be used for per-packet
-encryption.
+Sealed secrets are not packet transport crypto and must not be used for
+per-packet encryption.

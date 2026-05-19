@@ -137,7 +137,7 @@ Gatherlink should avoid:
 ### TODO
 
 - Keep graph/planner concepts in overlay helper.
-- Add hop limits, route IDs, generation IDs, and stale-route rejection.
+- Add hop limits, authenticated relay/session identifiers, generation IDs, and stale-topology rejection.
 - Avoid uncontrolled dynamic mesh behavior.
 
 ## V2Ray, Xray, and sing-box
@@ -366,10 +366,10 @@ generated service links.
 
 ### TODO
 
-- Add route IDs.
+- Add authenticated relay/session identifiers for loop prevention and diagnostics.
 - Add hop limits.
 - Add topology generations.
-- Add stale route rejection.
+- Add stale-topology rejection.
 - Keep overlay planning generated and explicit.
 
 ## OpenZiti

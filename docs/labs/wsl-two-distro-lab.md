@@ -4,7 +4,7 @@
 
 This is the repeatable Windows-hosted MVP lab. It uses two Debian WSL
 distributions as separate Gatherlink processes so the normal service lifecycle,
-status HTTP helper, static AEAD config, three carrier paths, shaping, path
+status HTTP helper, authenticated config-facing AEAD material, three carrier paths, shaping, path
 degradation/recovery, diagnostics, and teardown can be tested before moving the
 same commands to two full Hyper-V/VirtualBox/VMware Debian VMs.
 
@@ -49,7 +49,7 @@ The tested WSL setup was:
 7. Start both managed services with `gatherlink run start`.
 8. Send a UDP probe into node A and receive it from node B.
 
-This proves the managed service lifecycle, static AEAD path, Rust UDP path
+This proves the managed service lifecycle, authenticated config-facing AEAD path, Rust UDP path
 transport, private WSL address shim, service monitor counters, JSONL
 diagnostics, and clean teardown. It does not prove true VM isolation because WSL
 shares one Linux network namespace here.
@@ -188,7 +188,7 @@ Expected result: the peer receiver prints `raw-private-lan`.
 
 ## Example Configs
 
-The first static-AEAD examples are:
+The first authenticated-session examples are:
 
 - `configs/examples/windows-two-node-a.json`
 - `configs/examples/windows-two-node-b.json`
@@ -198,7 +198,7 @@ They use opposite static send/receive keys and different path UDP ports:
 - WSL path A: `10.88.1.11:56001` to `10.88.1.12:57001`
 - WSL path B: `10.88.2.11:56002` to `10.88.2.12:57002`
 - WSL path C: `10.88.3.11:56003` to `10.88.3.12:57003`
-- both nodes use the same static `receiver_index` for this MVP static session;
+- both nodes use the same example `receiver_index` for this local authenticated session;
   the send/receive keys are reversed by direction
 - node A user UDP listen: `10.88.0.11:55180`
 - node B application target: `10.88.0.12:51820`
@@ -226,7 +226,7 @@ It performs the manual steps below as one check:
 
 - configures the WSL-private service/path addresses
 - syncs the peer WSL checkout from the primary checkout with a Git bundle
-- validates both static-AEAD node configs
+- validates both authenticated node configs
 - applies three asymmetric shaped carrier links
 - starts both process-managed Gatherlink services
 - sends counted UDP payloads from node A to node B
@@ -292,7 +292,7 @@ wsl -d gatherlink-peer -u markus -- bash -lc "cd /home/markus/src/gatherlink && 
 
 ## Current Limits
 
-- This is prepared for static AEAD and managed service lifecycle testing.
+- This is prepared for authenticated AEAD and managed service lifecycle testing.
 - WSL inter-instance encrypted three-path UDP acceptance is repeatable through
   `tools/run_wsl_mvp_acceptance.ps1`, but true VM traffic acceptance still needs
   a real remote IP pair or a Windows networking mode where each Debian VM has a
