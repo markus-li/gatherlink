@@ -1,4 +1,5 @@
-"""Uniform logging support for Gatherlink.
+"""
+Uniform logging support for Gatherlink.
 
 All Python modules should import ``get_logger`` from this module instead of
 constructing loggers directly. This keeps formatting, module names, JSON/file
@@ -10,7 +11,6 @@ from __future__ import annotations
 import logging
 import sys
 from typing import Final
-
 
 DEFAULT_FORMAT: Final[str] = (
     "%(asctime)s %(levelname)-8s %(name)s "
@@ -24,12 +24,14 @@ def configure_logging(
     log_file: str | None = None,
     force: bool = False,
 ) -> None:
-    """Configure Gatherlink logging.
+    """
+    Configure Gatherlink logging.
 
     Args:
         level: Logging level name or numeric value.
         log_file: Optional file path. When omitted, logs go to stderr.
         force: Replace existing handlers when true.
+
     """
     handlers: list[logging.Handler] = []
 

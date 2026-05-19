@@ -27,7 +27,7 @@ Gatherlink core does not directly carry:
 - raw ESP, IP protocol 50
 - AH, IP protocol 51
 
-Supporting those directly would require generic IP tunneling, raw sockets, TUN/TAP,
+Supporting raw ESP/AH would require generic IP tunneling, raw sockets, TUN/TAP,
 root privileges, or firewall/router behavior, which violates the core design.
 
 ## Real-world note
@@ -39,9 +39,11 @@ the practical compatibility target.
 
 The helper may provide:
 
-- service templates
+- UDP service templates
 - diagnostics
 - clear warnings about ESP/AH
 - example configs for firewalls
+- access_policy integration
+- WireGuard/IPsec comparison notes
 
 It must not become an IPsec stack.

@@ -1,4 +1,5 @@
-"""Transit path planning and forwarding role helpers.
+"""
+Transit path planning and forwarding role helpers.
 
 This module is part of the optional Gatherlink helper/control-plane layer.
 
@@ -8,7 +9,6 @@ Helper modules may provide policy, topology planning, user workflow support, or 
 from __future__ import annotations
 
 from gatherlink.shared.logging import get_logger
-
 
 logger = get_logger(__name__)
 

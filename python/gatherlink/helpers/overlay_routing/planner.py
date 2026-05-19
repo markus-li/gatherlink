@@ -1,15 +1,20 @@
-"""Future overlay path planner for relay chains and site/exit selection.
+"""
+Explicit overlay route planning and relay-chain selection.
 
-This module is part of the Gatherlink Python control plane. Python owns policy,
-configuration, orchestration, diagnostics, and helper services. The Rust dataplane
-should receive already-validated runtime state and should not contain business logic.
+This module is part of the optional Gatherlink helper/control-plane layer.
+
+Helper modules may provide policy, topology planning, user workflow support, connectivity workflow support, or configuration generation. They must not move packet hot-path behavior out of the Rust dataplane and must not turn Gatherlink into a firewall/router/proxy-zoo product.
 """
 
 from __future__ import annotations
 
 from gatherlink.shared.logging import get_logger
 
-
 logger = get_logger(__name__)
 
 
+# File-specific TODO:
+# - Implement python/gatherlink/helpers/overlay_routing/planner.py.
+# - Preserve explicit/generated configuration philosophy.
+# - Keep helper failures isolated from the core transport.
+# - Add unit tests and integration scenarios before marking stable.

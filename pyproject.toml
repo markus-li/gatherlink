@@ -8,10 +8,107 @@ dependencies = [
   "typer>=0.12",
 ]
 
+[project.scripts]
+gatherlink = "gatherlink.cli.main:main"
+
+[tool.black]
+line-length = 120
+target-version = ['py311']
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | build
+  | dist
+  | migrations
+  | __pycache__
+  | node_modules
+)/
+'''
+
 [tool.ruff]
-line-length = 100
-target-version = "py312"
+line-length = 120
+target-version = "py311"
+exclude = [
+  ".git",
+  ".venv",
+  "build",
+  "dist",
+  "migrations",
+  "__pycache__",
+  "node_modules",
+]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "I",
+  # Docstring rules are useful for public APIs, but noisy on scaffold-heavy code.
+  # D105 may be ignored later if magic-method docstrings stop carrying their weight.
+  "D",
+  # Naming rules are useful, but protocol acronyms and external field names may need targeted noqa.
+  "N",
+  "UP",
+  "RUF",
+  "SIM",
+  "TID",
+]
+ignore = [
+  "E501",
+  "UP007",
+  "RUF010",
+  "TID252",
+  "SIM102",
+  "SIM108",
+  "SIM112",
+  "SIM117",
+  "SIM118",
+  "D203",
+  "D212",
+  "D400",
+  "D415",
+  "D100",
+  "D101",
+  "D102",
+  "D106",
+  "D107",
+  "D200",
+  "D401",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = [
+  # Package exports commonly import names only to re-export the public surface.
+  "F401",
+]
+"*/tests/*" = [
+  "D100", "D101", "D102", "D103", "D104", "D106", "D107",
+  # Tests often keep imports/variables for fixtures, side effects, or assertion readability.
+  "F401",
+  "F841",
+]
+"tests/*" = [
+  "D100", "D101", "D102", "D103", "D104", "D106", "D107",
+  # Tests often keep imports/variables for fixtures, side effects, or assertion readability.
+  "F401",
+  "F841",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+pythonpath = ["python"]
+testpaths = ["tests"]
+
+[tool.setuptools]
+package-dir = {"" = "python"}
+
+[tool.setuptools.packages.find]
+where = ["python"]
 
 [build-system]
-requires = ["maturin>=1.7"]
-build-backend = "maturin"
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"

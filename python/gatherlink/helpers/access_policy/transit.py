@@ -1,4 +1,10 @@
-"""Transit restriction handling."""
+"""
+Transit restrictions, allowed next-hop checks, and hop-limit validation.
+
+This module is part of the optional Gatherlink helper/control-plane layer.
+
+Helper modules may provide policy, topology planning, user workflow support, connectivity workflow support, or configuration generation. They must not move packet hot-path behavior out of the Rust dataplane and must not turn Gatherlink into a firewall/router/proxy-zoo product.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,9 @@ from gatherlink.shared.logging import get_logger
 
 logger = get_logger(__name__)
 
-# TODO:
-# - Implement helpers/access_policy/transit.py
-# - Preserve explicit/generated topology philosophy
+
+# File-specific TODO:
+# - Implement python/gatherlink/helpers/access_policy/transit.py.
+# - Preserve explicit/generated configuration philosophy.
+# - Keep helper failures isolated from the core transport.
+# - Add unit tests and integration scenarios before marking stable.

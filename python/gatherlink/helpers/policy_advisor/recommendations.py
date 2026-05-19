@@ -1,24 +1,20 @@
-"""Typed advisor recommendations for weights, retry intervals, warmup windows, and carrier penalties.
+"""
+Typed policy advisor recommendations.
 
-This module is an optional Gatherlink helper or helper-support module.
+This module is part of the optional Gatherlink helper/control-plane layer.
 
-Helpers may improve usability, expose intent/metadata, or solve ugly connectivity
-edge cases. They must not define or contaminate the core transport architecture.
-
-Logging:
-    Use the shared Gatherlink logger so helper logs can be redirected, formatted,
-    filtered, or exported consistently.
+Helper modules may provide policy, topology planning, user workflow support, connectivity workflow support, or configuration generation. They must not move packet hot-path behavior out of the Rust dataplane and must not turn Gatherlink into a firewall/router/proxy-zoo product.
 """
 
 from __future__ import annotations
 
 from gatherlink.shared.logging import get_logger
 
-
 logger = get_logger(__name__)
 
 
 # File-specific TODO:
-# - Implement helpers.policy_advisor.recommendations without introducing dataplane hot-path dependencies.
-# - Keep helper failures isolated from core Gatherlink transport.
-# - Add focused unit tests and at least one integration scenario if applicable.
+# - Implement python/gatherlink/helpers/policy_advisor/recommendations.py.
+# - Preserve explicit/generated configuration philosophy.
+# - Keep helper failures isolated from the core transport.
+# - Add unit tests and integration scenarios before marking stable.

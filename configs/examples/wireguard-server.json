@@ -1,4 +1,5 @@
 {
+  "schema_version": 1,
   "node": "relay",
   "role": "server",
   "services": [

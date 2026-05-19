@@ -27,6 +27,8 @@ The advisor may suggest:
 - WSS/QUIC penalties
 - MTU probe aggressiveness
 - anomaly flags
+- failover sensitivity suggestions
+- queue-age threshold suggestions
 
 The scheduler remains deterministic and explainable.
 

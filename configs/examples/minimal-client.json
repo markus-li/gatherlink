@@ -1,8 +1,12 @@
 {
+  "schema_version": 1,
   "node": "client",
   "peer": "relay",
   "paths": [
-    { "name": "wan1", "interface": "eth1" }
+    {
+      "name": "wan1",
+      "interface": "eth1"
+    }
   ],
   "services": [
     {

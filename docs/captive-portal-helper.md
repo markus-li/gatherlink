@@ -5,7 +5,9 @@
 Captive portal handling is a connectivity helper. It must not contaminate the
 core transport or require Gatherlink to become a firewall.
 
-The clean primitive is:
+## Final design direction
+
+The canonical primitive is:
 
 ```text
 temporary SOCKS5 proxy pinned to the captive WAN
@@ -30,30 +32,27 @@ address/interface behavior that Gatherlink already validates for paths.
 
 ## Helper modes
 
-Supported/future UX modes:
+### Manual/PAC
 
-1. Manual/PAC mode
-   - start temporary SOCKS5 proxy
-   - show host/port
-   - offer PAC file
-   - user configures browser manually
+The helper starts a temporary SOCKS5 proxy, shows host/port, offers a PAC file,
+and gives browser instructions. This is the baseline non-root mode.
 
-2. Streamed browser mode
-   - appliance starts isolated Chromium through SOCKS5
-   - UI streams browser session to the user
-   - user logs in without browser proxy changes
+### Streamed browser
 
-3. Standalone login browser/app
-   - app discovers Gatherlink
-   - app requests captive-login session metadata
-   - embedded browser/webview uses the right SOCKS5 proxy automatically
+The appliance runs isolated Chromium through the SOCKS5 proxy and streams the UI
+to the user. This avoids client browser proxy reconfiguration.
 
-4. Appliance/custom Chromium
-   - prebuilt minimal Chromium/profile
-   - launches with the correct SOCKS5 proxy
-   - temporary profile destroyed after login
+### Standalone login browser/app
 
-## Explicitly rejected approaches
+A small app discovers Gatherlink, requests captive-login session metadata, and
+opens an embedded browser/webview using the correct SOCKS5 proxy automatically.
+
+### Custom Chromium/profile
+
+An appliance or desktop bundle launches a minimal Chromium/profile with the
+correct SOCKS5 proxy arguments and a temporary profile.
+
+## Explicitly rejected primary approaches
 
 Avoid these as primary design:
 

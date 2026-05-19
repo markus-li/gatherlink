@@ -1,15 +1,21 @@
-"""cli.main module for Gatherlink.
-
-This module is part of the Gatherlink Python control plane. Python owns policy,
-configuration, orchestration, diagnostics, and helper services. The Rust dataplane
-should receive already-validated runtime state and should not contain business logic.
+"""
+Gatherlink command line entrypoint.
 """
 
 from __future__ import annotations
 
-from gatherlink.shared.logging import get_logger
+import typer
+
+from gatherlink.cli import config
+
+app = typer.Typer(help="Gatherlink carrier-aware multipath UDP transport.")
+app.add_typer(config.app, name="config")
 
 
-logger = get_logger(__name__)
+def main() -> None:
+    """Run the Gatherlink CLI."""
+    app()
 
 
+if __name__ == "__main__":
+    main()

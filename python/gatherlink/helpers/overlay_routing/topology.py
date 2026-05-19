@@ -1,18 +1,20 @@
-"""Future overlay topology graph for multihop and site/exit routing helpers.
+"""
+Overlay topology graph models for nodes, services, relays, exits, prefixes, and generations.
 
-This module is part of the Gatherlink Python control plane. Python owns policy,
-configuration, orchestration, diagnostics, and helper services. The Rust dataplane
-should receive already-validated runtime state and should not contain business logic.
+This module is part of the optional Gatherlink helper/control-plane layer.
+
+Helper modules may provide policy, topology planning, user workflow support, connectivity workflow support, or configuration generation. They must not move packet hot-path behavior out of the Rust dataplane and must not turn Gatherlink into a firewall/router/proxy-zoo product.
 """
 
 from __future__ import annotations
 
 from gatherlink.shared.logging import get_logger
 
-
 logger = get_logger(__name__)
 
+
 # File-specific TODO:
-# - Represent future overlay graph with nodes, services, prefixes, exits, and relay capabilities.
-# - Keep overlay topology separate from firewall/LAN routing policy.
-# - Support per-service node roles: entry, relay, exit, site-gateway.
+# - Implement python/gatherlink/helpers/overlay_routing/topology.py.
+# - Preserve explicit/generated configuration philosophy.
+# - Keep helper failures isolated from the core transport.
+# - Add unit tests and integration scenarios before marking stable.

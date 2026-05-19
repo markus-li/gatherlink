@@ -1,4 +1,5 @@
-"""config.defaults module for Gatherlink.
+"""
+config.defaults module for Gatherlink.
 
 This module is part of the Gatherlink Python control plane. Python owns policy,
 configuration, orchestration, diagnostics, and helper services. The Rust dataplane
@@ -9,7 +10,4 @@ from __future__ import annotations
 
 from gatherlink.shared.logging import get_logger
 
-
 logger = get_logger(__name__)
-
-
