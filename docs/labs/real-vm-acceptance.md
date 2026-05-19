@@ -249,6 +249,16 @@ The first VM pass does not need all of these to block basic packet acceptance.
 It should record which checks are proven, which are not configured, and which
 need later follow-up.
 
+The current v0.9.1 Hyper-V VM pass has run:
+
+- direct QUIC DATAGRAM carrier smoke on VMs A, B, and C
+- direct HTTP/3 DATAGRAM carrier smoke on VMs A, B, and C
+- QUIC DATAGRAM carrier smoke through Traefik UDP forwarding on VMs A, B, and C
+- HTTP/3 DATAGRAM carrier smoke through Traefik UDP forwarding on VMs A, B, and C
+
+The Traefik checks use Traefik as a UDP layer-4 forwarder only. Gatherlink
+packet semantics remain inside the carrier adapter and Rust dataplane.
+
 The QUIC-through-Traefik check is documented in
 `docs/labs/quic-traefik-proxy.md`. It proves only UDP-capable layer-4
 forwarding. It must not be implemented as HTTP or HTTP/3 reverse proxying.

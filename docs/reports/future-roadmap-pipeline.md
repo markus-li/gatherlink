@@ -113,6 +113,40 @@ Promotion requirements:
 
 ## Carrier Pipeline
 
+### Rust-Native Carrier Performance Review
+
+Why it is interesting:
+
+- v0.9.1 deliberately implements QUIC DATAGRAM and HTTP/3 DATAGRAM as
+  Python-owned adapters around local Rust UDP path sockets
+- this is clean and maintainable because it uses standard protocol libraries and
+  keeps Rust focused on compact Gatherlink packet execution
+- sustained high-throughput or high-packet-rate deployments may later show that
+  the adapter boundary costs too much context switching or copying
+
+Boundary:
+
+- future optimization only; not a semantic redesign
+- must carry the exact same opaque Gatherlink UDP-format carrier packets
+- must not move config, helper behavior, routing meaning, carrier selection,
+  diagnostics interpretation, or operator policy into Rust
+- must not create a second behavior path that drifts from the Python-owned
+  carrier contract
+
+Promotion requirements:
+
+- VM/lab benchmark showing the Python adapter is a real bottleneck, not just a
+  theoretical concern
+- packet-per-second and throughput comparisons for UDP, QUIC DATAGRAM, and
+  HTTP/3 DATAGRAM under clean, shaped, and lossy paths
+- profiling that identifies copy/context-switch overhead or protocol-library
+  overhead as the limiting factor
+- a small Rust DTO contract that still receives compiled carrier facts from
+  Python and preserves fail-closed behavior
+- parity tests proving byte identity, diagnostics, lifecycle, and failure
+  behavior match the Python adapter
+- rollback path to the Python adapter while the Rust-native carrier matures
+
 ### CONNECT-UDP / MASQUE-Style Carrier
 
 Why it is interesting:

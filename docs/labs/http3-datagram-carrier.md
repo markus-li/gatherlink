@@ -65,8 +65,25 @@ packet-format state.
 
 ## Current Code State
 
-The v0.9.1 config model accepts `carrier: "http3-datagram"` and
-`carrier_max_datagram_size` on paths. This lets config, bundle, and diagnostic
-plumbing distinguish HTTP/3 DATAGRAM from UDP without changing Gatherlink packet
-headers. The current Rust-backed runner rejects non-UDP carriers fail-closed
-until a real HTTP/3 DATAGRAM packet-time carrier is added.
+The v0.9.1 code includes a Python-owned HTTP/3 DATAGRAM carrier adapter. The
+adapter binds local UDP sockets for the Rust dataplane and carries the resulting
+opaque Gatherlink packet bytes through HTTP/3 DATAGRAM frames. The focused smoke
+command is:
+
+```bash
+gatherlink lab carrier-smoke http3-datagram
+```
+
+When testing a UDP-capable layer-4 proxy such as Traefik, use:
+
+```bash
+gatherlink lab carrier-proxy-smoke http3-datagram --proxy traefik
+```
+
+This is still UDP forwarding at the proxy layer. The HTTP/3 DATAGRAM session is
+terminated only by the Gatherlink carrier adapter, and the proxy does not gain
+Gatherlink routing, service, identity, helper, or packet-format meaning.
+
+The Rust-backed runner still rejects direct non-UDP carrier DTOs fail-closed.
+That is intentional: Rust owns compact packet execution over local sockets, and
+the Python adapter owns the standard HTTP/3 wrapper around those sockets.

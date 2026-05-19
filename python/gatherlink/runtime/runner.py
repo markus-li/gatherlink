@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from threading import Event
 from typing import Any
 
+from gatherlink.carriers import CarrierSupervisor
 from gatherlink.config.models import GatherlinkConfig
 from gatherlink.config.runtime import RuntimeConfig
 from gatherlink.control import ControlCadenceState
@@ -154,7 +155,13 @@ def run_core_service(
         if diagnostics_bus is not None:
             diagnostics_bus.publish(DiagnosticEvent.warning(warning.removeprefix("WARNING: ")))
 
-    dataplane = dataplane_factory(runtime_config)
+    carrier_supervisor = CarrierSupervisor(runtime_config)
+    runtime_config = carrier_supervisor.start()
+    try:
+        dataplane = dataplane_factory(runtime_config)
+    except BaseException:
+        carrier_supervisor.close()
+        raise
     if diagnostics_bus is not None:
         for service in runtime_config.services:
             if service.listen:
@@ -324,6 +331,7 @@ def run_core_service(
         )
         diagnostics_bus.drain()
     state.running = False
+    carrier_supervisor.close()
     return result
 
 

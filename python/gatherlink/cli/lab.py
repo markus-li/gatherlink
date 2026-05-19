@@ -32,6 +32,8 @@ from gatherlink.lab.runtime import (
     request_lab_service_disable,
     run_rust_transport_smoke,
     run_shared_sink_transport_smoke,
+    run_standard_carrier_proxy_smoke,
+    run_standard_carrier_smoke,
     run_udp_forwarder,
     run_udp_sink,
     run_udp_sink_service,
@@ -357,6 +359,54 @@ def shared_sink_smoke(
         "lab shared sink smoke: ok "
         f"sources={result.source_count} packets={result.packets} bytes={result.bytes} "
         f"paths={result.paths} sink_transport={result.sink_transport} remote_target={result.remote_target}"
+    )
+
+
+@app.command("carrier-smoke")
+def carrier_smoke(
+    carrier: str = typer.Argument(..., help="Carrier mode: quic-datagram or http3-datagram."),
+    count: int = typer.Option(3, help="Number of packets to send in each direction."),
+    payload: str = typer.Option("gatherlink-carrier-smoke", help="Opaque payload prefix to preserve."),
+) -> None:
+    """Verify a standard-protocol carrier preserves opaque Gatherlink packet bytes."""
+    try:
+        result = run_standard_carrier_smoke(carrier, count=count, payload=payload)
+    except RuntimeError as exc:
+        typer.echo(f"lab carrier smoke: failed {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        "lab carrier smoke: ok "
+        f"carrier={result.carrier} packets={result.packets} bytes={result.bytes} "
+        f"client_udp={result.client_udp} server_udp={result.server_udp} "
+        f"carrier_endpoint={result.carrier_endpoint}"
+    )
+
+
+@app.command("carrier-proxy-smoke")
+def carrier_proxy_smoke(
+    carrier: str = typer.Argument(..., help="Carrier mode: quic-datagram or http3-datagram."),
+    proxy: str = typer.Option("traefik", help="UDP-capable proxy to use. Currently only traefik."),
+    count: int = typer.Option(3, help="Number of packets to send in each direction."),
+    payload: str = typer.Option("gatherlink-carrier-proxy-smoke", help="Opaque payload prefix to preserve."),
+    traefik_bin: str | None = typer.Option(None, help="Path to the traefik binary when it is not on PATH."),
+) -> None:
+    """Verify a standard-protocol carrier preserves bytes through a real UDP proxy."""
+    try:
+        result = run_standard_carrier_proxy_smoke(
+            carrier,
+            proxy=proxy,
+            count=count,
+            payload=payload,
+            traefik_bin=traefik_bin,
+        )
+    except RuntimeError as exc:
+        typer.echo(f"lab carrier proxy smoke: failed {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        "lab carrier proxy smoke: ok "
+        f"carrier={result.carrier} proxy={result.proxy} packets={result.packets} bytes={result.bytes} "
+        f"client_udp={result.client_udp} server_udp={result.server_udp} "
+        f"proxy_endpoint={result.proxy_endpoint} upstream_endpoint={result.upstream_endpoint}"
     )
 
 

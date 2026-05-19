@@ -1,6 +1,6 @@
 # Project Living Assessment
 
-Last updated: 2026-05-19
+Last updated: 2026-05-20
 
 This is the current release-health assessment for Gatherlink. It is not a
 protocol spec, implementation diary, or historical milestone tracker. Keep it
@@ -21,7 +21,7 @@ Rules:
 - do not keep counts, inventories, old milestone checklists, or implementation TODO
   copies here
 - if a finding changes release readiness, say whether it is a tag blocker,
-  v0.9.1 work, or future pipeline work
+  v0.9.1 completion item, or future pipeline work
 
 Canonical docs:
 
@@ -44,9 +44,18 @@ Canonical docs:
 
 ## Current Judgement
 
-Gatherlink is v0.9-ready for the deliberately narrow Debian personal/lab and
-small-site scope. The planned v0.9 VM release gates have passed; the remaining
-work before `v0.9.0` is tag/release hygiene.
+Gatherlink is past the v0.9 tag and is functionally close to v0.9.1 for the
+same deliberately narrow Debian personal/lab and small-site scope. The current
+tree contains real v0.9.1 implementation slices for DNS-over-HTTPS upstreams,
+standard datagram carrier adapters, local release artifacts, lab bundle
+generation, topology diffing, session-rotation policy helpers, VM report JSON,
+and the guarded experimental local status write endpoint.
+
+The main remaining v0.9.1 work is release validation and evidence, not broad
+product design. Do not tag v0.9.1 until the local release gate has been rerun
+from a clean tree, the local editable install/package metadata reports 0.9.1,
+and any operator-run VM/proxy evidence is either attached to the release or
+clearly marked as deferred.
 
 The core system has:
 
@@ -61,15 +70,17 @@ The core system has:
 - relay-hop execution and routing without plaintext routing labels
 - production-owned sparse discovery, remote-status, and monitor-cadence control
   paths
-- managed helper slices for SOCKS5 TCP CONNECT, TCP forwarding, DNS direct and
-  tunnel upstream, WireGuard planning/transport proof, and the narrow time
-  helper
+- managed helper slices for SOCKS5 TCP CONNECT, TCP forwarding, DNS direct,
+  tunnel, and DoH upstreams, WireGuard planning/transport proof, and the narrow
+  time helper
+- Python-owned QUIC DATAGRAM and HTTP/3 DATAGRAM carrier adapters that wrap
+  opaque Gatherlink packets around the Rust UDP packet executor
 - local, WSL, Hyper-V VM, relay/routing VM, and soak evidence for the declared
-  v0.9 scope
+  v0.9 scope, with v0.9.1 local carrier and artifact gates now added
 
-## V0.9 Scope
+## Release Scope
 
-V0.9 is for Debian personal/lab users and small sites.
+V0.9 and v0.9.1 are for Debian personal/lab users and small sites.
 
 Supported shape:
 
@@ -97,15 +108,13 @@ A narrow Linux endpoint-protection helper may be considered later, but only as
 helper-owned integration for explicit Gatherlink endpoint scenarios. It must not
 become general firewall, NAT, LAN routing, or SD-WAN policy ownership.
 
-Deferred beyond v0.9:
+Deferred beyond the v0.9/v0.9.1 line unless a later roadmap promotes them:
 
 - production GUI
 - broad platform support beyond Debian
-- automatic package/update/rollback channels
-- alternative carriers such as QUIC, HTTP/3 DATAGRAM, WSS, or TCP/TLS
-- CONNECT-UDP/MASQUE
-- obfuscation profiles
-- multi-hop relay policy automation beyond the implemented first slice
+- automatic update/rollback channels
+- WSS, TCP/TLS, CONNECT-UDP/MASQUE, and obfuscation carriers
+- broad multi-hop relay policy automation beyond the implemented first slice
 - optional WireGuard interface lifecycle automation
 
 ## Release Gates
@@ -128,13 +137,33 @@ Passed or recorded v0.9 evidence:
 - local hidden-sink remote-status proof
 - three-WSL shared-sink remote-status proof
 
-Before tagging `v0.9.0`:
+Added v0.9.1 local evidence in the current tree:
 
-- review and retain the generated VM/soak reports as release evidence
-- confirm `SECURITY.md` and release notes state the real Debian-only,
-  unaudited, limited-real-world-testing posture
+- Rust crate metadata and root Python project metadata are at 0.9.1
+- DNS-over-HTTPS helper upstream implementation and tests
+- QUIC DATAGRAM and HTTP/3 DATAGRAM carrier adapters with local byte-preserving
+  smoke coverage
+- bridge tests proving non-UDP carriers fail closed if sent directly to the
+  Rust UDP DTO path without Python carrier supervision
+- local release artifact tooling for tracked source archives, Python wheels,
+  Rust helper binaries, checksums, and `docs/user/` Wiki payloads
+- doctor checks for release artifact shape
+- VM acceptance JSON report schema and tests
+- lab bundle generation/preflight/cleanup planning tests
+- guarded `POST /v1/services/{name}/close` status HTTP endpoint with write
+  expiry tests
+
+Before tagging `v0.9.1`:
+
+- rerun the full local v0.9.1 release gate from `docs/releases/v0.9.1.md`
+- refresh or reinstall the local editable package so `importlib.metadata`
+  reports 0.9.1
+- build release artifacts with `--version 0.9.1` and validate them with
+  `gatherlink doctor --release-artifacts`
 - confirm committed files contain no private VM hostnames, addresses, inventory
   paths, keys, or operator-only material
+- record any operator-run VM, proxy, or longer soak evidence that is being used
+  as release evidence
 - tag from a clean source/docs-aligned tree
 
 ## Current Feature State
@@ -157,29 +186,40 @@ Implemented and in v0.9 scope:
 - persistence and local secret UX first slice
 - SOCKS5 TCP CONNECT helper over Gatherlink UDP transport with companion exit
 - TCP forwarding helper over Gatherlink UDP transport with companion exit
-- DNS helper direct and Gatherlink-tunnel upstream paths with cache, IDNA, and
-  AD-bit DNSSEC handling
+- DNS helper direct, Gatherlink-tunnel, and DNS-over-HTTPS upstream paths with
+  cache, IDNA, and AD-bit DNSSEC handling
 - WireGuard planning/config helper and endpoint/UDP transport proof
 - narrow time helper
+- local release artifact builder and release-artifact doctor checks
+- operator-safe lab bundle generation and scoped cleanup planning
+- signed topology diff command
+- session rotation policy helper decisions
+- experimental status HTTP helper with guarded service-close write endpoint
+- QUIC DATAGRAM and HTTP/3 DATAGRAM carrier adapters around opaque Gatherlink
+  packets, supervised by Python before Rust sees local UDP endpoints
 
 Implemented but intentionally limited:
 
 - runtime reload currently covers scheduler reapply; broader config reload is
   future/polish
 - WireGuard helper does not own interface lifecycle
-- DNSSEC support is upstream-AD oriented; full local validation and DoH remain
-  optional later work
+- DNSSEC support is upstream-AD oriented; full local validation remains optional
+  later work
 - relay policy automation is a first slice, not a full mesh controller
-- REST API is planned as experimental helper/service work, not stable v0.9 UX
+- REST API is experimental helper/service work, loopback by default, and not
+  stable remote management UX
+- QUIC/H3 carrier support has local adapter smoke coverage and three-VM
+  acceptance coverage for direct carriers plus Traefik UDP-forwarded proxy
+  carriers. Impaired-network proxy soak remains separate lab evidence.
 
 Deferred:
 
-- direct QUIC DATAGRAM and HTTP/3 DATAGRAM carriers are v0.9.1 targets
-- packaging, GitHub release artifacts, checksums, and automated user-doc/wiki
-  publication are v0.9.1 targets
-- richer trust-root UX, live rekey automation, broader diagnostics polish,
-  optional DNS tunnel variants, optional WireGuard lifecycle automation, and
-  multi-hop relay policy automation are tracked in v0.9.1
+- full live rekey wiring beyond the current policy helper
+- richer trust-root lifecycle UX beyond topology diffing
+- broader diagnostics polish, including carrier connect/reconnect/drop events
+- optional DNS full local DNSSEC validation
+- optional WireGuard lifecycle automation
+- broader multi-hop relay policy automation
 - future carrier, obfuscation, package-update, rollback, UI, policy, and
   compatibility work belongs in `docs/reports/future-roadmap-pipeline.md`
 
@@ -218,19 +258,18 @@ presented honestly as unaudited software for personal/lab and small-site use.
 
 ## Near-Term Priority
 
-1. Review and retain the generated VM/soak reports as release evidence.
-2. Recheck release hygiene: secrets, private paths, README, `SECURITY.md`, and
+1. Rerun the v0.9.1 local gate listed in `docs/releases/v0.9.1.md`.
+2. Refresh local package metadata and build/doctor-check v0.9.1 artifacts.
+3. Recheck release hygiene: secrets, private paths, README, `SECURITY.md`, and
    release notes.
-3. Tag `v0.9.0` only from a clean source/docs-aligned tree.
-4. Move immediately to the v0.9.1 roadmap for packaging, wiki/user-doc
-   publication, QUIC/HTTP3 DATAGRAM carriers, and deferred hardening.
+4. Decide whether any VM/proxy carrier evidence is tag-blocking or explicitly
+   deferred.
+5. Tag `v0.9.1` only from a clean source/docs-aligned tree.
 
 ## Final Assessment
 
-Gatherlink is functionally at v0.9 for its declared scope. The planned v0.9 VM
-release gates have passed, including the untrusted relay/routing proof. The
-remaining work is release evidence review and hygiene, not broad product design
-or milestone completion.
-
-If the final release review finds no blocking source/protocol/security-boundary
-issue, this repository is ready to tag as `v0.9.0`.
+Gatherlink is functionally close to v0.9.1 for its declared scope. The current
+tree backs the main v0.9.1 claims with code and tests, but the release should
+not be called done until the full local gate, artifact build/doctor check,
+metadata refresh, and final hygiene pass have been rerun against the current
+HEAD.

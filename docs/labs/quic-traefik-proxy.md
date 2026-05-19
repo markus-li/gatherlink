@@ -126,11 +126,27 @@ its public entrypoint to the QUIC carrier port on the Gatherlink sink.
 
 ## Current Code State
 
-The v0.9.1 config model accepts `carrier: "quic-datagram"` and
-`carrier_max_datagram_size` on paths so examples and generated bundles can be
-validated before packet execution is wired in. The current Rust-backed runner
-still fails closed for non-UDP carriers with a readable bridge error instead of
-silently treating QUIC as UDP.
+The v0.9.1 code includes a Python-owned QUIC DATAGRAM carrier adapter. The
+adapter binds local UDP sockets for the Rust dataplane and carries the resulting
+opaque Gatherlink packet bytes through QUIC DATAGRAM frames. The focused smoke
+command is:
 
-The remaining implementation work is the actual QUIC DATAGRAM packet-time
-carrier and this Traefik UDP-forwarded acceptance proof.
+```bash
+gatherlink lab carrier-smoke quic-datagram
+```
+
+The Traefik UDP-forwarding acceptance smoke is:
+
+```bash
+gatherlink lab carrier-proxy-smoke quic-datagram --proxy traefik
+```
+
+This starts a local QUIC carrier sink, starts Traefik with a temporary UDP
+router that forwards to that sink, then sends opaque test packets both ways
+through the proxied carrier endpoint. The same command shape can run on each VM
+as long as `traefik` is on `PATH`, or with `--traefik-bin /path/to/traefik`.
+
+The Rust-backed runner still fails closed for direct non-UDP carrier DTOs with a
+readable bridge error instead of silently treating QUIC as UDP. The remaining
+external proof is broader VM coverage that compares UDP, direct QUIC DATAGRAM,
+and proxied QUIC DATAGRAM under less ideal network conditions.

@@ -160,6 +160,58 @@ def test_lab_shared_sink_smoke_cli_reports_two_sources(monkeypatch) -> None:
     assert "sink_transport=127.0.0.1:56002" in result.output
 
 
+def test_lab_carrier_smoke_cli_reports_standard_adapter(monkeypatch) -> None:
+    from gatherlink.cli import lab as lab_cli
+    from gatherlink.lab.runtime import StandardCarrierSmokeResult
+
+    monkeypatch.setattr(
+        lab_cli,
+        "run_standard_carrier_smoke",
+        lambda carrier, **_kwargs: StandardCarrierSmokeResult(
+            carrier=carrier,
+            packets=6,
+            bytes=180,
+            client_udp="127.0.0.1:41000",
+            server_udp="127.0.0.1:42000",
+            carrier_endpoint="127.0.0.1:43000",
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["lab", "carrier-smoke", "quic-datagram", "--count", "3"])
+
+    assert result.exit_code == 0
+    assert "carrier=quic-datagram" in result.output
+    assert "packets=6" in result.output
+
+
+def test_lab_carrier_proxy_smoke_cli_reports_traefik_adapter(monkeypatch) -> None:
+    from gatherlink.cli import lab as lab_cli
+    from gatherlink.lab.runtime import StandardCarrierProxySmokeResult
+
+    monkeypatch.setattr(
+        lab_cli,
+        "run_standard_carrier_proxy_smoke",
+        lambda carrier, **_kwargs: StandardCarrierProxySmokeResult(
+            carrier=carrier,
+            packets=6,
+            bytes=180,
+            client_udp="127.0.0.1:41000",
+            server_udp="127.0.0.1:42000",
+            carrier_endpoint="127.0.0.1:43000",
+            proxy="traefik",
+            proxy_endpoint="127.0.0.1:43000",
+            upstream_endpoint="127.0.0.1:44000",
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["lab", "carrier-proxy-smoke", "quic-datagram", "--count", "3"])
+
+    assert result.exit_code == 0
+    assert "carrier=quic-datagram" in result.output
+    assert "proxy=traefik" in result.output
+    assert "packets=6" in result.output
+
+
 def test_lab_status_cli_reports_stopped_service(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("GATHERLINK_SERVICE_REGISTRY", str(tmp_path / "services"))
     result = CliRunner().invoke(app, ["lab", "status", str(LAB_CONFIGS / "local-dual-path.json")])

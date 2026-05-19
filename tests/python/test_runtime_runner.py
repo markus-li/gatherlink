@@ -175,6 +175,37 @@ def test_core_runner_uses_rust_dataplane_handle_without_packet_logic() -> None:
     assert dataplane.blocking_calls == 0
 
 
+def test_core_runner_supervises_standard_carrier_before_rust_bridge() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="server",
+        peer="remote",
+        paths=[
+            PathConfig(
+                name="path-a",
+                interface="lo",
+                carrier="quic-datagram",
+                transport_bind="127.0.0.1:0",
+            )
+        ],
+        services=[ServiceConfig(name="udp-main", listen="127.0.0.1:0", target="127.0.0.1:51820")],
+    )
+    seen_runtime_configs = []
+
+    def fake_factory(runtime_config):
+        seen_runtime_configs.append(runtime_config)
+        return FakeDataplane()
+
+    run_core_service(expand_config(config), dataplane_factory=fake_factory, max_iterations=1, batch_size=8)
+
+    rust_path = seen_runtime_configs[0].paths[0]
+    assert rust_path.carrier == "udp"
+    assert rust_path.transport_bind.startswith("127.0.0.1:")
+    assert rust_path.transport_remote.startswith("127.0.0.1:")
+    assert rust_path.transport_bind != "127.0.0.1:0"
+
+
 def test_core_runner_emits_lifecycle_diagnostics() -> None:
     sink = MemorySink()
     bus = DiagnosticsBus(sinks=[sink])

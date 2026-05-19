@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from base64 import b64encode
 from contextlib import suppress
@@ -16,6 +19,7 @@ from hashlib import sha256
 from pathlib import Path
 from threading import Event
 
+from gatherlink.carriers import CarrierAdapterConfig, CarrierMode, QuicDatagramCarrierAdapter
 from gatherlink.control import ControlCadenceState
 from gatherlink.control import metadata as _control_metadata
 from gatherlink.control import remote_status as _remote_status
@@ -166,6 +170,27 @@ class SharedSinkSmokeResult:
     remote_target: str
 
 
+@dataclass(frozen=True)
+class StandardCarrierSmokeResult:
+    """Result from a standard-protocol carrier adapter smoke."""
+
+    carrier: str
+    packets: int
+    bytes: int
+    client_udp: str
+    server_udp: str
+    carrier_endpoint: str
+
+
+@dataclass(frozen=True)
+class StandardCarrierProxySmokeResult(StandardCarrierSmokeResult):
+    """Result from a standard-protocol carrier smoke through a UDP proxy."""
+
+    proxy: str
+    proxy_endpoint: str
+    upstream_endpoint: str
+
+
 def ensure_service_not_root() -> None:
     """Refuse to run Gatherlink service behavior as root."""
     if hasattr(os, "geteuid") and os.geteuid() == 0:
@@ -224,25 +249,29 @@ def run_rust_transport_smoke(
     forwarded_packets = 0
     delivered_packets = 0
     received_bytes = 0
-    for index in range(count):
-        packet = f"{payload}-{index}".encode()
-        app_sender.sendto(packet, _parse_socket_addr(client_listen))
-        forwarded = client.forward_available_for_service("udp-main", 8)
-        forwarded_packets += len(forwarded)
-        delivered_packets += _drain_rust_path_frames(server)
-        received, _source = remote_target.recvfrom(65535)
-        received_bytes += len(received)
-        if received != packet:
-            raise RuntimeError(f"rust transport smoke payload mismatch: expected={packet!r} received={received!r}")
-    return RustTransportSmokeResult(
-        packets=count,
-        bytes=received_bytes,
-        paths=len(path_names),
-        forwarded_packets=forwarded_packets,
-        delivered_packets=delivered_packets,
-        client_listen=client_listen,
-        remote_target=remote_target_text,
-    )
+    try:
+        for index in range(count):
+            packet = f"{payload}-{index}".encode()
+            app_sender.sendto(packet, _parse_socket_addr(client_listen))
+            forwarded = client.forward_available_for_service("udp-main", 8)
+            forwarded_packets += len(forwarded)
+            delivered_packets += _drain_rust_path_frames(server)
+            received, _source = remote_target.recvfrom(65535)
+            received_bytes += len(received)
+            if received != packet:
+                raise RuntimeError(f"rust transport smoke payload mismatch: expected={packet!r} received={received!r}")
+        return RustTransportSmokeResult(
+            packets=count,
+            bytes=received_bytes,
+            paths=len(path_names),
+            forwarded_packets=forwarded_packets,
+            delivered_packets=delivered_packets,
+            client_listen=client_listen,
+            remote_target=remote_target_text,
+        )
+    finally:
+        app_sender.close()
+        remote_target.close()
 
 
 def run_shared_sink_transport_smoke(
@@ -404,6 +433,293 @@ def run_shared_sink_transport_smoke(
         sink_transport=sink_paths[0],
         remote_target=remote_target_text,
     )
+
+
+def run_standard_carrier_smoke(
+    carrier: str,
+    *,
+    count: int = 3,
+    payload: str = "gatherlink-carrier-smoke",
+) -> StandardCarrierSmokeResult:
+    """Verify a standard carrier adapter preserves opaque packet bytes both ways."""
+    try:
+        mode = CarrierMode(carrier)
+    except ValueError as exc:
+        supported = ", ".join(mode.value for mode in CarrierMode)
+        raise RuntimeError(f"unsupported carrier smoke mode {carrier!r}; supported={supported}") from exc
+    return asyncio.run(_run_standard_carrier_smoke(mode=mode, count=count, payload=payload))
+
+
+def run_standard_carrier_proxy_smoke(
+    carrier: str,
+    *,
+    proxy: str = "traefik",
+    count: int = 3,
+    payload: str = "gatherlink-carrier-proxy-smoke",
+    traefik_bin: str | None = None,
+) -> StandardCarrierProxySmokeResult:
+    """Verify a standard carrier preserves bytes through a real UDP-capable proxy."""
+    try:
+        mode = CarrierMode(carrier)
+    except ValueError as exc:
+        supported = ", ".join(mode.value for mode in CarrierMode)
+        raise RuntimeError(f"unsupported carrier proxy smoke mode {carrier!r}; supported={supported}") from exc
+    if proxy != "traefik":
+        raise RuntimeError(f"unsupported carrier proxy smoke proxy {proxy!r}; supported=traefik")
+    resolved_traefik = traefik_bin or shutil.which("traefik")
+    if not resolved_traefik:
+        raise RuntimeError("traefik binary not found; pass --traefik-bin or install traefik")
+    return asyncio.run(
+        _run_standard_carrier_proxy_smoke(
+            mode=mode,
+            proxy=proxy,
+            count=count,
+            payload=payload,
+            traefik_bin=resolved_traefik,
+        )
+    )
+
+
+async def _run_standard_carrier_smoke(
+    *,
+    mode: CarrierMode,
+    count: int,
+    payload: str,
+) -> StandardCarrierSmokeResult:
+    """Run the async QUIC/H3 carrier smoke with real sockets."""
+    server_target, server_target_addr = _udp_endpoint_for_smoke()
+    client_target, client_target_addr = _udp_endpoint_for_smoke()
+    server = QuicDatagramCarrierAdapter(
+        CarrierAdapterConfig(
+            mode=mode,
+            local_udp_listen=("127.0.0.1", 0),
+            local_udp_target=server_target_addr,
+            quic_bind=("127.0.0.1", 0),
+        )
+    )
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender.setblocking(False)
+    received_bytes = 0
+    try:
+        await server.start()
+        client = QuicDatagramCarrierAdapter(
+            CarrierAdapterConfig(
+                mode=mode,
+                local_udp_listen=("127.0.0.1", 0),
+                local_udp_target=client_target_addr,
+                quic_remote=server.quic_addr(),
+            )
+        )
+        try:
+            await client.start()
+            await client.wait_ready()
+            await server.wait_ready()
+            for index in range(count):
+                packet = f"{payload}-{index}".encode()
+                sender.sendto(packet, client.local_udp_addr())
+                received, _source = await asyncio.to_thread(server_target.recvfrom, 65535)
+                if received != packet:
+                    raise RuntimeError(
+                        f"{mode.value} carrier smoke mismatch: expected={packet!r} received={received!r}"
+                    )
+                received_bytes += len(received)
+                reply = f"{payload}-reply-{index}".encode()
+                sender.sendto(reply, server.local_udp_addr())
+                returned, _source = await asyncio.to_thread(client_target.recvfrom, 65535)
+                if returned != reply:
+                    raise RuntimeError(
+                        f"{mode.value} carrier smoke reply mismatch: expected={reply!r} received={returned!r}"
+                    )
+                received_bytes += len(returned)
+            return StandardCarrierSmokeResult(
+                carrier=mode.value,
+                packets=count * 2,
+                bytes=received_bytes,
+                client_udp=_socket_addr_text(client.local_udp_addr()),
+                server_udp=_socket_addr_text(server.local_udp_addr()),
+                carrier_endpoint=_socket_addr_text(server.quic_addr()),
+            )
+        finally:
+            await client.stop()
+    finally:
+        sender.close()
+        server_target.close()
+        client_target.close()
+        await server.stop()
+
+
+async def _run_standard_carrier_proxy_smoke(
+    *,
+    mode: CarrierMode,
+    proxy: str,
+    count: int,
+    payload: str,
+    traefik_bin: str,
+) -> StandardCarrierProxySmokeResult:
+    """Run the async carrier smoke with Traefik UDP forwarding in the middle."""
+    server_target, server_target_addr = _udp_endpoint_for_smoke()
+    client_target, client_target_addr = _udp_endpoint_for_smoke()
+    server = QuicDatagramCarrierAdapter(
+        CarrierAdapterConfig(
+            mode=mode,
+            local_udp_listen=("127.0.0.1", 0),
+            local_udp_target=server_target_addr,
+            quic_bind=("127.0.0.1", 0),
+        )
+    )
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender.setblocking(False)
+    traefik_process: subprocess.Popen[bytes] | None = None
+    received_bytes = 0
+    try:
+        await server.start()
+        proxy_endpoint = ("127.0.0.1", _free_udp_port())
+        traefik_process = _start_traefik_udp_proxy(
+            traefik_bin=traefik_bin,
+            listen=proxy_endpoint,
+            upstream=server.quic_addr(),
+        )
+        client = QuicDatagramCarrierAdapter(
+            CarrierAdapterConfig(
+                mode=mode,
+                local_udp_listen=("127.0.0.1", 0),
+                local_udp_target=client_target_addr,
+                quic_remote=proxy_endpoint,
+            )
+        )
+        try:
+            await client.start()
+            await client.wait_ready()
+            await server.wait_ready()
+            for index in range(count):
+                packet = f"{payload}-{proxy}-{index}".encode()
+                sender.sendto(packet, client.local_udp_addr())
+                received, _source = await asyncio.to_thread(server_target.recvfrom, 65535)
+                if received != packet:
+                    raise RuntimeError(
+                        f"{mode.value} carrier proxy smoke mismatch: expected={packet!r} received={received!r}"
+                    )
+                received_bytes += len(received)
+                reply = f"{payload}-{proxy}-reply-{index}".encode()
+                sender.sendto(reply, server.local_udp_addr())
+                returned, _source = await asyncio.to_thread(client_target.recvfrom, 65535)
+                if returned != reply:
+                    raise RuntimeError(
+                        f"{mode.value} carrier proxy smoke reply mismatch: expected={reply!r} received={returned!r}"
+                    )
+                received_bytes += len(returned)
+            return StandardCarrierProxySmokeResult(
+                carrier=mode.value,
+                packets=count * 2,
+                bytes=received_bytes,
+                client_udp=_socket_addr_text(client.local_udp_addr()),
+                server_udp=_socket_addr_text(server.local_udp_addr()),
+                carrier_endpoint=_socket_addr_text(proxy_endpoint),
+                proxy=proxy,
+                proxy_endpoint=_socket_addr_text(proxy_endpoint),
+                upstream_endpoint=_socket_addr_text(server.quic_addr()),
+            )
+        finally:
+            await client.stop()
+    finally:
+        sender.close()
+        server_target.close()
+        client_target.close()
+        if traefik_process is not None:
+            _stop_process(traefik_process)
+        await server.stop()
+
+
+def _udp_endpoint_for_smoke() -> tuple[socket.socket, tuple[str, int]]:
+    """Open a loopback UDP endpoint used by same-process carrier smokes."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    sock.settimeout(2.0)
+    return sock, sock.getsockname()
+
+
+def _free_udp_port() -> int:
+    """Reserve and release one local UDP port for short-lived lab listeners."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _start_traefik_udp_proxy(
+    *,
+    traefik_bin: str,
+    listen: tuple[str, int],
+    upstream: tuple[str, int],
+) -> subprocess.Popen[bytes]:
+    """Start Traefik as a local UDP layer-4 forwarder for carrier acceptance."""
+    workdir = tempfile.TemporaryDirectory(prefix="gatherlink-traefik-smoke-")
+    static_config = Path(workdir.name) / "traefik.yml"
+    dynamic_config = Path(workdir.name) / "dynamic.yml"
+    static_config.write_text(
+        "\n".join(
+            [
+                "entryPoints:",
+                "  gatherlink-quic:",
+                f'    address: "{listen[0]}:{listen[1]}/udp"',
+                "",
+                "providers:",
+                "  file:",
+                f"    filename: {dynamic_config}",
+                "",
+                "log:",
+                "  level: ERROR",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    dynamic_config.write_text(
+        "\n".join(
+            [
+                "udp:",
+                "  routers:",
+                "    gatherlink-quic:",
+                "      entryPoints:",
+                "        - gatherlink-quic",
+                "      service: gatherlink-quic",
+                "",
+                "  services:",
+                "    gatherlink-quic:",
+                "      loadBalancer:",
+                "        servers:",
+                f'          - address: "{upstream[0]}:{upstream[1]}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        [traefik_bin, "--configFile", str(static_config)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    process._gatherlink_tempdir = workdir  # type: ignore[attr-defined]
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            stderr = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+            workdir.cleanup()
+            raise RuntimeError(f"traefik UDP proxy exited during startup: {stderr.strip()}")
+        time.sleep(0.05)
+    return process
+
+
+def _stop_process(process: subprocess.Popen[bytes]) -> None:
+    """Terminate one helper process and clean up any attached temp directory."""
+    process.terminate()
+    try:
+        process.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=2.0)
+    tempdir = getattr(process, "_gatherlink_tempdir", None)
+    if tempdir is not None:
+        tempdir.cleanup()
 
 
 def _lab_shared_sink_key(config: LabScenarioConfig, label: str) -> str:
