@@ -4,29 +4,39 @@
 //! frame boundary before emitting virtual UDP payloads. Business policy stays in
 //! Python; this module executes already-compiled runtime state.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::net::SocketAddr;
 
-use gatherlink_protocol::control::ControlPayload;
 use gatherlink_protocol::errors::ProtocolError;
 use gatherlink_protocol::frame::{Frame, FrameKind, V1_HEADER_LEN};
+use gatherlink_protocol::ids::{is_reserved_service_id, ServiceId};
 
+use crate::dedupe::{DedupeObservation, DedupeWindow};
 use crate::fragmentation::{fragment_datagram, FragmentReassembly};
 use crate::metrics::{DataplaneMetrics, MetricsSnapshot};
-use crate::runtime_config::{CorePathConfig, CoreRuntimeConfig, SchedulerMode};
+use crate::runtime_config::{CorePathConfig, CoreRuntimeConfig};
 use crate::scheduler::all_paths::AllPathSelector;
-use crate::scheduler::weighted_rr::WeightedRoundRobin;
-use crate::udp_service::{UdpServiceError, UserlandUdpService};
+use crate::scheduler::compiled::CompiledScheduler;
+use crate::sockets::PathTransportSet;
+use crate::udp_service::{ServiceReturnMode, ServiceSchedulerConfig, UdpServiceError, UserlandUdpService};
 
 /// Core userland UDP dataplane.
 #[derive(Debug)]
 pub struct CoreDataplane {
     services: Vec<UserlandUdpService>,
     paths: Vec<CorePathConfig>,
-    scheduler: WeightedRoundRobin,
+    path_transports: PathTransportSet,
+    scheduler: CompiledScheduler,
     next_sequence: u64,
     next_datagram_id: u32,
     metrics: DataplaneMetrics,
+    remote_fragments: FragmentReassembly,
+    remote_dedupe: DedupeWindow,
+    reserved_events: Vec<ReservedServiceEvent>,
+    learned_sources: HashMap<ServiceId, SocketAddr>,
+    disabled_services: HashMap<ServiceId, String>,
+    service_schedulers: HashMap<ServiceId, ServiceSchedulerConfig>,
 }
 
 impl CoreDataplane {
@@ -39,13 +49,26 @@ impl CoreDataplane {
             .map(UserlandUdpService::bind)
             .collect::<Result<Vec<_>, _>>()?;
 
+        let service_schedulers = config
+            .services()
+            .iter()
+            .map(|service| (service.service_id(), service.scheduler()))
+            .collect();
+
         Ok(Self {
             services,
             paths: config.paths().to_vec(),
-            scheduler: compile_scheduler(config.scheduler().mode(), config.paths()),
+            path_transports: PathTransportSet::bind(config.paths())?,
+            scheduler: CompiledScheduler::compile(config.scheduler().mode(), config.paths()),
             next_sequence: 1,
             next_datagram_id: 1,
             metrics: DataplaneMetrics::new(config.paths()),
+            remote_fragments: FragmentReassembly::default(),
+            remote_dedupe: DedupeWindow::default(),
+            reserved_events: Vec::new(),
+            learned_sources: HashMap::new(),
+            disabled_services: HashMap::new(),
+            service_schedulers,
         })
     }
 
@@ -92,8 +115,19 @@ impl CoreDataplane {
             .count();
 
         self.services = services;
+        self.service_schedulers = config
+            .services()
+            .iter()
+            .map(|service| (service.service_id(), service.scheduler()))
+            .collect();
+        self.disabled_services.retain(|service_id, _reason| {
+            self.services
+                .iter()
+                .any(|service| service.config().service_id() == *service_id)
+        });
         self.paths = config.paths().to_vec();
-        self.scheduler = compile_scheduler(config.scheduler().mode(), config.paths());
+        self.path_transports = PathTransportSet::bind(config.paths())?;
+        self.scheduler = CompiledScheduler::compile(config.scheduler().mode(), config.paths());
         self.metrics.reconcile_paths(config.paths());
         Ok(outcome)
     }
@@ -113,51 +147,128 @@ impl CoreDataplane {
         self.metrics.snapshot()
     }
 
+    /// Return service ids stopped by Python-applied runtime policy.
+    pub fn disabled_services_snapshot(&self) -> HashMap<ServiceId, String> {
+        self.disabled_services.clone()
+    }
+
+    /// Apply a Python-decided service stop to the Rust hot path.
+    pub fn disable_service(&mut self, service_id: ServiceId, reason: impl Into<String>) {
+        self.disabled_services.insert(service_id, reason.into());
+    }
+
+    /// Clear a Python-decided service stop from the Rust hot path.
+    pub fn enable_service(&mut self, service_id: ServiceId) {
+        self.disabled_services.remove(&service_id);
+    }
+
+    /// Apply Python-decided service fanout primitives to any service id.
+    pub fn set_service_scheduler(&mut self, service_id: ServiceId, scheduler: ServiceSchedulerConfig) {
+        self.service_schedulers.insert(service_id, scheduler);
+    }
+
+    /// Return actual local path transport socket addresses.
+    pub fn path_transport_local_addrs(&self) -> Result<HashMap<u16, SocketAddr>, DataplaneError> {
+        self.path_transports.local_addrs().map_err(DataplaneError::from)
+    }
+
     /// Record telemetry for a received remote data frame.
     ///
     /// Python still owns what to do with this fact. Rust only updates the same counters the production receive loop
     /// will eventually maintain directly.
-    pub fn observe_received_data_frame(&mut self, service_id: u64, path_id: u16, sequence: u64, payload_len: usize) {
+    pub fn observe_received_data_frame(
+        &mut self,
+        service_id: ServiceId,
+        path_id: u16,
+        sequence: u64,
+        payload_len: usize,
+    ) {
         self.metrics.record_receive(service_id, path_id, sequence, payload_len);
     }
 
-    /// Record a received control metaband payload parsed by the protocol crate.
-    pub fn observe_received_control_payload(&mut self, payload: &ControlPayload, frame_bytes: usize) {
-        self.metrics.record_control_received(payload, frame_bytes);
-    }
-
-    /// Record a received control metaband payload on a specific path.
-    pub fn observe_received_control_payload_on_path(
+    /// Record a received reserved-service payload without interpreting it.
+    pub fn observe_received_reserved_service_payload(
         &mut self,
+        service_id: ServiceId,
         path_id: u16,
-        payload: &ControlPayload,
+        sequence: u64,
+        payload: Vec<u8>,
         frame_bytes: usize,
     ) {
-        self.metrics
-            .record_control_received_on_path(path_id, payload, frame_bytes);
+        self.metrics.record_reserved_received(path_id, frame_bytes);
+        self.reserved_events.push(ReservedServiceEvent {
+            service_id,
+            path_id,
+            sequence,
+            payload,
+            frame_bytes,
+        });
     }
 
-    /// Record a sent control metaband payload parsed by the protocol crate.
-    pub fn observe_sent_control_payload(&mut self, payload: &ControlPayload, frame_bytes: usize) {
-        self.metrics.record_control_sent(payload, frame_bytes);
+    /// Drain reserved-service events for Python-owned decoding and policy.
+    pub fn drain_reserved_service_events(&mut self) -> Vec<ReservedServiceEvent> {
+        std::mem::take(&mut self.reserved_events)
     }
 
-    /// Record a sent control metaband payload on a specific path.
-    pub fn observe_sent_control_payload_on_path(&mut self, path_id: u16, payload: &ControlPayload, frame_bytes: usize) {
-        self.metrics.record_control_sent_on_path(path_id, payload, frame_bytes);
-    }
-
-    /// Build duplicate control frames for every eligible path.
+    /// Send one Python-composed service payload through the normal path scheduler.
     ///
-    /// Control duplication is deliberately separate from ordinary data scheduling:
-    /// every returned frame carries the same sequence and payload bytes, while
-    /// the frame path id identifies the transport path that carried the copy.
-    pub fn duplicate_control_payload_for_all_paths(
+    /// This lets Python inject internal service traffic, diagnostics, or future
+    /// helper payloads without pretending they came from an app-facing UDP
+    /// socket. Rust does not decode the payload or decide whether the service id
+    /// is meaningful; it only applies the compiled scheduler/path primitives and
+    /// frames the bytes. Service-level scheduler policy is still Python-owned
+    /// and can later compile to per-service execution hints.
+    pub fn transmit_service_payload(
         &mut self,
-        service_id: u64,
+        service_id: ServiceId,
         payload: Vec<u8>,
     ) -> Result<Vec<ControlTransmitPlan>, DataplaneError> {
-        let path_indices = AllPathSelector::select_path_indices(&self.paths, payload.len());
+        let fanout = self
+            .service_schedulers
+            .get(&service_id)
+            .copied()
+            .unwrap_or_else(ServiceSchedulerConfig::normal)
+            .effective_fanout(payload.len());
+        if fanout != 1 {
+            return self.transmit_service_payload_fanout(service_id, payload, fanout);
+        }
+        let planned = self.plan_injected_datagram(service_id, payload)?;
+        let frames = self.coalesce_planned_frames(service_id, planned)?;
+        let mut plans = Vec::with_capacity(frames.len());
+        for frame_plan in frames {
+            let encoded = frame_plan.frame.encode()?;
+            if encoded.len() > frame_plan.path.mtu() {
+                return Err(DataplaneError::FrameExceedsPathMtu {
+                    path_id: frame_plan.path.path_id(),
+                    frame_len: encoded.len(),
+                    mtu: frame_plan.path.mtu(),
+                });
+            }
+            if self.try_send_path_frame(frame_plan.path.path_id(), &encoded, false)? {
+                self.metrics
+                    .record_reserved_sent(frame_plan.path.path_id(), encoded.len());
+                plans.push(ControlTransmitPlan {
+                    path_id: frame_plan.path.path_id(),
+                    route_id: frame_plan.path.route_id(),
+                    sequence: frame_plan.datagrams[0].sequence,
+                    frame_len: encoded.len(),
+                    payload_len: frame_plan.datagrams.iter().map(|datagram| datagram.payload.len()).sum(),
+                });
+            }
+        }
+        Ok(plans)
+    }
+
+    fn transmit_service_payload_fanout(
+        &mut self,
+        service_id: ServiceId,
+        payload: Vec<u8>,
+        fanout: u16,
+    ) -> Result<Vec<ControlTransmitPlan>, DataplaneError> {
+        let mut path_indices = AllPathSelector::select_path_indices(&self.paths, payload.len());
+        if fanout > 0 {
+            path_indices.truncate(usize::from(fanout));
+        }
         if path_indices.is_empty() {
             return Err(DataplaneError::NoPathAvailable);
         }
@@ -167,29 +278,28 @@ impl CoreDataplane {
         let mut plans = Vec::with_capacity(path_indices.len());
         for path_index in path_indices {
             let path = &self.paths[path_index];
-            let frame = Frame::control(
-                0,
-                service_id,
-                path.path_id(),
-                path.route_id(),
-                sequence,
-                payload.clone(),
-            )?;
+            let path_id = path.path_id();
+            let route_id = path.route_id();
+            let mtu = path.mtu();
+            let frame = Frame::data(0, service_id, path_id, route_id, sequence, payload.clone())?;
             let encoded = frame.encode()?;
-            if encoded.len() > path.mtu() {
+            if encoded.len() > mtu {
                 return Err(DataplaneError::FrameExceedsPathMtu {
-                    path_id: path.path_id(),
+                    path_id,
                     frame_len: encoded.len(),
-                    mtu: path.mtu(),
+                    mtu,
                 });
             }
-            plans.push(ControlTransmitPlan {
-                path_id: path.path_id(),
-                route_id: path.route_id(),
-                sequence,
-                frame_len: encoded.len(),
-                payload_len: payload.len(),
-            });
+            if self.try_send_path_frame(path_id, &encoded, false)? {
+                self.metrics.record_reserved_sent(path_id, encoded.len());
+                plans.push(ControlTransmitPlan {
+                    path_id,
+                    route_id,
+                    sequence,
+                    frame_len: encoded.len(),
+                    payload_len: payload.len(),
+                });
+            }
         }
         Ok(plans)
     }
@@ -225,6 +335,147 @@ impl CoreDataplane {
         self.forward_datagrams(service_index, name, datagrams)
     }
 
+    /// Drain queued local UDP datagrams without blocking and forward them through Gatherlink framing.
+    ///
+    /// Long-running supervisors need this shape so one quiet app-facing service cannot stall path receives,
+    /// IPC commands, or shutdown checks. The blocking `forward_available_for_service` remains useful for focused
+    /// smoke tests that want to wait for a single local datagram.
+    pub fn forward_available_for_service_nonblocking(
+        &mut self,
+        name: &str,
+        max_datagrams: usize,
+    ) -> Result<Vec<ForwardOutcome>, DataplaneError> {
+        if max_datagrams == 0 {
+            return Ok(Vec::new());
+        }
+
+        let service_index = self
+            .services
+            .iter()
+            .position(|service| service.config().name() == name)
+            .ok_or_else(|| DataplaneError::UnknownService(name.to_owned()))?;
+
+        let datagrams = self.try_receive_datagrams(service_index, max_datagrams)?;
+        if datagrams.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.forward_datagrams(service_index, name, datagrams)
+    }
+
+    /// Receive encoded Gatherlink frames from path sockets and emit virtual UDP payloads.
+    pub fn receive_available_from_paths(
+        &mut self,
+        max_frames: usize,
+    ) -> Result<Vec<RemoteDeliverOutcome>, DataplaneError> {
+        let frames = self.path_transports.receive_available(max_frames)?;
+        let mut outcomes = Vec::new();
+        for received in frames {
+            let decoded = Frame::decode(&received.bytes)?;
+            match decoded.header.kind {
+                FrameKind::Data => {
+                    if let Some(payload) = self.remote_fragments.push_or_payload(&decoded)? {
+                        if is_reserved_service_id(decoded.header.service_id) {
+                            self.observe_received_reserved_service_payload(
+                                decoded.header.service_id,
+                                decoded.header.path_id,
+                                decoded.header.sequence,
+                                payload,
+                                received.bytes.len(),
+                            );
+                        } else {
+                            if self.observe_user_payload_first_seen(
+                                decoded.header.service_id,
+                                decoded.header.path_id,
+                                decoded.header.sequence,
+                                payload.len(),
+                            ) {
+                                outcomes.push(self.emit_remote_payload(
+                                    decoded.header.service_id,
+                                    decoded.header.path_id,
+                                    decoded.header.sequence,
+                                    &payload,
+                                )?);
+                            }
+                        }
+                    }
+                }
+                FrameKind::Batch => {
+                    for (index, payload) in decoded.batch_payloads()?.iter().enumerate() {
+                        let sequence = decoded.header.sequence + index as u64;
+                        if is_reserved_service_id(decoded.header.service_id) {
+                            self.observe_received_reserved_service_payload(
+                                decoded.header.service_id,
+                                decoded.header.path_id,
+                                sequence,
+                                payload.clone(),
+                                received.bytes.len(),
+                            );
+                        } else if self.observe_user_payload_first_seen(
+                            decoded.header.service_id,
+                            decoded.header.path_id,
+                            sequence,
+                            payload.len(),
+                        ) {
+                            outcomes.push(self.emit_remote_payload(
+                                decoded.header.service_id,
+                                decoded.header.path_id,
+                                sequence,
+                                payload,
+                            )?);
+                        }
+                    }
+                }
+                FrameKind::Control => {
+                    self.observe_received_reserved_service_payload(
+                        decoded.header.service_id,
+                        decoded.header.path_id,
+                        decoded.header.sequence,
+                        decoded.payload,
+                        received.bytes.len(),
+                    );
+                }
+            }
+        }
+        Ok(outcomes)
+    }
+
+    fn observe_user_payload_first_seen(
+        &mut self,
+        service_id: ServiceId,
+        path_id: u16,
+        sequence: u64,
+        payload_len: usize,
+    ) -> bool {
+        match self.remote_dedupe.observe(service_id, sequence) {
+            DedupeObservation::FirstSeen => true,
+            DedupeObservation::Duplicate => {
+                let service_name = self
+                    .services
+                    .iter()
+                    .find(|service| service.config().service_id() == service_id)
+                    .map(|service| service.config().name().to_owned());
+                let expected = self.expected_fanout_duplicate(service_id, payload_len);
+                self.metrics.record_duplicate_receive(
+                    service_name.as_deref(),
+                    service_id,
+                    path_id,
+                    payload_len,
+                    expected,
+                );
+                false
+            }
+        }
+    }
+
+    fn expected_fanout_duplicate(&self, service_id: ServiceId, payload_len: usize) -> bool {
+        self.service_schedulers
+            .get(&service_id)
+            .copied()
+            .unwrap_or_else(ServiceSchedulerConfig::normal)
+            .effective_fanout(payload_len)
+            != 1
+    }
+
     fn receive_datagrams(
         &self,
         service_index: usize,
@@ -252,15 +503,39 @@ impl CoreDataplane {
         Ok(datagrams)
     }
 
+    fn try_receive_datagrams(
+        &self,
+        service_index: usize,
+        max_datagrams: usize,
+    ) -> Result<Vec<ReceivedDatagram>, DataplaneError> {
+        let mut datagrams = Vec::with_capacity(max_datagrams);
+        for _ in 0..max_datagrams {
+            let mut buffer = vec![0_u8; u16::MAX as usize];
+            let Some((length, source)) = self.services[service_index].try_recv_from(&mut buffer)? else {
+                break;
+            };
+            datagrams.push(ReceivedDatagram {
+                payload: buffer[..length].to_vec(),
+                source,
+            });
+        }
+        Ok(datagrams)
+    }
+
     fn forward_datagrams(
         &mut self,
         service_index: usize,
         service_name: &str,
         datagrams: Vec<ReceivedDatagram>,
     ) -> Result<Vec<ForwardOutcome>, DataplaneError> {
-        let service_id = service_index as u64 + 1;
+        let service_id = self.services[service_index].config().service_id();
+        self.ensure_service_enabled(service_id)?;
+        self.learn_local_sources(service_id, service_index, &datagrams);
         let planned = self.plan_datagrams(service_id, datagrams)?;
         let frames = self.coalesce_planned_frames(service_id, planned)?;
+        if !self.path_transports.is_empty() {
+            return self.transmit_planned_frames(service_name, frames);
+        }
         let mut outcomes = Vec::new();
         let mut fragments = FragmentReassembly::default();
 
@@ -328,33 +603,152 @@ impl CoreDataplane {
         Ok(outcomes)
     }
 
+    fn learn_local_sources(&mut self, service_id: ServiceId, service_index: usize, datagrams: &[ReceivedDatagram]) {
+        if self.services[service_index].config().return_mode() != ServiceReturnMode::LearnedSingleSource {
+            return;
+        }
+        if let Some(last) = datagrams.last() {
+            self.learned_sources.insert(service_id, last.source);
+        }
+    }
+
+    fn transmit_planned_frames(
+        &mut self,
+        service_name: &str,
+        frames: Vec<FramePlan>,
+    ) -> Result<Vec<ForwardOutcome>, DataplaneError> {
+        let mut outcomes = Vec::new();
+        for plan in frames {
+            let encoded = plan.frame.encode()?;
+            if encoded.len() > plan.path.mtu() {
+                return Err(DataplaneError::FrameExceedsPathMtu {
+                    path_id: plan.path.path_id(),
+                    frame_len: encoded.len(),
+                    mtu: plan.path.mtu(),
+                });
+            }
+            let expected_fanout = plan.datagrams.iter().any(|datagram| datagram.expected_fanout);
+            if self.try_send_path_frame(plan.path.path_id(), &encoded, expected_fanout)? {
+                for datagram in &plan.datagrams {
+                    let outcome = ForwardOutcome {
+                        service: service_name.to_owned(),
+                        source: datagram.source,
+                        target: plan.path.transport_remote().ok_or(DataplaneError::NoPathAvailable)?,
+                        payload_len: datagram.payload.len(),
+                        sequence: datagram.sequence,
+                        path_id: plan.path.path_id(),
+                        frame_count: plan.fragment_count,
+                        batch_count: if plan.datagrams.len() > 1 {
+                            plan.datagrams.len()
+                        } else {
+                            0
+                        },
+                        fragment_count: plan.fragment_count.saturating_sub(1),
+                    };
+                    self.metrics.record_forward(&outcome);
+                    outcomes.push(outcome);
+                }
+            }
+        }
+        Ok(outcomes)
+    }
+
+    fn try_send_path_frame(
+        &mut self,
+        path_id: u16,
+        encoded: &[u8],
+        expected_fanout: bool,
+    ) -> Result<bool, DataplaneError> {
+        match self.path_transports.send_frame(path_id, encoded) {
+            Ok(_sent) => Ok(true),
+            Err(UdpServiceError::SendFailed(_error)) => {
+                self.metrics.record_send_failed(path_id, encoded.len(), expected_fanout);
+                Ok(false)
+            }
+            Err(error) => Err(DataplaneError::from(error)),
+        }
+    }
+
+    fn emit_remote_payload(
+        &mut self,
+        service_id: ServiceId,
+        path_id: u16,
+        sequence: u64,
+        payload: &[u8],
+    ) -> Result<RemoteDeliverOutcome, DataplaneError> {
+        let service_index = self
+            .services
+            .iter()
+            .position(|service| service.config().service_id() == service_id)
+            .ok_or(DataplaneError::UnknownServiceId(service_id))?;
+        self.ensure_service_enabled(service_id)?;
+        let service = &self.services[service_index];
+        let service_name = service.config().name().to_owned();
+        let target = match service.config().return_mode() {
+            ServiceReturnMode::Fixed => service.config().target(),
+            ServiceReturnMode::LearnedSingleSource => self
+                .learned_sources
+                .get(&service_id)
+                .copied()
+                .unwrap_or_else(|| service.config().target()),
+        };
+        let emitted = service.emit_to(payload, target)?;
+        self.metrics
+            .record_receive_for_service(&service_name, service_id, path_id, sequence, emitted);
+        Ok(RemoteDeliverOutcome {
+            service: service_name,
+            target,
+            payload_len: emitted,
+            sequence,
+            path_id,
+        })
+    }
+
     fn plan_datagrams(
         &mut self,
-        service_id: u64,
+        service_id: ServiceId,
         datagrams: Vec<ReceivedDatagram>,
     ) -> Result<Vec<PlannedDatagram>, DataplaneError> {
         let mut planned = Vec::with_capacity(datagrams.len());
         for datagram in datagrams {
             let sequence = self.next_sequence;
             self.next_sequence += 1;
-            let path = self.select_path(datagram.payload.len())?.clone();
-            let fragment = if datagram.payload.len() > path.max_data_payload() {
+            let paths = self.select_service_paths(service_id, datagram.payload.len())?;
+            let expected_fanout = paths.len() > 1;
+            let fragment = if paths
+                .first()
+                .is_some_and(|path| datagram.payload.len() > path.max_data_payload())
+            {
                 let datagram_id = self.next_datagram_id;
                 self.next_datagram_id = self.next_datagram_id.wrapping_add(1).max(1);
                 Some(datagram_id)
             } else {
                 None
             };
-            planned.push(PlannedDatagram {
-                payload: datagram.payload,
-                source: datagram.source,
-                sequence,
-                service_id,
-                path,
-                fragment,
-            });
+            for path in paths {
+                planned.push(PlannedDatagram {
+                    payload: datagram.payload.clone(),
+                    source: datagram.source,
+                    sequence,
+                    service_id,
+                    path,
+                    fragment,
+                    expected_fanout,
+                });
+            }
         }
         Ok(planned)
+    }
+
+    fn plan_injected_datagram(
+        &mut self,
+        service_id: ServiceId,
+        payload: Vec<u8>,
+    ) -> Result<Vec<PlannedDatagram>, DataplaneError> {
+        let source = "127.0.0.1:0"
+            .parse()
+            .expect("injected service source placeholder must parse");
+        self.plan_datagrams(service_id, vec![ReceivedDatagram { payload, source }])
     }
 
     fn select_path(&mut self, payload_len: usize) -> Result<&CorePathConfig, DataplaneError> {
@@ -365,9 +759,36 @@ impl CoreDataplane {
         Ok(&self.paths[path_index])
     }
 
+    fn select_service_paths(
+        &mut self,
+        service_id: ServiceId,
+        payload_len: usize,
+    ) -> Result<Vec<CorePathConfig>, DataplaneError> {
+        let fanout = self
+            .service_schedulers
+            .get(&service_id)
+            .copied()
+            .unwrap_or_else(ServiceSchedulerConfig::normal)
+            .effective_fanout(payload_len);
+        if fanout == 1 {
+            return Ok(vec![self.select_path(payload_len)?.clone()]);
+        }
+        let mut path_indices = AllPathSelector::select_path_indices(&self.paths, payload_len);
+        if fanout > 0 {
+            path_indices.truncate(usize::from(fanout));
+        }
+        if path_indices.is_empty() {
+            return Err(DataplaneError::NoPathAvailable);
+        }
+        Ok(path_indices
+            .into_iter()
+            .map(|index| self.paths[index].clone())
+            .collect())
+    }
+
     fn coalesce_planned_frames(
         &self,
-        service_id: u64,
+        service_id: ServiceId,
         planned: Vec<PlannedDatagram>,
     ) -> Result<Vec<FramePlan>, DataplaneError> {
         let mut frames = Vec::new();
@@ -428,11 +849,15 @@ impl CoreDataplane {
         }
         Ok(frames)
     }
-}
 
-fn compile_scheduler(mode: SchedulerMode, paths: &[CorePathConfig]) -> WeightedRoundRobin {
-    match mode {
-        SchedulerMode::RoundRobin => WeightedRoundRobin::compile(paths),
+    fn ensure_service_enabled(&self, service_id: ServiceId) -> Result<(), DataplaneError> {
+        if let Some(reason) = self.disabled_services.get(&service_id) {
+            return Err(DataplaneError::ServiceDisabled {
+                service_id,
+                reason: reason.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -447,9 +872,10 @@ pub(crate) struct PlannedDatagram {
     pub(crate) payload: Vec<u8>,
     pub(crate) source: SocketAddr,
     pub(crate) sequence: u64,
-    pub(crate) service_id: u64,
+    pub(crate) service_id: ServiceId,
     pub(crate) path: CorePathConfig,
     pub(crate) fragment: Option<u32>,
+    pub(crate) expected_fanout: bool,
 }
 
 #[derive(Debug)]
@@ -484,6 +910,26 @@ pub struct ForwardOutcome {
     pub fragment_count: usize,
 }
 
+/// Observable result for one remote frame delivered to a local UDP target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteDeliverOutcome {
+    pub service: String,
+    pub target: SocketAddr,
+    pub payload_len: usize,
+    pub sequence: u64,
+    pub path_id: u16,
+}
+
+/// Reserved Gatherlink service payload that Python must decode or reject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReservedServiceEvent {
+    pub service_id: ServiceId,
+    pub path_id: u16,
+    pub sequence: u64,
+    pub payload: Vec<u8>,
+    pub frame_bytes: usize,
+}
+
 /// Planned duplicate control frame for one path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ControlTransmitPlan {
@@ -500,6 +946,8 @@ pub enum DataplaneError {
     UdpService(UdpServiceError),
     Protocol(ProtocolError),
     UnknownService(String),
+    UnknownServiceId(ServiceId),
+    ServiceDisabled { service_id: ServiceId, reason: String },
     NoDatagramForwarded,
     NoPathAvailable,
     UnexpectedFrameKind,
@@ -515,6 +963,10 @@ impl fmt::Display for DataplaneError {
             Self::UdpService(error) => write!(formatter, "{error}"),
             Self::Protocol(error) => write!(formatter, "{error}"),
             Self::UnknownService(name) => write!(formatter, "unknown UDP service: {name}"),
+            Self::UnknownServiceId(service_id) => write!(formatter, "unknown UDP service id: {service_id}"),
+            Self::ServiceDisabled { service_id, reason } => {
+                write!(formatter, "service id {service_id} is disabled: {reason}")
+            }
             Self::NoDatagramForwarded => write!(formatter, "no datagram was forwarded"),
             Self::NoPathAvailable => write!(formatter, "no path is available for packet framing"),
             Self::UnexpectedFrameKind => write!(formatter, "decoded frame was not a data frame"),

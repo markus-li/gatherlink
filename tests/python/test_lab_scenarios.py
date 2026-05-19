@@ -40,6 +40,10 @@ def test_local_dual_path_lab_config_plans_extensible_scenario() -> None:
     assert "rate-10mbit" in scenario.profiles
     assert "normal-saturated" in scenario.network_modes
     assert "forced-drop" in scenario.network_modes
+    assert "latency-jitter-skew" in scenario.network_modes
+    assert "wander-low" in scenario.network_modes
+    assert "wander-mid" in scenario.network_modes
+    assert "wander-high" in scenario.network_modes
     assert plan.supported is False
     assert plan.steps[0].status == "supported"
     assert any(step.action == "setup_network_namespaces_and_veths" for step in plan.steps)
@@ -49,6 +53,26 @@ def test_local_dual_path_lab_config_plans_extensible_scenario() -> None:
     assert any(step.action == "future_feature:receiver-metrics" for step in plan.steps)
     assert any(step.status == "not_implemented" for step in plan.steps)
     assert "security.mode=none" in plan.warnings[0]
+
+
+def test_local_three_path_lab_config_has_scheduler_stress_modes() -> None:
+    scenario = load_lab_scenario_file(LAB_CONFIGS / "local-three-path.json")
+    plan = plan_lab_scenario(scenario)
+
+    assert scenario.name == "local-three-path"
+    assert scenario.scenario == "local-multi-path"
+    assert len(scenario.paths) == 3
+    assert [path.name for path in scenario.paths] == ["path-a", "path-b", "path-c"]
+    assert scenario.traffic.listen == "127.0.0.1:55280"
+    assert "normal-saturated" in scenario.network_modes
+    assert "forced-drop" in scenario.network_modes
+    assert "latency-jitter-skew" in scenario.network_modes
+    assert "loss-on-fast-path" in scenario.network_modes
+    assert "wander-low" in scenario.network_modes
+    assert "wander-mid" in scenario.network_modes
+    assert "wander-high" in scenario.network_modes
+    assert plan.steps[2].details["paths"] == ["path-a", "path-b", "path-c"]
+    assert plan.supported is False
 
 
 def test_future_scenario_kind_reports_not_implemented() -> None:
@@ -95,7 +119,7 @@ def test_lab_up_starts_forwarder_and_sink_services(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(
         lab_cli,
         "start_lab_service",
-        lambda path, scenario: ServiceStartResult(
+        lambda path, scenario, **_kwargs: ServiceStartResult(
             name="lab.local-dual-path",
             pid=101,
             user="markus",
@@ -107,7 +131,7 @@ def test_lab_up_starts_forwarder_and_sink_services(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr(
         lab_cli,
         "start_lab_sink_service",
-        lambda path, scenario: ServiceStartResult(
+        lambda path, scenario, **_kwargs: ServiceStartResult(
             name="lab.local-dual-path.sink",
             pid=102,
             user="markus",
@@ -252,6 +276,35 @@ def test_lab_send_cli_can_request_sink_originated_traffic(monkeypatch) -> None:
     assert result.exit_code == 0
     assert "direction=from-sink" in result.output
     assert calls == [("local-dual-path", "reply", 2, 0.05, None, None, None)]
+
+
+def test_lab_rust_smoke_cli_reports_production_transport_result(monkeypatch) -> None:
+    from gatherlink.cli import lab as lab_cli
+    from gatherlink.lab.runtime import RustTransportSmokeResult
+
+    calls = []
+
+    def fake_smoke(scenario, *, count, payload):
+        calls.append((scenario.name, count, payload))
+        return RustTransportSmokeResult(
+            packets=count,
+            bytes=123,
+            paths=2,
+            forwarded_packets=count,
+            delivered_packets=count,
+            client_listen="127.0.0.1:1",
+            remote_target="127.0.0.1:2",
+        )
+
+    monkeypatch.setattr(lab_cli, "run_rust_transport_smoke", fake_smoke)
+    result = CliRunner().invoke(
+        app,
+        ["lab", "rust-smoke", str(LAB_CONFIGS / "local-dual-path.json"), "--count", "2", "--payload", "hello"],
+    )
+
+    assert result.exit_code == 0
+    assert "lab rust smoke: ok packets=2" in result.output
+    assert calls == [("local-dual-path", 2, "hello")]
 
 
 def test_lab_send_cli_can_drive_both_directions(monkeypatch) -> None:
@@ -482,6 +535,49 @@ def test_apply_named_profile_and_clear_shape_use_one_shot_system_commands() -> N
     assert any(command[:2] == ["sudo", "tc"] and "del" in command for command in runner.commands)
 
 
+def test_cycle_network_modes_cli_applies_modes_in_order(monkeypatch) -> None:
+    from gatherlink.cli import lab as lab_cli
+    from gatherlink.lab.netns import ShapeApplyResult
+
+    calls: list[str] = []
+
+    def fake_apply(scenario, mode_name):
+        calls.append(mode_name)
+        return [
+            ShapeApplyResult(
+                name="path-a",
+                side="both",
+                client_namespace="glab-local-dual-path-client",
+                server_namespace="glab-local-dual-path-server",
+                client_interface="glpath-ac",
+                server_interface="glpath-as",
+                actions=[f"mode={mode_name}"],
+            )
+        ]
+
+    monkeypatch.setattr(lab_cli, "apply_lab_network_mode", fake_apply)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "lab",
+            "cycle-network-modes",
+            str(LAB_CONFIGS / "local-dual-path.json"),
+            "--modes",
+            "wander-low,wander-mid",
+            "--interval",
+            "0",
+            "--cycles",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == ["wander-low", "wander-mid", "wander-low", "wander-mid"]
+    assert "applying=wander-low" in result.output
+    assert "actions=mode=wander-mid" in result.output
+
+
 def test_standalone_shape_config_can_apply_local_and_remote_sides() -> None:
     scenario = load_lab_scenario_file(LAB_CONFIGS / "local-dual-path.json")
     profile = load_lab_shape_profile_file(SHAPING_CONFIGS / "remote-loss-local-clean.json")
@@ -649,9 +745,7 @@ def test_tc_qdisc_stats_are_exposed_as_missed_packets() -> None:
     assert _qdisc_delta(
         {"path-a": qdisc},
         {"path-a": {"sent_bytes": 10, "sent_packets": 2, "dropped": 4, "rate_bps": 3_000_000}},
-    ) == {
-        "path-a": {"sent_bytes": 8742706, "sent_packets": 7058, "dropped": 250, "rate_bps": 3_000_000}
-    }
+    ) == {"path-a": {"sent_bytes": 8742706, "sent_packets": 7058, "dropped": 250, "rate_bps": 3_000_000}}
     assert merged["path-a"]["missed_packets"] == 254
     assert merged["path-a"]["qdisc_dropped_packets"] == 254
 
@@ -693,10 +787,10 @@ def test_path_stats_can_include_reverse_reply_counters() -> None:
 
 
 def test_lab_data_frame_preserves_normal_udp_payload() -> None:
-    from gatherlink.lab.runtime import _decode_data_frame, _encode_data_frame
+    from gatherlink.protocol import decode_data_frame, encode_data_frame
 
-    wire_payload = _encode_data_frame(sequence=42, path_id=2, payload=b"normal-user-udp")
-    frame = _decode_data_frame(wire_payload)
+    wire_payload = encode_data_frame(sequence=42, path_id=2, payload=b"normal-user-udp")
+    frame = decode_data_frame(wire_payload)
 
     assert frame is not None
     assert frame.sequence == 42
@@ -723,8 +817,13 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
 
     payload = encode_control_payload(
         {1: "path-a", 2: "path-b"},
-        {1: (3_000_000, None), 2: (None, 1_500_000)},
-        {1: (12_000, 10_000, None, None), 2: (None, None, 14_000, 11_000)},
+        service_metadata={256: "udp-main"},
+        service_endpoint_assertions={256: "127.0.0.1:51820"},
+        service_disables={257: "sink declined this service"},
+        service_scheduler_policies={256: (2, 512)},
+        path_capacity_bps={1: (3_000_000, None), 2: (None, 1_500_000)},
+        path_latency_us={1: (12_000, 10_000, None, None), 2: (None, None, 14_000, 11_000)},
+        path_mtu={1: (1500, 1200, None, None), 2: (1400, 1200, None, None)},
         path_clock_sync=[
             InternalClockSyncMessage(
                 exchange_id=9,
@@ -749,8 +848,13 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
 
     assert frame is not None
     assert frame.path_metadata == {1: "path-a", 2: "path-b"}
+    assert frame.service_metadata == {256: "udp-main"}
+    assert frame.service_endpoint_assertions == {256: "127.0.0.1:51820"}
+    assert frame.service_disables == {257: "sink declined this service"}
+    assert frame.service_scheduler_policies == {256: (2, 512)}
     assert frame.path_capacity_bps == {1: (3_000_000, None), 2: (None, 1_500_000)}
     assert frame.path_latency_us == {1: (12_000, 10_000, None, None), 2: (None, None, 14_000, 11_000)}
+    assert frame.path_mtu == {1: (1500, 1200, None, None), 2: (1400, 1200, None, None)}
     assert frame.internal_clock_sync == [
         InternalClockSyncMessage(exchange_id=9, path_id=1, mode=2, origin_us=100, receive_us=120, transmit_us=121)
     ]
@@ -763,7 +867,7 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
     record_control_metadata_sent(
         metadata,
         len(wire_frame),
-        message_count=8,
+        message_count=14,
         path_metadata=frame.path_metadata,
         path_capacity={
             "path-a": {"tx_bps": 3_000_000, "rx_bps": None, "source": "detected", "updated_at": None},
@@ -772,6 +876,14 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
         path_latency={
             "path-a": {"tx_current_us": 12_000, "tx_mean_us": 10_000, "source": "reply-rtt-half", "updated_at": None},
             "path-b": {"rx_current_us": 14_000, "rx_mean_us": 11_000, "source": "reply-rtt-half", "updated_at": None},
+        },
+        path_mtu={
+            "path-a": {
+                "tx_link_mtu": 1500,
+                "tx_frame_mtu": 1200,
+                "tx_payload_mtu": 1162,
+                "source": "interface",
+            }
         },
         internal_clock={"role": "syncing-to-sink", "offset_us": 12, "mean_offset_us": 10, "rtt_us": 4, "samples": 1},
         sink_time=frame.sink_time,
@@ -783,15 +895,23 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
     record_sink_time(metadata, frame.sink_time, {1: "path-a"}, received_at_internal_us=1_010_000)
 
     assert metadata["sent"]["frames"] == 1
-    assert metadata["sent"]["messages"] == 8
+    assert metadata["sent"]["messages"] == 14
     assert metadata["sent"]["bytes"] == len(wire_frame)
     assert metadata["received"]["frames"] == 1
-    assert metadata["received"]["messages"] == 8
+    assert metadata["received"]["messages"] == 14
     assert metadata["received"]["bytes"] == len(wire_frame)
     assert metadata["path_control"]["path-a"]["tx"]["frames"] == 1
     assert metadata["path_control"]["path-b"]["rx"]["frames"] == 1
     assert metadata["path_metadata"] == {"1": "path-a", "2": "path-b"}
     assert metadata["path_metadata_count"] == 2
+    assert metadata["service_metadata"] == {"256": "udp-main"}
+    assert metadata["service_metadata_count"] == 1
+    assert metadata["service_endpoint_assertions"] == {"256": "127.0.0.1:51820"}
+    assert metadata["service_endpoint_assertion_count"] == 1
+    assert metadata["service_disables"] == {"257": "sink declined this service"}
+    assert metadata["service_disable_count"] == 1
+    assert metadata["service_scheduler_policies"] == {"256": {"fanout": 2, "fanout_below_bytes": 512}}
+    assert metadata["service_scheduler_policy_count"] == 1
     assert metadata["path_capacity_count"] == 2
     assert metadata["path_capacity"]["path-a"]["tx_bps"] == 3_000_000
     assert metadata["path_capacity"]["path-a"]["rx_bps"] == 3_000_000
@@ -800,23 +920,153 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
     assert metadata["path_latency"]["path-a"]["rx_current_us"] == 12_000
     assert metadata["path_latency"]["path-b"]["tx_current_us"] == 14_000
     assert metadata["path_latency"]["path-b"]["rx_current_us"] == 14_000
+    assert metadata["path_mtu_count"] == 2
+    assert metadata["path_mtu"]["path-a"]["tx_frame_mtu"] == 1200
+    assert metadata["path_mtu"]["path-a"]["rx_frame_mtu"] == 1200
+    assert metadata["path_mtu"]["path-b"]["rx_link_mtu"] == 1400
     assert metadata["internal_clock"]["offset_us"] == 12
     assert metadata["sink_time"]["ntp_state"] == "synchronized"
     assert metadata["sink_time"]["path"] == "path-a"
     assert metadata["sink_time"]["sink_sent_unix_us"] == 1_776_000_000_000_000
 
 
-def test_lab_path_metadata_can_rename_existing_counter_row() -> None:
-    from gatherlink.lab.runtime import _rename_path_counter
+def test_reserved_service_dispatch_decodes_control_metadata_and_logs_unknown() -> None:
+    from gatherlink.control.metadata import empty_control_metadata
+    from gatherlink.control.reserved import drain_reserved_service_events
+    from gatherlink.protocol import encode_control_payload
 
-    path_stats = {"path-id:7": {"packets": 2, "bytes": 1600, "missed_packets": 1}}
+    class FakeEvent:
+        def __init__(self, service_id: int, payload: bytes) -> None:
+            self._service_id = service_id
+            self._payload = payload
 
-    _rename_path_counter(path_stats, "path-id:7", "backup-lte")
+        def service_id(self) -> int:
+            return self._service_id
 
-    assert "path-id:7" not in path_stats
-    assert path_stats["backup-lte"]["packets"] == 2
-    assert path_stats["backup-lte"]["bytes"] == 1600
-    assert path_stats["backup-lte"]["missed_packets"] == 1
+        def path_id(self) -> int:
+            return 1
+
+        def sequence(self) -> int:
+            return 9
+
+        def payload(self) -> bytes:
+            return self._payload
+
+        def frame_bytes(self) -> int:
+            return len(self._payload) + 38
+
+    class FakeDataplane:
+        def drain_reserved_service_events(self):
+            return [
+                FakeEvent(1, encode_control_payload({1: "path-a"})),
+                FakeEvent(5, b"future-diagnostics"),
+                FakeEvent(300, b"user-traffic-should-not-be-here"),
+            ]
+
+    logs: list[str] = []
+    metadata = empty_control_metadata()
+
+    handled = drain_reserved_service_events(
+        FakeDataplane(),
+        metadata,
+        path_names_by_id={1: "path-a"},
+        local_targets_by_service_id={256: "127.0.0.1:51820"},
+        logger=logs.append,
+    )
+
+    assert handled == 1
+    assert metadata["path_metadata"] == {"1": "path-a"}
+    assert metadata["path_control"]["path-a"]["rx"]["frames"] == 1
+    assert any("reserved service id 5 has no Python decoder" in log for log in logs)
+    assert any("non-reserved service id 300 reached Python reserved dispatcher" in log for log in logs)
+
+
+def test_reserved_service_dispatch_allows_python_extra_decoder() -> None:
+    from gatherlink.control.metadata import empty_control_metadata
+    from gatherlink.control.reserved import ReservedServicePayload, drain_reserved_service_events
+    from gatherlink.protocol import SERVICE_ID_REMOTE_STATUS
+
+    class FakeEvent:
+        def service_id(self) -> int:
+            return SERVICE_ID_REMOTE_STATUS
+
+        def path_id(self) -> int:
+            return 2
+
+        def sequence(self) -> int:
+            return 11
+
+        def payload(self) -> bytes:
+            return b"remote-status"
+
+        def frame_bytes(self) -> int:
+            return 51
+
+    class FakeDataplane:
+        def drain_reserved_service_events(self):
+            return [FakeEvent()]
+
+    seen: list[ReservedServicePayload] = []
+    handled = drain_reserved_service_events(
+        FakeDataplane(),
+        empty_control_metadata(),
+        path_names_by_id={2: "path-b"},
+        local_targets_by_service_id={256: "127.0.0.1:51820"},
+        extra_handlers={SERVICE_ID_REMOTE_STATUS: lambda event: seen.append(event) is None},
+    )
+
+    assert handled == 1
+    assert seen[0].service_id == SERVICE_ID_REMOTE_STATUS
+    assert seen[0].payload == b"remote-status"
+
+
+def test_service_metadata_never_carries_target_endpoint() -> None:
+    from gatherlink.protocol import decode_control_payload, encode_control_payload
+
+    payload = encode_control_payload({}, service_metadata={256: "wireguard-main"})
+    frame = decode_control_payload(payload)
+
+    assert frame is not None
+    assert frame.service_metadata == {256: "wireguard-main"}
+    assert b"127.0.0.1" not in payload
+    assert b"51820" not in payload
+
+
+def test_endpoint_assertions_record_mismatch_without_setting_config() -> None:
+    from gatherlink.control.metadata import (
+        empty_control_metadata,
+        record_control_metadata_received,
+        verify_service_endpoint_assertions,
+    )
+    from gatherlink.protocol import decode_control_payload, encode_control_payload
+
+    payload = encode_control_payload({}, service_endpoint_assertions={256: "127.0.0.1:9"})
+    frame = decode_control_payload(payload)
+    metadata = empty_control_metadata()
+
+    assert frame is not None
+    record_control_metadata_received(metadata, len(payload), frame, ("10.80.1.1", 51820))
+    mismatches = verify_service_endpoint_assertions(metadata, {256: "127.0.0.1:51820"})
+
+    assert mismatches
+    assert metadata["service_endpoint_assertions"] == {"256": "127.0.0.1:9"}
+    assert "127.0.0.1:51820" in metadata["service_endpoint_mismatches"]["256"]
+
+
+def test_service_disable_metadata_is_generic_peer_control() -> None:
+    from gatherlink.control.metadata import empty_control_metadata, record_control_metadata_received
+    from gatherlink.protocol import decode_control_payload, encode_control_payload
+
+    payload = encode_control_payload({}, service_disables={256: "sink does not want this service"})
+    frame = decode_control_payload(payload)
+    metadata = empty_control_metadata()
+
+    assert frame is not None
+    assert frame.service_disables == {256: "sink does not want this service"}
+    record_control_metadata_received(metadata, len(payload), frame, ("10.80.1.1", 51820))
+
+    assert metadata["service_disables"] == {"256": "sink does not want this service"}
+    assert metadata["service_disable_count"] == 1
 
 
 def test_service_monitor_summarizes_control_metadata_separately() -> None:
@@ -826,6 +1076,7 @@ def test_service_monitor_summarizes_control_metadata_separately() -> None:
         _ntp_context,
         _path_capacity_context,
         _path_control_context,
+        _path_mtu_context,
         _status_context,
     )
 
@@ -849,6 +1100,8 @@ def test_service_monitor_summarizes_control_metadata_separately() -> None:
             "path_control_count": 1,
             "path_metadata": {"1": "path-a", "2": "path-b"},
             "path_metadata_count": 2,
+            "service_metadata": {"256": "udp-main"},
+            "service_metadata_count": 1,
             "path_capacity": {
                 "path-a": {"tx_bps": 3_000_000, "rx_bps": None},
                 "path-b": {"tx_bps": None, "rx_bps": 1_500_000},
@@ -859,6 +1112,11 @@ def test_service_monitor_summarizes_control_metadata_separately() -> None:
                 "path-b": {"tx_current_us": None, "tx_mean_us": None, "rx_current_us": 5_000, "rx_mean_us": 4_000},
             },
             "path_latency_count": 2,
+            "path_mtu": {
+                "path-a": {"tx_link_mtu": 1500, "tx_frame_mtu": 1200, "tx_payload_mtu": 1162},
+                "path-b": {"rx_link_mtu": 1400, "rx_frame_mtu": 1200, "rx_payload_mtu": 1162},
+            },
+            "path_mtu_count": 2,
             "internal_clock": {
                 "role": "syncing-to-sink",
                 "offset_us": 2500,
@@ -881,11 +1139,9 @@ def test_service_monitor_summarizes_control_metadata_separately() -> None:
 
     assert context == "listen=127.0.0.1:51820"
     assert "listen=127.0.0.1:51820" in context
-    assert control.startswith(
-        "rx=2/126B clk=off+2.5/+2.0ms rtt=8.0ms n=3 paths=2 "
-        "pctrl=1 lat=2 last="
-    )
+    assert control.startswith("rx=2/126B clk=off+2.5/+2.0ms rtt=8.0ms n=3 paths=2 svc=1 " "pctrl=1 lat=2 last=")
     assert _path_capacity_context(status["control_metadata"], "path-a") == "tx=3.0Mb rx=- tl=2.5/2.0ms rl=-/-"
+    assert "tx=frm:1200/pay:1162/lnk:1500" in _path_mtu_context(status["control_metadata"], "path-a")
     assert (
         _path_control_context(status["control_metadata"], "path-a")
         == "ctx=2/256B crx=1/128B tx=3.0Mb rx=- tl=2.5/2.0ms rl=-/-"
@@ -896,20 +1152,25 @@ def test_service_monitor_summarizes_control_metadata_separately() -> None:
 
 
 def test_path_capacity_detector_updates_and_caches_directional_estimate(tmp_path: Path) -> None:
-    from gatherlink.lab.runtime import (
-        _PATH_CAPACITY_DECREASE_SUSTAIN_SECONDS,
-        _PATH_CAPACITY_DETECTION_WINDOW_SECONDS,
-        _PathCapacityDetector,
+    from gatherlink.lab.runtime import _initial_path_capacity_estimates, _save_path_capacity_cache
+    from gatherlink.paths.capacity import (
+        PATH_CAPACITY_DECREASE_SUSTAIN_SECONDS,
+        PATH_CAPACITY_DETECTION_WINDOW_SECONDS,
+        PathCapacityDetector,
     )
 
     scenario = load_lab_scenario_file(LAB_CONFIGS / "local-dual-path.json").model_copy(
         update={"runtime_dir": str(tmp_path)}
     )
-    detector = _PathCapacityDetector(scenario, path_names=["path-a"], direction="tx")
+    detector = PathCapacityDetector(
+        path_names=["path-a"],
+        direction="tx",
+        initial_estimates=_initial_path_capacity_estimates(scenario, ["path-a"], direction="tx"),
+    )
     changed = {}
-    sample_count = int(_PATH_CAPACITY_DECREASE_SUSTAIN_SECONDS / _PATH_CAPACITY_DETECTION_WINDOW_SECONDS) + 1
+    sample_count = int(PATH_CAPACITY_DECREASE_SUSTAIN_SECONDS / PATH_CAPACITY_DETECTION_WINDOW_SECONDS) + 1
     for sample in range(1, sample_count + 1):
-        detector._last_sample_at -= _PATH_CAPACITY_DETECTION_WINDOW_SECONDS + 0.1
+        detector._last_sample_at -= PATH_CAPACITY_DETECTION_WINDOW_SECONDS + 0.1
         sample_changed = detector.observe(
             {"path-a": {"bytes": sample * 1_875_000}},
             {"path-a": {"sent_bytes": sample * 1_875_000, "dropped": sample}},
@@ -918,9 +1179,14 @@ def test_path_capacity_detector_updates_and_caches_directional_estimate(tmp_path
 
     assert changed["path-a"]["tx_bps"] < 50_000_000
     assert changed["path-a"]["rx_bps"] is None
+    _save_path_capacity_cache(scenario, detector.snapshot())
     assert (tmp_path / "path-capacity-cache.json").exists()
 
-    cached = _PathCapacityDetector(scenario, path_names=["path-a"], direction="tx")
+    cached = PathCapacityDetector(
+        path_names=["path-a"],
+        direction="tx",
+        initial_estimates=_initial_path_capacity_estimates(scenario, ["path-a"], direction="tx"),
+    )
     assert cached.snapshot()["path-a"]["source"] == "cache"
 
 
@@ -941,20 +1207,25 @@ def test_path_latency_tracker_reports_current_and_window_mean() -> None:
 
 
 def test_path_capacity_detector_does_not_lower_without_drops(tmp_path: Path) -> None:
-    from gatherlink.lab.runtime import (
-        _PATH_CAPACITY_DECREASE_SUSTAIN_SECONDS,
-        _PATH_CAPACITY_DETECTION_WINDOW_SECONDS,
-        _PathCapacityDetector,
+    from gatherlink.lab.runtime import _initial_path_capacity_estimates
+    from gatherlink.paths.capacity import (
+        PATH_CAPACITY_DECREASE_SUSTAIN_SECONDS,
+        PATH_CAPACITY_DETECTION_WINDOW_SECONDS,
+        PathCapacityDetector,
     )
 
     scenario = load_lab_scenario_file(LAB_CONFIGS / "local-dual-path.json").model_copy(
         update={"runtime_dir": str(tmp_path)}
     )
-    detector = _PathCapacityDetector(scenario, path_names=["path-a"], direction="tx")
-    sample_count = int(_PATH_CAPACITY_DECREASE_SUSTAIN_SECONDS / _PATH_CAPACITY_DETECTION_WINDOW_SECONDS) + 1
+    detector = PathCapacityDetector(
+        path_names=["path-a"],
+        direction="tx",
+        initial_estimates=_initial_path_capacity_estimates(scenario, ["path-a"], direction="tx"),
+    )
+    sample_count = int(PATH_CAPACITY_DECREASE_SUSTAIN_SECONDS / PATH_CAPACITY_DETECTION_WINDOW_SECONDS) + 1
     changed = {}
     for sample in range(1, sample_count + 1):
-        detector._last_sample_at -= _PATH_CAPACITY_DETECTION_WINDOW_SECONDS + 0.1
+        detector._last_sample_at -= PATH_CAPACITY_DETECTION_WINDOW_SECONDS + 0.1
         changed = detector.observe(
             {"path-a": {"bytes": sample * 1_875_000}},
             {"path-a": {"sent_bytes": sample * 1_875_000, "dropped": 0}},
@@ -963,31 +1234,15 @@ def test_path_capacity_detector_does_not_lower_without_drops(tmp_path: Path) -> 
     assert changed == {}
 
 
-def test_lab_sequence_tracker_clears_missing_when_reordered_packet_arrives() -> None:
-    from gatherlink.lab.runtime import _LabSequenceTracker
+def test_path_mtu_detection_reads_interface_and_clamps_to_link(tmp_path: Path) -> None:
+    from gatherlink.paths.mtu import detect_interface_mtu, observe_path_mtu
 
-    tracker = _LabSequenceTracker()
+    iface = tmp_path / "eth-test"
+    iface.mkdir()
+    (iface / "mtu").write_text("900\n", encoding="utf-8")
 
-    assert tracker.observe(1).reorder_needed_packets == 0
-    gap = tracker.observe(3)
-    assert gap.reorder_needed_packets == 1
-    assert tracker.pending_missing_by_path(["path-a", "path-b"]) == {"path-a": 0, "path-b": 1}
+    assert detect_interface_mtu("eth-test", sys_class_net=tmp_path) == 900
 
-    late = tracker.observe(2)
-    assert late.out_of_order is True
-    assert tracker.pending_missing_by_path(["path-a", "path-b"]) == {"path-a": 0, "path-b": 0}
-    assert tracker.out_of_order_packets == 1
-
-
-def test_lab_sequence_tracker_handles_u64_wraparound() -> None:
-    from gatherlink.lab.runtime import _SEQUENCE_SPACE, _LabSequenceTracker
-
-    tracker = _LabSequenceTracker()
-
-    assert tracker.observe(_SEQUENCE_SPACE - 1).reorder_needed_packets == 0
-    assert tracker.observe(1).reorder_needed_packets == 1
-    assert tracker.pending_missing_by_path(["path-a", "path-b"]) == {"path-a": 0, "path-b": 1}
-
-    late = tracker.observe(0)
-    assert late.out_of_order is True
-    assert tracker.pending_missing_by_path(["path-a", "path-b"]) == {"path-a": 0, "path-b": 0}
+    observation = observe_path_mtu("missing-test", 1200)
+    assert observation.frame_mtu == 1200
+    assert observation.payload_mtu == 1162

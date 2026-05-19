@@ -13,6 +13,7 @@ from gatherlink.shared.models import GatherlinkBaseModel
 
 LabScenarioKind = Literal[
     "local-dual-path",
+    "local-multi-path",
     "ipv6-dual-path",
     "path-failure",
     "raw-udp-blocked-wss",
@@ -250,7 +251,7 @@ def _future_feature_steps(config: LabScenarioConfig, *, first_order: int) -> lis
                 details={"feature": feature},
             )
         )
-    if config.scenario != "local-dual-path":
+    if config.scenario not in {"local-dual-path", "local-multi-path"}:
         steps.append(
             LabPlanStep(
                 order=first_order + len(config.future_features),

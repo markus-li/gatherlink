@@ -229,14 +229,27 @@ The lab exposes this as named network modes:
 ```bash
 gatherlink lab apply-network-mode configs/lab/local-dual-path.json normal-saturated
 gatherlink lab apply-network-mode configs/lab/local-dual-path.json forced-drop
+gatherlink lab apply-network-mode configs/lab/local-dual-path.json latency-jitter-skew
 gatherlink lab apply-network-mode configs/lab/local-dual-path.json clean-50mbit
 ```
 
 `normal-saturated` behaves like a normal saturated link: excess traffic may
 queue and arrive later as latency, out-of-order delivery, or reorder pressure
 rather than immediately dropping. `forced-drop` uses the same rates with small
-netem queue limits so stress tests show drop counters quickly. The equivalent
-ad-hoc commands are:
+netem queue limits so stress tests show drop counters quickly.
+`latency-jitter-skew` keeps both paths up but makes path-b much slower and
+jittery so normal traffic can expose out-of-order and reorder behavior.
+
+Bandwidth can also wander while a separate terminal sends traffic:
+
+```bash
+gatherlink lab cycle-network-modes configs/lab/local-dual-path.json \
+  --modes wander-low,wander-mid,wander-high,wander-mid \
+  --interval 15 \
+  --cycles 2
+```
+
+The equivalent ad-hoc commands for the forced-drop mode are:
 
 ```bash
 gatherlink lab shape configs/lab/local-dual-path.json path-a --rate 3.2mbit --limit 32 --side both

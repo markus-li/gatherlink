@@ -9,15 +9,74 @@ use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
-use gatherlink_protocol::ids::PathId;
+use gatherlink_protocol::ids::{is_reserved_service_id, PathId, ServiceId};
+
+/// Per-service fanout primitive selected by Python and executed by Rust.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceSchedulerConfig {
+    fanout: u16,
+    fanout_below_bytes: usize,
+}
+
+impl ServiceSchedulerConfig {
+    /// Normal one-path service scheduling.
+    pub const fn normal() -> Self {
+        Self {
+            fanout: 1,
+            fanout_below_bytes: 0,
+        }
+    }
+
+    /// Build a service scheduler primitive from Python-compiled values.
+    ///
+    /// `fanout == 0` means every eligible path. `fanout_below_bytes == 0`
+    /// means the fanout applies to every payload. Otherwise, fanout applies
+    /// only to payloads whose size is at or below the threshold; larger payloads
+    /// fall back to one normally scheduled path.
+    pub const fn new(fanout: u16, fanout_below_bytes: usize) -> Self {
+        Self {
+            fanout,
+            fanout_below_bytes,
+        }
+    }
+
+    /// Requested fanout count. Zero means every eligible path.
+    pub const fn fanout(&self) -> u16 {
+        self.fanout
+    }
+
+    /// Payload threshold for fanout, or zero when fanout always applies.
+    pub const fn fanout_below_bytes(&self) -> usize {
+        self.fanout_below_bytes
+    }
+
+    /// Return the fanout Rust should execute for a payload of this size.
+    pub const fn effective_fanout(&self, payload_len: usize) -> u16 {
+        if self.fanout_below_bytes == 0 || payload_len <= self.fanout_below_bytes {
+            self.fanout
+        } else {
+            1
+        }
+    }
+}
+
+/// How a remote payload should be emitted on the local app-facing side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceReturnMode {
+    Fixed,
+    LearnedSingleSource,
+}
 
 /// UDP service configuration compiled by Python before it reaches Rust.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UdpServiceConfig {
+    service_id: ServiceId,
     name: String,
     listen: Option<SocketAddr>,
     target: SocketAddr,
     priority: u16,
+    return_mode: ServiceReturnMode,
+    scheduler: ServiceSchedulerConfig,
 }
 
 impl UdpServiceConfig {
@@ -27,7 +86,22 @@ impl UdpServiceConfig {
         listen: Option<SocketAddr>,
         target: SocketAddr,
     ) -> Result<Self, UdpServiceError> {
-        Self::new_with_priority(name, listen, target, 100)
+        Self::new_with_service_id(0, name, listen, target)
+    }
+
+    /// Create a UDP service config with an explicit user/application service id.
+    ///
+    /// Service id `0` means "assign later" and is accepted only before the
+    /// runtime config finalizes services. Explicit ids must live in the
+    /// user/application range; Gatherlink-owned ids are reserved for control,
+    /// time sync, diagnostics, and future internal services.
+    pub fn new_with_service_id(
+        service_id: ServiceId,
+        name: impl Into<String>,
+        listen: Option<SocketAddr>,
+        target: SocketAddr,
+    ) -> Result<Self, UdpServiceError> {
+        Self::new_with_priority_and_service_id(service_id, name, listen, target, 100)
     }
 
     /// Create a UDP service config with compiled service priority.
@@ -37,20 +111,110 @@ impl UdpServiceConfig {
         target: SocketAddr,
         priority: u16,
     ) -> Result<Self, UdpServiceError> {
+        Self::new_with_priority_and_service_id(0, name, listen, target, priority)
+    }
+
+    /// Create a UDP service config with explicit id and compiled service priority.
+    pub fn new_with_priority_and_service_id(
+        service_id: ServiceId,
+        name: impl Into<String>,
+        listen: Option<SocketAddr>,
+        target: SocketAddr,
+        priority: u16,
+    ) -> Result<Self, UdpServiceError> {
+        Self::new_with_return_mode_and_service_id(service_id, name, listen, target, priority, ServiceReturnMode::Fixed)
+    }
+
+    /// Create a UDP service config with compiled priority and return behavior.
+    pub fn new_with_return_mode(
+        name: impl Into<String>,
+        listen: Option<SocketAddr>,
+        target: SocketAddr,
+        priority: u16,
+        return_mode: ServiceReturnMode,
+    ) -> Result<Self, UdpServiceError> {
+        Self::new_with_scheduler(
+            0,
+            name,
+            listen,
+            target,
+            priority,
+            return_mode,
+            ServiceSchedulerConfig::normal(),
+        )
+    }
+
+    /// Create a UDP service config with compiled id, priority, and return behavior.
+    pub fn new_with_return_mode_and_service_id(
+        service_id: ServiceId,
+        name: impl Into<String>,
+        listen: Option<SocketAddr>,
+        target: SocketAddr,
+        priority: u16,
+        return_mode: ServiceReturnMode,
+    ) -> Result<Self, UdpServiceError> {
+        Self::new_with_scheduler(
+            service_id,
+            name,
+            listen,
+            target,
+            priority,
+            return_mode,
+            ServiceSchedulerConfig::normal(),
+        )
+    }
+
+    /// Create a UDP service config with every Rust-executed primitive explicit.
+    pub fn new_with_scheduler(
+        service_id: ServiceId,
+        name: impl Into<String>,
+        listen: Option<SocketAddr>,
+        target: SocketAddr,
+        priority: u16,
+        return_mode: ServiceReturnMode,
+        scheduler: ServiceSchedulerConfig,
+    ) -> Result<Self, UdpServiceError> {
         let name = name.into();
         if name.trim().is_empty() {
             return Err(UdpServiceError::EmptyServiceName);
+        }
+        if service_id != 0 && is_reserved_service_id(service_id) {
+            return Err(UdpServiceError::ReservedServiceId {
+                service: name,
+                service_id,
+            });
         }
         if priority == 0 {
             return Err(UdpServiceError::ServicePriorityTooSmall { service: name });
         }
 
         Ok(Self {
+            service_id,
             name,
             listen,
             target,
             priority,
+            return_mode,
+            scheduler,
         })
+    }
+
+    /// Compact wire service id.
+    pub fn service_id(&self) -> ServiceId {
+        self.service_id
+    }
+
+    /// Return a copy with the runtime-assigned service id.
+    pub(crate) fn with_assigned_service_id(&self, service_id: ServiceId) -> Result<Self, UdpServiceError> {
+        Self::new_with_scheduler(
+            service_id,
+            self.name.clone(),
+            self.listen,
+            self.target,
+            self.priority,
+            self.return_mode,
+            self.scheduler,
+        )
     }
 
     /// Stable service name from the runtime config.
@@ -71,6 +235,16 @@ impl UdpServiceConfig {
     /// Compiled service priority. Python owns how this affects future scheduling.
     pub fn priority(&self) -> u16 {
         self.priority
+    }
+
+    /// Return behavior selected by Python config.
+    pub fn return_mode(&self) -> ServiceReturnMode {
+        self.return_mode
+    }
+
+    /// Service fanout primitive selected by Python.
+    pub fn scheduler(&self) -> ServiceSchedulerConfig {
+        self.scheduler
     }
 }
 
@@ -157,8 +331,13 @@ impl UserlandUdpService {
 
     /// Emit one UDP datagram to this service's configured target.
     pub fn emit_to_target(&self, payload: &[u8]) -> Result<usize, UdpServiceError> {
+        self.emit_to(payload, self.config.target())
+    }
+
+    /// Emit one UDP datagram to a caller-selected app-facing target.
+    pub fn emit_to(&self, payload: &[u8], target: SocketAddr) -> Result<usize, UdpServiceError> {
         self.socket
-            .send_to(payload, self.config.target())
+            .send_to(payload, target)
             .map_err(UdpServiceError::SendFailed)
     }
 
@@ -180,8 +359,20 @@ pub enum UdpServiceError {
     MissingListenAddress,
     DuplicateServiceName(String),
     DuplicateListenAddress(SocketAddr),
+    DuplicateServiceId(ServiceId),
+    ReservedServiceId {
+        service: String,
+        service_id: ServiceId,
+    },
+    TooManyServices {
+        count: usize,
+        max: usize,
+    },
     DuplicatePathId(PathId),
     MissingPath,
+    MissingPathTransport {
+        path_id: PathId,
+    },
     PathMtuTooSmall {
         path_id: PathId,
         mtu: usize,
@@ -216,8 +407,19 @@ impl fmt::Display for UdpServiceError {
             Self::MissingListenAddress => write!(formatter, "service requires a listen address"),
             Self::DuplicateServiceName(name) => write!(formatter, "duplicate service name: {name}"),
             Self::DuplicateListenAddress(addr) => write!(formatter, "duplicate UDP listen address: {addr}"),
+            Self::DuplicateServiceId(service_id) => write!(formatter, "duplicate service id: {service_id}"),
+            Self::ReservedServiceId { service, service_id } => {
+                write!(formatter, "service {service} uses reserved Gatherlink service id: {service_id}")
+            }
+            Self::TooManyServices { count, max } => {
+                write!(formatter, "too many UDP services: {count} configured, maximum user services is {max}")
+            }
             Self::DuplicatePathId(path_id) => write!(formatter, "duplicate path id: {path_id}"),
             Self::MissingPath => write!(formatter, "runtime config requires at least one path"),
+            Self::MissingPathTransport { path_id } => write!(
+                formatter,
+                "path {path_id} has no bound transport socket for encoded frame delivery"
+            ),
             Self::PathMtuTooSmall { path_id, mtu } => {
                 write!(formatter, "path {path_id} MTU {mtu} is too small for Gatherlink framing")
             }

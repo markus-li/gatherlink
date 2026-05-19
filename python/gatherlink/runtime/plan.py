@@ -57,8 +57,11 @@ def _plan_service_steps(config: RuntimeConfig, *, first_order: int) -> list[Runt
                     "listen": service.listen,
                     "target": service.target,
                     "protocol": service.protocol,
+                    "service_id": service.service_id,
+                    "service_id_explicit": service.service_id_explicit,
                     "priority": service.priority,
                     "priority_value": service.priority_value,
+                    "return_mode": service.return_mode,
                 },
             )
         )
@@ -68,7 +71,7 @@ def _plan_service_steps(config: RuntimeConfig, *, first_order: int) -> list[Runt
 
 def build_runtime_plan(config: RuntimeConfig) -> RuntimePlan:
     """Build the core MVP startup plan without helper or privileged capabilities."""
-    warnings = _runtime_warnings(config)
+    warnings = runtime_warnings(config)
     steps = [
         RuntimePlanStep(
             order=10,
@@ -108,11 +111,21 @@ def build_runtime_plan(config: RuntimeConfig) -> RuntimePlan:
     )
 
 
-def _runtime_warnings(config: RuntimeConfig) -> list[str]:
+def runtime_warnings(config: RuntimeConfig) -> list[str]:
     """Return Python-owned operator warnings for runtime state."""
+    warnings: list[str] = []
     if config.security.mode == "none":
-        return [
-            "WARNING: security.mode=none; traffic is unauthenticated and unencrypted.",
-            "WARNING: use only in local labs or controlled debugging.",
-        ]
-    return []
+        warnings.extend(
+            [
+                "WARNING: security.mode=none; traffic is unauthenticated and unencrypted.",
+                "WARNING: use only in local labs or controlled debugging.",
+            ]
+        )
+    for service in config.services:
+        if service.service_id_explicit:
+            warnings.append(
+                "WARNING: explicit service_id is not recommended; "
+                f"service={service.name} service_id={service.service_id}. "
+                "Prefer automatic service ids unless coordinating a deliberate protocol-level mapping."
+            )
+    return warnings

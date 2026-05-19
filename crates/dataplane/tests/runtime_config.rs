@@ -31,6 +31,28 @@ fn rejects_duplicate_listen_addresses() {
 }
 
 #[test]
+fn assigns_user_service_ids_without_colliding_with_explicit_ids() {
+    let target: SocketAddr = "127.0.0.1:51820".parse().unwrap();
+    let explicit = UdpServiceConfig::new_with_service_id(257, "explicit", None, target).unwrap();
+    let automatic = UdpServiceConfig::new("auto", None, target).unwrap();
+
+    let config = CoreRuntimeConfig::new(vec![explicit, automatic]).unwrap();
+
+    assert_eq!(config.services()[0].service_id(), 257);
+    assert_eq!(config.services()[1].service_id(), 256);
+}
+
+#[test]
+fn rejects_reserved_explicit_service_ids() {
+    let target: SocketAddr = "127.0.0.1:51820".parse().unwrap();
+
+    let err =
+        UdpServiceConfig::new_with_service_id(7, "reserved", Some("127.0.0.1:0".parse().unwrap()), target).unwrap_err();
+
+    assert!(matches!(err, UdpServiceError::ReservedServiceId { service_id: 7, .. }));
+}
+
+#[test]
 fn rejects_duplicate_path_ids() {
     let service = UdpServiceConfig::new(
         "udp-main",

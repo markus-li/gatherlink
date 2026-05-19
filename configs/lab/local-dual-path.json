@@ -148,6 +148,92 @@
         }
       ]
     },
+    "latency-jitter-skew": {
+      "description": "Scheduler pressure behavior: keep both paths usable but make path-b slower and jittery so out-of-order and reorder pressure are visible.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "3.2mbit",
+            "delay": "10ms",
+            "jitter": "2ms"
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "1.7mbit",
+            "delay": "90ms",
+            "jitter": "25ms"
+          }
+        }
+      ]
+    },
+    "wander-low": {
+      "description": "Low-capacity step for cycling bandwidth while traffic is running.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "2.2mbit",
+            "limit": 32
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "1.2mbit",
+            "limit": 16
+          }
+        }
+      ]
+    },
+    "wander-mid": {
+      "description": "Middle-capacity step for cycling bandwidth while traffic is running.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "3.4mbit",
+            "limit": 32
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "1.9mbit",
+            "limit": 16
+          }
+        }
+      ]
+    },
+    "wander-high": {
+      "description": "High-capacity step for cycling bandwidth while traffic is running.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "5mbit",
+            "limit": 64
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "3mbit",
+            "limit": 32
+          }
+        }
+      ]
+    },
     "clean-50mbit": {
       "description": "Restore the default clean lab rates with ordinary qdisc queueing.",
       "targets": [

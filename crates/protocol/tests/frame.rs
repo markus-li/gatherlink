@@ -107,7 +107,7 @@ fn rejects_reserved_flags_for_v1() {
 fn rejects_headers_smaller_than_v1_base_header() {
     let frame = Frame::data(1, 1, 1, 0, 1, b"x".to_vec()).unwrap();
     let mut encoded = frame.encode().unwrap();
-    encoded[2..4].copy_from_slice(&43_u16.to_be_bytes());
+    encoded[2..4].copy_from_slice(&(V1_HEADER_LEN as u16 - 1).to_be_bytes());
 
     let error = Frame::decode(&encoded).unwrap_err();
 
@@ -115,8 +115,9 @@ fn rejects_headers_smaller_than_v1_base_header() {
         error,
         ProtocolError::HeaderLengthMismatch {
             expected: V1_HEADER_LEN,
-            actual: 43,
+            actual,
         }
+        if actual == V1_HEADER_LEN - 1
     ));
 }
 

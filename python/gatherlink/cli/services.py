@@ -342,6 +342,68 @@ def _aggregate_rows_for_service(
             path_row["path"] = str(path_name)
             path_row["control_metadata"] = control_metadata if isinstance(control_metadata, dict) else {}
             rows.append(path_row)
+    remote_status = status.get("remote_status")
+    if isinstance(remote_status, dict):
+        rows.extend(_remote_status_rows(service, remote_status, previous=previous, now=now))
+    return rows
+
+
+def _remote_status_rows(
+    service: ServiceRecord,
+    remote_status: dict[str, object],
+    *,
+    previous: dict[str, tuple[float, int, int]],
+    now: float,
+) -> list[dict[str, object]]:
+    """Render remote IPC/status snapshots that another service copied over Gatherlink."""
+    rows: list[dict[str, object]] = []
+    for remote_name, envelope in remote_status.items():
+        if not isinstance(envelope, dict):
+            continue
+        status = envelope.get("status")
+        if not isinstance(status, dict):
+            continue
+        row_key = f"{service.name}::remote::{remote_name}"
+        row = _row_from_status(
+            row_key=row_key,
+            name=f"  remote:{remote_name}",
+            state="remote",
+            status=status,
+            previous=previous.get(row_key),
+            now=now,
+            extra=(
+                f"via={service.name} req={envelope.get('request_id', '-')} "
+                f"path={envelope.get('source_path_id', '-')} rx={envelope.get('received_at', '-')}"
+            ),
+        )
+        row["row_type"] = "service"
+        row["parent"] = service.name
+        row["path"] = ""
+        row["control_metadata"] = (
+            status.get("control_metadata") if isinstance(status.get("control_metadata"), dict) else {}
+        )
+        rows.append(row)
+        path_stats = status.get("path_stats")
+        if not isinstance(path_stats, dict):
+            continue
+        for path_name, path_status in path_stats.items():
+            if not isinstance(path_status, dict):
+                continue
+            path_key = f"{row_key}::{path_name}"
+            path_row = _row_from_status(
+                row_key=path_key,
+                name=f"    path:{path_name}",
+                state="path",
+                status=path_status,
+                previous=previous.get(path_key),
+                now=now,
+                extra=f"parent=remote:{remote_name}",
+            )
+            path_row["row_type"] = "path"
+            path_row["parent"] = f"remote:{remote_name}"
+            path_row["path"] = str(path_name)
+            path_row["control_metadata"] = row["control_metadata"]
+            rows.append(path_row)
     return rows
 
 
@@ -385,6 +447,10 @@ def _row_from_status(
         "rx_bytes": rx_bytes,
         "rx_speed_bytes_per_second": rx_speed_bytes_per_second,
         "missed": status.get("missed_packets", "not_reported"),
+        "expected_duplicate_packets": status.get("expected_duplicate_packets", "not_reported"),
+        "duplicate_packets": status.get("duplicate_packets", "not_reported"),
+        "send_failed_packets": status.get("send_failed_packets", "not_reported"),
+        "fanout_send_failed_packets": status.get("fanout_send_failed_packets", "not_reported"),
         "reordered": status.get("reordered_packets", "not_reported"),
         "reorder_needed": status.get("packets_needing_reorder", "not_reported"),
         "row_type": "service",
@@ -417,6 +483,10 @@ def _render_aggregate_rows(
         "rxB",
         "rx/s",
         "miss",
+        "xdup",
+        "dup",
+        "fail",
+        "ffail",
         "ooo",
         "reord",
         "context",
@@ -442,6 +512,10 @@ def _render_aggregate_rows(
                 decimal_units=decimal_units,
             ),
             _compact_counter(row["missed"]),
+            _compact_counter(row["expected_duplicate_packets"]),
+            _compact_counter(row["duplicate_packets"]),
+            _compact_counter(row["send_failed_packets"]),
+            _compact_counter(row["fanout_send_failed_packets"]),
             _compact_counter(row["reordered"]),
             _compact_counter(row["reorder_needed"]),
             _truncate(str(row["extra"]), CONTEXT_WIDTH),
@@ -479,11 +553,8 @@ def _render_service_control_rows(rows: list[dict[str, object]]) -> list[str]:
     service_rows = [row for row in rows if row.get("row_type") == "service"]
     if not service_rows:
         return []
-    headers = ["service", "sys", "gl", "ntp", "ctx", "crx", "clock", "paths", "lat", "last"]
-    rendered_rows = [
-        _service_control_cells(row)
-        for row in service_rows
-    ]
+    headers = ["service", "sys", "gl", "ntp", "ctx", "crx", "clock", "paths", "svc", "pol", "err", "off", "lat", "last"]
+    rendered_rows = [_service_control_cells(row) for row in service_rows]
     return _render_named_table("service time/control", headers, rendered_rows)
 
 
@@ -499,6 +570,10 @@ def _service_control_cells(row: dict[str, object]) -> list[str]:
         _control_counter_summary(metadata.get("received")),
         _truncate(_internal_clock_context(metadata.get("internal_clock")) or "-", 36),
         str(metadata.get("path_metadata_count", 0) or 0),
+        str(metadata.get("service_metadata_count", 0) or 0),
+        str(metadata.get("service_scheduler_policy_count", 0) or 0),
+        str(metadata.get("service_endpoint_mismatch_count", 0) or 0),
+        str(metadata.get("service_disable_count", 0) or 0),
         str(metadata.get("path_latency_count", 0) or 0),
         _control_last_time(metadata),
     ]
@@ -508,11 +583,8 @@ def _render_path_control_rows(rows: list[dict[str, object]]) -> list[str]:
     path_rows = [row for row in rows if row.get("row_type") == "path" and row.get("control_metadata")]
     if not path_rows:
         return []
-    headers = ["service", "path", "ctx", "crx", "cap", "lat"]
-    rendered_rows = [
-        _path_control_cells(row)
-        for row in path_rows
-    ]
+    headers = ["service", "path", "ctx", "crx", "cap", "mtu", "lat"]
+    rendered_rows = [_path_control_cells(row) for row in path_rows]
     return _render_named_table("path control", headers, rendered_rows)
 
 
@@ -527,6 +599,7 @@ def _path_control_cells(row: dict[str, object]) -> list[str]:
         tx,
         rx,
         _path_capacity_only_context(metadata, path_name),
+        _path_mtu_context(metadata, path_name),
         _path_latency_context(metadata, path_name),
     ]
 
@@ -630,6 +703,10 @@ def _control_metadata_context(control_metadata: object) -> str:
     sent = control_metadata.get("sent")
     received = control_metadata.get("received")
     path_metadata_count = int(control_metadata.get("path_metadata_count", 0) or 0)
+    service_metadata_count = int(control_metadata.get("service_metadata_count", 0) or 0)
+    service_scheduler_policy_count = int(control_metadata.get("service_scheduler_policy_count", 0) or 0)
+    service_endpoint_mismatch_count = int(control_metadata.get("service_endpoint_mismatch_count", 0) or 0)
+    service_disable_count = int(control_metadata.get("service_disable_count", 0) or 0)
     path_latency_count = int(control_metadata.get("path_latency_count", 0) or 0)
     path_control_count = int(control_metadata.get("path_control_count", 0) or 0)
     parts = []
@@ -646,6 +723,14 @@ def _control_metadata_context(control_metadata: object) -> str:
         parts.append(clock)
     if path_metadata_count:
         parts.append(f"paths={path_metadata_count}")
+    if service_metadata_count:
+        parts.append(f"svc={service_metadata_count}")
+    if service_scheduler_policy_count:
+        parts.append(f"pol={service_scheduler_policy_count}")
+    if service_endpoint_mismatch_count:
+        parts.append(f"svc_err={service_endpoint_mismatch_count}")
+    if service_disable_count:
+        parts.append(f"svc_off={service_disable_count}")
     if path_control_count:
         parts.append(f"pctrl={path_control_count}")
     if path_latency_count:
@@ -826,6 +911,42 @@ def _path_capacity_only_context(control_metadata: dict[str, object], path_name: 
     return f"tx={tx} rx={rx}"
 
 
+def _path_mtu_context(control_metadata: dict[str, object], path_name: str) -> str:
+    path_mtu = control_metadata.get("path_mtu")
+    if not isinstance(path_mtu, dict):
+        return "-"
+    mtu = path_mtu.get(path_name)
+    if not isinstance(mtu, dict):
+        return "-"
+    tx = _mtu_direction_context(mtu, "tx")
+    rx = _mtu_direction_context(mtu, "rx")
+    status = mtu.get("status")
+    parts = []
+    if tx:
+        parts.append(f"tx={tx}")
+    if rx:
+        parts.append(f"rx={rx}")
+    if status and status != "ok":
+        parts.append(str(status))
+    return " ".join(parts) if parts else "-"
+
+
+def _mtu_direction_context(mtu: dict[str, object], direction: str) -> str:
+    frame_mtu = mtu.get(f"{direction}_frame_mtu")
+    payload_mtu = mtu.get(f"{direction}_payload_mtu")
+    link_mtu = mtu.get(f"{direction}_link_mtu")
+    if direction == "tx":
+        frame_mtu = frame_mtu if frame_mtu is not None else mtu.get("frame_mtu")
+        payload_mtu = payload_mtu if payload_mtu is not None else mtu.get("payload_mtu")
+        link_mtu = link_mtu if link_mtu is not None else mtu.get("link_mtu")
+    if frame_mtu is None and payload_mtu is None and link_mtu is None:
+        return ""
+    frame_text = str(frame_mtu) if frame_mtu is not None else "-"
+    payload_text = str(payload_mtu) if payload_mtu is not None else "-"
+    link_text = str(link_mtu) if link_mtu is not None else "-"
+    return f"frm:{frame_text}/pay:{payload_text}/lnk:{link_text}"
+
+
 def _path_latency_context(control_metadata: dict[str, object], path_name: str) -> str:
     latency = _path_latency_for(control_metadata, path_name)
     if latency is None:
@@ -953,6 +1074,10 @@ def _aggregate_legend() -> list[str]:
         "  txB/rxB  payload bytes transmitted/received; press m to toggle binary/decimal human units",
         "  tx/s rx/s sampled rates; b toggles bit/s vs byte/s, m toggles Kibit/Mibit vs Kbit/Mbit",
         "  miss     missed packets; lab path rows include qdisc drops and receiver missing-sequence facts",
+        "  xdup     expected fanout duplicates suppressed before application UDP emit",
+        "  dup      unexpected duplicate user-service frames suppressed before application UDP emit",
+        "  fail     path send failures observed by the Rust UDP transport",
+        "  ffail    fanout-copy send failures; useful when an expected duplicate copy cannot be sent",
         "  ooo      out-of-order packets observed by the receiver",
         "  reord    packets that required reorder buffering",
         "  context  service-specific context such as target, listen, latest payload, or systemd unit",
@@ -962,7 +1087,14 @@ def _aggregate_legend() -> list[str]:
         "  ctx/crx  control metaband frames/bytes transmitted/received; aggregate in service table, per path below",
         "  clock    internal monotonic clock role, offset, mean offset, RTT, and sample count",
         "  paths    number of path-id/name mappings learned through control metadata",
+        "  svc      number of service-id/name mappings learned through control metadata; endpoints stay in config",
+        "  pol      number of peer service scheduler policies learned for Python-owned receive expectations",
+        "  err      endpoint assertion mismatches that stopped traffic for a service",
+        "  svc_err  endpoint assertion mismatches that stopped traffic for a service",
+        "  off      peer service-disable assertions currently advertised through control metadata",
+        "  svc_off  compact context summary of peer-disabled services",
         "  cap      directional path capacity metadata; tx/rx are from the row's local point of view",
+        "  mtu      directional path MTU; tx/rx each show frame, max payload, and link MTU from local view",
         "  lat      directional latency metadata; current/mean pairs use tx and rx local point of view",
         "  last     latest control send/receive activity time for that service",
     ]

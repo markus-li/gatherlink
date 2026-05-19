@@ -5,7 +5,7 @@
 //! missing sequence ranges, path metadata, and later config-change proposals.
 
 use crate::errors::ProtocolError;
-use crate::ids::{PathId, SequenceNumber};
+use crate::ids::{PathId, SequenceNumber, ServiceId, USER_SERVICE_ID_START};
 
 /// Current control metaband payload version.
 pub const CONTROL_PAYLOAD_VERSION: u8 = 1;
@@ -17,6 +17,11 @@ const TYPE_PATH_CAPACITY: u8 = 4;
 const TYPE_PATH_LATENCY: u8 = 5;
 const TYPE_INTERNAL_CLOCK_SYNC: u8 = 6;
 const TYPE_SINK_TIME: u8 = 7;
+const TYPE_SERVICE_METADATA: u8 = 8;
+const TYPE_SERVICE_ENDPOINT_ASSERTION: u8 = 9;
+const TYPE_SERVICE_DISABLE: u8 = 10;
+const TYPE_PATH_MTU: u8 = 11;
+const TYPE_SERVICE_SCHEDULER_POLICY: u8 = 12;
 
 /// One control metaband message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,10 +36,20 @@ pub enum ControlMessage {
     PathCapacity(PathCapacity),
     /// Directional path latency estimate in microseconds for scheduler telemetry.
     PathLatency(PathLatency),
+    /// Local path MTU observation and compiled frame MTU.
+    PathMtu(PathMtu),
     /// NTP-style peer-relative internal clock exchange.
     InternalClockSync(InternalClockSync),
     /// Sink-authoritative wall-clock and NTP status for diagnostics and policy.
     SinkTime(SinkTime),
+    /// Friendly service metadata so peers and monitors can map compact service ids to names.
+    ServiceMetadata(ServiceMetadata),
+    /// Peer assertion for endpoint verification only; receivers must never apply it as config.
+    ServiceEndpointAssertion(ServiceEndpointAssertion),
+    /// Peer request/assertion to stop traffic for one service until config or policy changes.
+    ServiceDisable(ServiceDisable),
+    /// Python-owned service scheduler policy FYI so the peer can install expected receive facts.
+    ServiceSchedulerPolicy(ServiceSchedulerPolicy),
 }
 
 /// Sender-side path assignment report for a contiguous global sequence range.
@@ -97,6 +112,97 @@ impl PathMetadata {
     }
 }
 
+/// Optional service id to friendly name metadata.
+///
+/// This deliberately carries only a compact service id and display/config name.
+/// Service targets, listen addresses, and return endpoints are explicit config
+/// and must not be sent through this telemetry message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceMetadata {
+    pub service_id: ServiceId,
+    pub name: String,
+}
+
+impl ServiceMetadata {
+    /// Build service metadata for diagnostics and peer correlation.
+    pub fn new(service_id: ServiceId, name: impl Into<String>) -> Result<Self, ProtocolError> {
+        let name = name.into();
+        if service_id < USER_SERVICE_ID_START || name.is_empty() || name.len() > u8::MAX as usize {
+            return Err(ProtocolError::MalformedControl);
+        }
+        Ok(Self { service_id, name })
+    }
+}
+
+/// Peer assertion that a service endpoint matches explicit local config.
+///
+/// This is a safety check, not a config channel. A receiver may stop traffic for
+/// the service if this value disagrees with local config, but must not rewrite
+/// its target endpoint from this metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceEndpointAssertion {
+    pub service_id: ServiceId,
+    pub target: String,
+}
+
+impl ServiceEndpointAssertion {
+    /// Build one endpoint assertion for service-level verification.
+    pub fn new(service_id: ServiceId, target: impl Into<String>) -> Result<Self, ProtocolError> {
+        let target = target.into();
+        if service_id < USER_SERVICE_ID_START || target.is_empty() || target.len() > u8::MAX as usize {
+            return Err(ProtocolError::MalformedControl);
+        }
+        Ok(Self { service_id, target })
+    }
+}
+
+/// Peer assertion that a service must stop carrying traffic.
+///
+/// This is intentionally generic rather than sink-only. Endpoint verification,
+/// remote policy, helper lifecycle, and later authenticated config decisions can
+/// all use the same loud stop path without changing service config implicitly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServiceDisable {
+    pub service_id: ServiceId,
+    pub reason: String,
+}
+
+impl ServiceDisable {
+    /// Build one service disable assertion.
+    pub fn new(service_id: ServiceId, reason: impl Into<String>) -> Result<Self, ProtocolError> {
+        let reason = reason.into();
+        if service_id < USER_SERVICE_ID_START || reason.is_empty() || reason.len() > u8::MAX as usize {
+            return Err(ProtocolError::MalformedControl);
+        }
+        Ok(Self { service_id, reason })
+    }
+}
+
+/// Python-owned service scheduler policy advertisement.
+///
+/// This is a policy fact for the peer Python control plane. Rust should only use
+/// this after Python chooses to compile it into local receive expectations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceSchedulerPolicy {
+    pub service_id: ServiceId,
+    pub fanout: u16,
+    pub fanout_below_bytes: u32,
+}
+
+impl ServiceSchedulerPolicy {
+    /// Build one service scheduler policy advertisement.
+    pub fn new(service_id: ServiceId, fanout: u16, fanout_below_bytes: u32) -> Result<Self, ProtocolError> {
+        if service_id < USER_SERVICE_ID_START {
+            return Err(ProtocolError::MalformedControl);
+        }
+        Ok(Self {
+            service_id,
+            fanout,
+            fanout_below_bytes,
+        })
+    }
+}
+
 /// Optional directional max-speed estimate for one path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PathCapacity {
@@ -150,6 +256,46 @@ impl PathLatency {
             tx_mean_us,
             rx_current_us,
             rx_mean_us,
+        })
+    }
+}
+
+/// Optional directional path MTU observation.
+///
+/// The TX values describe what the sender can put onto this carrier path.
+/// The RX values are optional peer-view facts the sender has already learned.
+/// Receivers flip those directions into their own local view when recording
+/// telemetry, matching capacity and latency control metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathMtu {
+    pub path_id: PathId,
+    pub tx_link_mtu: Option<u16>,
+    pub tx_frame_mtu: Option<u16>,
+    pub rx_link_mtu: Option<u16>,
+    pub rx_frame_mtu: Option<u16>,
+}
+
+impl PathMtu {
+    /// Build one directional MTU observation for a path.
+    pub fn new(
+        path_id: PathId,
+        tx_link_mtu: Option<u16>,
+        tx_frame_mtu: Option<u16>,
+        rx_link_mtu: Option<u16>,
+        rx_frame_mtu: Option<u16>,
+    ) -> Result<Self, ProtocolError> {
+        if !valid_mtu_pair(tx_link_mtu, tx_frame_mtu)
+            || !valid_mtu_pair(rx_link_mtu, rx_frame_mtu)
+            || (tx_link_mtu.is_none() && rx_link_mtu.is_none())
+        {
+            return Err(ProtocolError::MalformedControl);
+        }
+        Ok(Self {
+            path_id,
+            tx_link_mtu,
+            tx_frame_mtu,
+            rx_link_mtu,
+            rx_frame_mtu,
         })
     }
 }
@@ -428,6 +574,15 @@ fn encode_message(message: &ControlMessage) -> Result<(u8, Vec<u8>), ProtocolErr
             value.extend_from_slice(&latency.rx_mean_us.unwrap_or(0).to_be_bytes());
             Ok((TYPE_PATH_LATENCY, value))
         }
+        ControlMessage::PathMtu(mtu) => {
+            let mut value = Vec::with_capacity(10);
+            value.extend_from_slice(&mtu.path_id.to_be_bytes());
+            value.extend_from_slice(&mtu.tx_link_mtu.unwrap_or(0).to_be_bytes());
+            value.extend_from_slice(&mtu.tx_frame_mtu.unwrap_or(0).to_be_bytes());
+            value.extend_from_slice(&mtu.rx_link_mtu.unwrap_or(0).to_be_bytes());
+            value.extend_from_slice(&mtu.rx_frame_mtu.unwrap_or(0).to_be_bytes());
+            Ok((TYPE_PATH_MTU, value))
+        }
         ControlMessage::InternalClockSync(sync) => {
             let mut value = Vec::with_capacity(35);
             value.extend_from_slice(&sync.exchange_id.to_be_bytes());
@@ -445,6 +600,34 @@ fn encode_message(message: &ControlMessage) -> Result<(u8, Vec<u8>), ProtocolErr
             value.extend_from_slice(&sink_time.sink_internal_us.to_be_bytes());
             value.push(sink_time.ntp_state.as_u8());
             Ok((TYPE_SINK_TIME, value))
+        }
+        ControlMessage::ServiceMetadata(metadata) => {
+            let mut value = Vec::with_capacity(3 + metadata.name.len());
+            value.extend_from_slice(&metadata.service_id.to_be_bytes());
+            value.push(metadata.name.len() as u8);
+            value.extend_from_slice(metadata.name.as_bytes());
+            Ok((TYPE_SERVICE_METADATA, value))
+        }
+        ControlMessage::ServiceEndpointAssertion(assertion) => {
+            let mut value = Vec::with_capacity(3 + assertion.target.len());
+            value.extend_from_slice(&assertion.service_id.to_be_bytes());
+            value.push(assertion.target.len() as u8);
+            value.extend_from_slice(assertion.target.as_bytes());
+            Ok((TYPE_SERVICE_ENDPOINT_ASSERTION, value))
+        }
+        ControlMessage::ServiceDisable(disable) => {
+            let mut value = Vec::with_capacity(3 + disable.reason.len());
+            value.extend_from_slice(&disable.service_id.to_be_bytes());
+            value.push(disable.reason.len() as u8);
+            value.extend_from_slice(disable.reason.as_bytes());
+            Ok((TYPE_SERVICE_DISABLE, value))
+        }
+        ControlMessage::ServiceSchedulerPolicy(policy) => {
+            let mut value = Vec::with_capacity(8);
+            value.extend_from_slice(&policy.service_id.to_be_bytes());
+            value.extend_from_slice(&policy.fanout.to_be_bytes());
+            value.extend_from_slice(&policy.fanout_below_bytes.to_be_bytes());
+            Ok((TYPE_SERVICE_SCHEDULER_POLICY, value))
         }
     }
 }
@@ -506,6 +689,18 @@ fn decode_message(message_type: u8, value: &[u8]) -> Result<ControlMessage, Prot
                 optional_u32(read_u32(value, 14)),
             )?))
         }
+        TYPE_PATH_MTU => {
+            if value.len() != 10 {
+                return Err(ProtocolError::MalformedControl);
+            }
+            Ok(ControlMessage::PathMtu(PathMtu::new(
+                read_u16(value, 0),
+                optional_u16(read_u16(value, 2)),
+                optional_u16(read_u16(value, 4)),
+                optional_u16(read_u16(value, 6)),
+                optional_u16(read_u16(value, 8)),
+            )?))
+        }
         TYPE_INTERNAL_CLOCK_SYNC => {
             if value.len() != 35 {
                 return Err(ProtocolError::MalformedControl);
@@ -530,6 +725,58 @@ fn decode_message(message_type: u8, value: &[u8]) -> Result<ControlMessage, Prot
                 NtpState::from_u8(value[18])?,
             )?))
         }
+        TYPE_SERVICE_METADATA => {
+            if value.len() < 3 {
+                return Err(ProtocolError::MalformedControl);
+            }
+            let name_len = usize::from(value[2]);
+            if value.len() != 3 + name_len {
+                return Err(ProtocolError::MalformedControl);
+            }
+            let name = std::str::from_utf8(&value[3..]).map_err(|_| ProtocolError::MalformedControl)?;
+            Ok(ControlMessage::ServiceMetadata(ServiceMetadata::new(
+                read_u16(value, 0),
+                name,
+            )?))
+        }
+        TYPE_SERVICE_ENDPOINT_ASSERTION => {
+            if value.len() < 3 {
+                return Err(ProtocolError::MalformedControl);
+            }
+            let target_len = usize::from(value[2]);
+            if value.len() != 3 + target_len {
+                return Err(ProtocolError::MalformedControl);
+            }
+            let target = std::str::from_utf8(&value[3..]).map_err(|_| ProtocolError::MalformedControl)?;
+            Ok(ControlMessage::ServiceEndpointAssertion(ServiceEndpointAssertion::new(
+                read_u16(value, 0),
+                target,
+            )?))
+        }
+        TYPE_SERVICE_DISABLE => {
+            if value.len() < 3 {
+                return Err(ProtocolError::MalformedControl);
+            }
+            let reason_len = usize::from(value[2]);
+            if value.len() != 3 + reason_len {
+                return Err(ProtocolError::MalformedControl);
+            }
+            let reason = std::str::from_utf8(&value[3..]).map_err(|_| ProtocolError::MalformedControl)?;
+            Ok(ControlMessage::ServiceDisable(ServiceDisable::new(
+                read_u16(value, 0),
+                reason,
+            )?))
+        }
+        TYPE_SERVICE_SCHEDULER_POLICY => {
+            if value.len() != 8 {
+                return Err(ProtocolError::MalformedControl);
+            }
+            Ok(ControlMessage::ServiceSchedulerPolicy(ServiceSchedulerPolicy::new(
+                read_u16(value, 0),
+                read_u16(value, 2),
+                read_u32(value, 4),
+            )?))
+        }
         _ => Err(ProtocolError::MalformedControl),
     }
 }
@@ -542,11 +789,27 @@ fn optional_u32(value: u32) -> Option<u32> {
     }
 }
 
+fn optional_u16(value: u16) -> Option<u16> {
+    if value == 0 {
+        None
+    } else {
+        Some(value)
+    }
+}
+
 fn optional_u64(value: u64) -> Option<u64> {
     if value == 0 {
         None
     } else {
         Some(value)
+    }
+}
+
+fn valid_mtu_pair(link_mtu: Option<u16>, frame_mtu: Option<u16>) -> bool {
+    match (link_mtu, frame_mtu) {
+        (None, None) => true,
+        (Some(link_mtu), Some(frame_mtu)) => frame_mtu > 0 && frame_mtu <= link_mtu,
+        _ => false,
     }
 }
 

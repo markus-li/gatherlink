@@ -77,6 +77,13 @@ Python compiles that label to a stable numeric runtime value. Priority belongs
 to configured Gatherlink services, not packet inspection, and is currently
 scaffolded for future multi-service fairness.
 
+Service scheduling fanout is represented as primitive runtime fields, not Rust
+policy names. `scheduler_fanout=1` is the normal one-path behavior,
+`scheduler_fanout=0` means every eligible path, and values above one duplicate
+over that many eligible paths. `scheduler_fanout_below_bytes=0` applies fanout
+to every payload; a nonzero value applies fanout only at or below that payload
+size, letting Python build policies such as `duplicate_small`.
+
 `config show --canonical` prints the validated user-facing config after schema
 version and format normalization. `config show --runtime` prints the explicit
 runtime contract from `python/gatherlink/config/runtime.py`; this is the boundary

@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from gatherlink.cli.main import app
 from gatherlink.config import detect_config_format, load_config_dict, supported_schema_versions, validate_config_file
+from gatherlink.config.models import GatherlinkConfig
 from typer.testing import CliRunner
 
 EXAMPLES = Path("configs/examples")
@@ -74,6 +76,40 @@ def test_wireguard_helper_must_reference_existing_service() -> None:
         assert any("wireguard helper service" in detail.message for detail in exc.details)
     else:
         raise AssertionError("expected invalid wireguard helper service")
+
+
+def test_service_listen_addresses_must_be_unique() -> None:
+    with pytest.raises(ValueError, match="service listen addresses must be unique"):
+        GatherlinkConfig(
+            schema_version=1,
+            role="client",
+            peer="remote",
+            services=[
+                {"name": "one", "listen": "127.0.0.1:55180", "target": "127.0.0.1:1"},
+                {"name": "two", "listen": "127.0.0.1:55180", "target": "127.0.0.1:2"},
+            ],
+        )
+
+
+def test_service_ids_must_be_user_range_and_unique() -> None:
+    with pytest.raises(ValueError, match="greater than or equal to 256"):
+        GatherlinkConfig(
+            schema_version=1,
+            role="client",
+            peer="remote",
+            services=[{"name": "one", "service_id": 7, "target": "127.0.0.1:1"}],
+        )
+
+    with pytest.raises(ValueError, match="service ids must be unique"):
+        GatherlinkConfig(
+            schema_version=1,
+            role="client",
+            peer="remote",
+            services=[
+                {"name": "one", "service_id": 256, "target": "127.0.0.1:1"},
+                {"name": "two", "service_id": 256, "target": "127.0.0.1:2"},
+            ],
+        )
 
 
 def test_config_detect_cli_prints_format() -> None:
@@ -150,6 +186,8 @@ def test_path_scheduler_hints_expand_into_runtime_scheduler() -> None:
         "weight": 3,
         "mtu": 1300,
     }
+    data["paths"][0]["transport_bind"] = "127.0.0.1:56001"
+    data["paths"][0]["transport_remote"] = "127.0.0.1:56002"
 
     runtime = expand_config(validate_config_dict(data))
 
@@ -157,6 +195,8 @@ def test_path_scheduler_hints_expand_into_runtime_scheduler() -> None:
     assert runtime.paths[0].scheduler.state == "drain"
     assert runtime.paths[0].scheduler.weight == 3
     assert runtime.paths[0].scheduler.mtu == 1300
+    assert runtime.paths[0].transport_bind == "127.0.0.1:56001"
+    assert runtime.paths[0].transport_remote == "127.0.0.1:56002"
     assert runtime.scheduler.paths[0] == runtime.paths[0].scheduler
 
 
@@ -171,3 +211,35 @@ def test_service_priority_expands_into_runtime_priority_value() -> None:
 
     assert runtime.services[0].priority == "high"
     assert runtime.services[0].priority_value == 200
+    assert runtime.services[0].service_id == 256
+
+
+def test_automatic_service_ids_skip_explicit_ids() -> None:
+    from gatherlink.config import expand_config
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        role="client",
+        peer="remote",
+        services=[
+            {"name": "auto-one", "target": "127.0.0.1:1"},
+            {"name": "explicit", "service_id": 257, "target": "127.0.0.1:2"},
+            {"name": "auto-two", "target": "127.0.0.1:3"},
+        ],
+    )
+
+    runtime = expand_config(config)
+
+    assert [service.service_id for service in runtime.services] == [256, 257, 258]
+
+
+def test_service_return_mode_expands_into_runtime_contract() -> None:
+    from gatherlink.config import expand_config
+    from gatherlink.config.validation import validate_config_dict
+
+    data = load_config_dict(EXAMPLES / "minimal-client.json")
+    data["services"][0]["return_mode"] = "learned-single-source"
+
+    runtime = expand_config(validate_config_dict(data))
+
+    assert runtime.services[0].return_mode == "learned-single-source"

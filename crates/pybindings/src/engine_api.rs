@@ -5,18 +5,17 @@
 //! tests, but packet processing stays in Rust.
 
 use gatherlink_dataplane::engine::CoreDataplane;
-use gatherlink_dataplane::metrics::{
-    ControlCounterSnapshot, ControlMetadataSnapshot, InternalClockSyncSnapshot, PathCapacitySnapshot,
-    PathControlSnapshot, PathLatencySnapshot, SinkTimeSnapshot,
-};
+use gatherlink_dataplane::metrics::{ControlCounterSnapshot, ControlMetadataSnapshot, PathControlSnapshot};
 use gatherlink_dataplane::runtime_config::CoreRuntimeConfig;
-use gatherlink_protocol::control::ControlPayload;
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-use crate::dto::{PyForwardOutcome, PyPathConfig, PyReapplyOutcome, PySchedulerConfig, PyUdpServiceConfig};
+use crate::dto::{
+    PyForwardOutcome, PyPathConfig, PyReapplyOutcome, PyRemoteDeliverOutcome, PyReservedServiceEvent,
+    PySchedulerConfig, PyUdpServiceConfig,
+};
 use crate::errors::{dataplane_error_to_py, udp_error_to_py};
+use gatherlink_dataplane::udp_service::ServiceSchedulerConfig;
 
 /// Python handle for the Rust core userland UDP dataplane.
 #[pyclass(name = "CoreDataplane")]
@@ -131,46 +130,82 @@ impl PyCoreDataplane {
             .map_err(dataplane_error_to_py)
     }
 
+    /// Forward queued datagrams for the named service without blocking on a quiet app socket.
+    pub fn forward_available_for_service_nonblocking(
+        &mut self,
+        name: &str,
+        max_datagrams: usize,
+    ) -> PyResult<Vec<PyForwardOutcome>> {
+        self.inner
+            .forward_available_for_service_nonblocking(name, max_datagrams)
+            .map(|outcomes| outcomes.into_iter().map(PyForwardOutcome::from).collect())
+            .map_err(dataplane_error_to_py)
+    }
+
+    /// Receive encoded path frames and emit decoded virtual UDP payloads.
+    pub fn receive_available_from_paths(&mut self, max_frames: usize) -> PyResult<Vec<PyRemoteDeliverOutcome>> {
+        self.inner
+            .receive_available_from_paths(max_frames)
+            .map(|outcomes| outcomes.into_iter().map(PyRemoteDeliverOutcome::from).collect())
+            .map_err(dataplane_error_to_py)
+    }
+
     /// Record a received remote data-frame observation in Rust-owned telemetry.
-    pub fn observe_received_data_frame(&mut self, service_id: u64, path_id: u16, sequence: u64, payload_len: usize) {
+    pub fn observe_received_data_frame(&mut self, service_id: u16, path_id: u16, sequence: u64, payload_len: usize) {
         self.inner
             .observe_received_data_frame(service_id, path_id, sequence, payload_len);
     }
 
-    /// Decode and record a received control metaband payload.
-    #[pyo3(signature = (payload, frame_bytes, path_id=None))]
-    pub fn observe_received_control_payload(
+    /// Record a reserved-service payload for Python-owned decoding.
+    pub fn observe_received_reserved_service_payload(
         &mut self,
+        service_id: u16,
+        path_id: u16,
+        sequence: u64,
         payload: &[u8],
         frame_bytes: usize,
-        path_id: Option<u16>,
-    ) -> PyResult<()> {
-        let control = ControlPayload::decode(payload).map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        if let Some(path_id) = path_id {
-            self.inner
-                .observe_received_control_payload_on_path(path_id, &control, frame_bytes);
-        } else {
-            self.inner.observe_received_control_payload(&control, frame_bytes);
-        }
-        Ok(())
+    ) {
+        self.inner.observe_received_reserved_service_payload(
+            service_id,
+            path_id,
+            sequence,
+            payload.to_vec(),
+            frame_bytes,
+        );
     }
 
-    /// Decode and record a sent control metaband payload.
-    #[pyo3(signature = (payload, frame_bytes, path_id=None))]
-    pub fn observe_sent_control_payload(
-        &mut self,
-        payload: &[u8],
-        frame_bytes: usize,
-        path_id: Option<u16>,
-    ) -> PyResult<()> {
-        let control = ControlPayload::decode(payload).map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-        if let Some(path_id) = path_id {
-            self.inner
-                .observe_sent_control_payload_on_path(path_id, &control, frame_bytes);
-        } else {
-            self.inner.observe_sent_control_payload(&control, frame_bytes);
-        }
-        Ok(())
+    /// Drain reserved Gatherlink service payloads for Python-owned decoders.
+    pub fn drain_reserved_service_events(&mut self) -> Vec<PyReservedServiceEvent> {
+        self.inner
+            .drain_reserved_service_events()
+            .into_iter()
+            .map(PyReservedServiceEvent::from)
+            .collect()
+    }
+
+    /// Apply a Python-decided service stop to Rust's hot path.
+    pub fn disable_service(&mut self, service_id: u16, reason: &str) {
+        self.inner.disable_service(service_id, reason);
+    }
+
+    /// Clear a Python-decided service stop from Rust's hot path.
+    pub fn enable_service(&mut self, service_id: u16) {
+        self.inner.enable_service(service_id);
+    }
+
+    /// Apply Python-decided service fanout primitives.
+    #[pyo3(signature = (service_id, fanout, fanout_below_bytes = 0))]
+    pub fn set_service_scheduler(&mut self, service_id: u16, fanout: u16, fanout_below_bytes: usize) {
+        self.inner
+            .set_service_scheduler(service_id, ServiceSchedulerConfig::new(fanout, fanout_below_bytes));
+    }
+
+    /// Frame and send one Python-composed service payload through the normal scheduler.
+    pub fn transmit_service_payload(&mut self, service_id: u16, payload: &[u8]) -> PyResult<usize> {
+        self.inner
+            .transmit_service_payload(service_id, payload.to_vec())
+            .map(|plans| plans.len())
+            .map_err(dataplane_error_to_py)
     }
 
     /// Return Rust-owned counters in the same shape Python service monitoring expects.
@@ -193,6 +228,11 @@ impl PyCoreDataplane {
             "control_metadata",
             control_metadata_dict(py, snapshot.control_metadata)?,
         )?;
+        let disabled_services = PyDict::new_bound(py);
+        for (service_id, reason) in self.inner.disabled_services_snapshot() {
+            disabled_services.set_item(service_id.to_string(), reason)?;
+        }
+        root.set_item("disabled_services", disabled_services)?;
         Ok(root.into())
     }
 }
@@ -211,25 +251,27 @@ fn counter_dict(
     output.set_item("missed_packets", counters.missed_packets)?;
     output.set_item("reordered_packets", counters.reordered_packets)?;
     output.set_item("packets_needing_reorder", counters.packets_needing_reorder)?;
+    output.set_item("expected_duplicate_packets", counters.expected_duplicate_packets)?;
+    output.set_item("unexpected_duplicate_packets", counters.unexpected_duplicate_packets)?;
+    output.set_item("duplicate_packets", counters.duplicate_packets)?;
+    output.set_item("send_failed_packets", counters.send_failed_packets)?;
+    output.set_item("send_failed_bytes", counters.send_failed_bytes)?;
+    output.set_item("fanout_send_failed_packets", counters.fanout_send_failed_packets)?;
+    output.set_item("fanout_send_failed_bytes", counters.fanout_send_failed_bytes)?;
     Ok(output)
 }
 
 fn control_metadata_dict(py: Python<'_>, metadata: ControlMetadataSnapshot) -> PyResult<Bound<'_, PyDict>> {
     let output = PyDict::new_bound(py);
     let path_metadata = PyDict::new_bound(py);
+    let service_metadata = PyDict::new_bound(py);
+    let service_endpoint_assertions = PyDict::new_bound(py);
+    let service_disables = PyDict::new_bound(py);
     let path_capacity = PyDict::new_bound(py);
     let path_latency = PyDict::new_bound(py);
+    let path_mtu = PyDict::new_bound(py);
     let path_control = PyDict::new_bound(py);
 
-    for (path_id, name) in metadata.path_metadata {
-        path_metadata.set_item(path_id.to_string(), name)?;
-    }
-    for (path_id, capacity) in metadata.path_capacity {
-        path_capacity.set_item(path_id.to_string(), path_capacity_dict(py, capacity)?)?;
-    }
-    for (path_id, latency) in metadata.path_latency {
-        path_latency.set_item(path_id.to_string(), path_latency_dict(py, latency)?)?;
-    }
     for (path_id, control) in metadata.path_control {
         path_control.set_item(path_id.to_string(), path_control_dict(py, control)?)?;
     }
@@ -237,19 +279,21 @@ fn control_metadata_dict(py: Python<'_>, metadata: ControlMetadataSnapshot) -> P
     output.set_item("sent", control_counter_dict(py, metadata.sent)?)?;
     output.set_item("received", control_counter_dict(py, metadata.received)?)?;
     output.set_item("path_metadata_count", path_metadata.len())?;
+    output.set_item("service_metadata_count", service_metadata.len())?;
+    output.set_item("service_endpoint_assertion_count", service_endpoint_assertions.len())?;
+    output.set_item("service_disable_count", service_disables.len())?;
     output.set_item("path_capacity_count", path_capacity.len())?;
     output.set_item("path_latency_count", path_latency.len())?;
+    output.set_item("path_mtu_count", path_mtu.len())?;
     output.set_item("path_control_count", path_control.len())?;
     output.set_item("path_metadata", path_metadata)?;
+    output.set_item("service_metadata", service_metadata)?;
+    output.set_item("service_endpoint_assertions", service_endpoint_assertions)?;
+    output.set_item("service_disables", service_disables)?;
     output.set_item("path_capacity", path_capacity)?;
     output.set_item("path_latency", path_latency)?;
+    output.set_item("path_mtu", path_mtu)?;
     output.set_item("path_control", path_control)?;
-    if let Some(sync) = metadata.internal_clock_sync {
-        output.set_item("internal_clock_sync", internal_clock_sync_dict(py, sync)?)?;
-    }
-    if let Some(sink_time) = metadata.sink_time {
-        output.set_item("sink_time", sink_time_dict(py, sink_time)?)?;
-    }
     Ok(output)
 }
 
@@ -263,43 +307,7 @@ fn path_control_dict(py: Python<'_>, control: PathControlSnapshot) -> PyResult<B
 fn control_counter_dict(py: Python<'_>, counters: ControlCounterSnapshot) -> PyResult<Bound<'_, PyDict>> {
     let output = PyDict::new_bound(py);
     output.set_item("frames", counters.frames)?;
-    output.set_item("messages", counters.messages)?;
+    output.set_item("messages", 0)?;
     output.set_item("bytes", counters.bytes)?;
-    Ok(output)
-}
-
-fn path_capacity_dict(py: Python<'_>, capacity: PathCapacitySnapshot) -> PyResult<Bound<'_, PyDict>> {
-    let output = PyDict::new_bound(py);
-    output.set_item("tx_bps", capacity.tx_bps)?;
-    output.set_item("rx_bps", capacity.rx_bps)?;
-    Ok(output)
-}
-
-fn path_latency_dict(py: Python<'_>, latency: PathLatencySnapshot) -> PyResult<Bound<'_, PyDict>> {
-    let output = PyDict::new_bound(py);
-    output.set_item("tx_current_us", latency.tx_current_us)?;
-    output.set_item("tx_mean_us", latency.tx_mean_us)?;
-    output.set_item("rx_current_us", latency.rx_current_us)?;
-    output.set_item("rx_mean_us", latency.rx_mean_us)?;
-    Ok(output)
-}
-
-fn internal_clock_sync_dict(py: Python<'_>, sync: InternalClockSyncSnapshot) -> PyResult<Bound<'_, PyDict>> {
-    let output = PyDict::new_bound(py);
-    output.set_item("exchange_id", sync.exchange_id)?;
-    output.set_item("path_id", sync.path_id)?;
-    output.set_item("mode", sync.mode)?;
-    output.set_item("origin_us", sync.origin_us)?;
-    output.set_item("receive_us", sync.receive_us)?;
-    output.set_item("transmit_us", sync.transmit_us)?;
-    Ok(output)
-}
-
-fn sink_time_dict(py: Python<'_>, sink_time: SinkTimeSnapshot) -> PyResult<Bound<'_, PyDict>> {
-    let output = PyDict::new_bound(py);
-    output.set_item("path_id", sink_time.path_id)?;
-    output.set_item("sink_unix_us", sink_time.sink_unix_us)?;
-    output.set_item("sink_internal_us", sink_time.sink_internal_us)?;
-    output.set_item("ntp_state", sink_time.ntp_state)?;
     Ok(output)
 }

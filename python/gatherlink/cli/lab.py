@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
 
 import typer
 
+from gatherlink.lab.reports import write_three_path_scheduler_report
 from gatherlink.lab.runtime import (
     apply_lab_network_mode,
     apply_lab_profile,
@@ -20,6 +22,8 @@ from gatherlink.lab.runtime import (
     prepare_lab_runtime,
     read_service_status,
     read_sink_service_status,
+    request_lab_service_disable,
+    run_rust_transport_smoke,
     run_udp_forwarder,
     run_udp_sink,
     run_udp_sink_service,
@@ -49,7 +53,14 @@ def plan(path: Path) -> None:
 
 
 @app.command("up")
-def up(path: Path) -> None:
+def up(
+    path: Path,
+    sink_local_ipc: bool = typer.Option(
+        True,
+        "--sink-local-ipc/--sink-no-local-ipc",
+        help="Expose the sink directly; disable to hide local sink IPC and expose the normal sink name through remote status.",
+    ),
+) -> None:
     """Prepare paths and start the unprivileged background lab service."""
     scenario = load_lab_scenario_file(path)
     lab_plan = plan_lab_scenario(scenario)
@@ -74,8 +85,8 @@ def up(path: Path) -> None:
             f"{shape_suffix}"
         )
     try:
-        service_result = start_lab_service(path, scenario)
-        sink_result = start_lab_sink_service(path, scenario)
+        service_result = start_lab_service(path, scenario, request_remote_status=not sink_local_ipc)
+        sink_result = start_lab_sink_service(path, scenario, local_ipc=sink_local_ipc)
     except RuntimeError as exc:
         typer.echo(f"failed to start lab service: {exc}", err=True)
         raise typer.Exit(1) from exc
@@ -87,7 +98,8 @@ def up(path: Path) -> None:
     typer.echo(
         f"lab sink service: {sink_result.status} name={sink_result.name} "
         f"pid={sink_result.pid} user={sink_result.user} "
-        f"pid_file={sink_result.pid_file} log={sink_result.log_file}"
+        f"pid_file={sink_result.pid_file} log={sink_result.log_file} "
+        f"local_ipc={'visible' if sink_local_ipc else 'hidden'}"
     )
 
 
@@ -224,6 +236,26 @@ def send(
     typer.echo(f"lab send: direction={direction} target={result.target} packets={result.packets} bytes={result.bytes}")
 
 
+@app.command("disable-service")
+def disable_service(
+    path: Path,
+    service: str = typer.Option("udp-main", help="Service name or compact service id to disable."),
+    side: str = typer.Option("sink", help="Lab node that advertises the disable: sink or source."),
+    reason: str = typer.Option("peer declined this service", help="Reason advertised to the peer and logs."),
+) -> None:
+    """Advertise a generic service-disable control assertion from one lab side."""
+    scenario = load_lab_scenario_file(path)
+    try:
+        result = request_lab_service_disable(scenario, side=side, service=service, reason=reason)
+    except RuntimeError as exc:
+        typer.echo(f"lab disable-service: failed {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        "lab disable-service: advertised "
+        f"side={side} service={service} service_id={result['service_id']} reason={result['reason']}"
+    )
+
+
 @app.command("smoke")
 def smoke(
     path: Path,
@@ -238,6 +270,27 @@ def smoke(
         typer.echo(f"lab smoke: failed expected={count} received={result.packets} target={result.listen}", err=True)
         raise typer.Exit(1)
     typer.echo(f"lab smoke: ok packets={result.packets} bytes={result.bytes} target={result.listen}")
+
+
+@app.command("rust-smoke")
+def rust_smoke(
+    path: Path,
+    count: int = typer.Option(3, help="Number of UDP payloads to send through the Rust path transport."),
+    payload: str = typer.Option("gatherlink-rust-path", help="Payload prefix to send."),
+) -> None:
+    """Verify production Rust path transport encapsulates UDP over configured lab paths."""
+    scenario = load_lab_scenario_file(path)
+    try:
+        result = run_rust_transport_smoke(scenario, count=count, payload=payload)
+    except RuntimeError as exc:
+        typer.echo(f"lab rust smoke: failed {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        "lab rust smoke: ok "
+        f"packets={result.packets} bytes={result.bytes} paths={result.paths} "
+        f"forwarded={result.forwarded_packets} delivered={result.delivered_packets} "
+        f"client_listen={result.client_listen} remote_target={result.remote_target}"
+    )
 
 
 @app.command("down")
@@ -288,6 +341,22 @@ def network_modes(path: Path) -> None:
         typer.echo(f"lab network mode: {name} targets={len(mode.targets)}{description}")
 
 
+@app.command("scheduler-report")
+def scheduler_report(
+    results_dir: Path = typer.Option(
+        Path(".lab/local-three-path/results-fresh"),
+        help="Directory containing saved *-sink.json lab status snapshots.",
+    ),
+    output: Path = typer.Option(
+        Path("docs/reports/three-path-scheduler-lab.md"),
+        help="Markdown report file to write.",
+    ),
+) -> None:
+    """Generate a scheduler behavior report from saved three-path lab runs."""
+    report = write_three_path_scheduler_report(results_dir, output)
+    typer.echo(f"lab scheduler report: wrote {output} bytes={len(report.encode('utf-8'))}")
+
+
 @app.command("apply-network-mode")
 def apply_network_mode(path: Path, mode: str) -> None:
     """Apply a named network behavior mode to an existing lab."""
@@ -298,6 +367,31 @@ def apply_network_mode(path: Path, mode: str) -> None:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     _render_shape_results(results)
+
+
+@app.command("cycle-network-modes")
+def cycle_network_modes(
+    path: Path,
+    modes: str = typer.Option(..., help="Comma-separated network modes to apply in order."),
+    interval: float = typer.Option(10.0, help="Seconds to hold each mode before applying the next."),
+    cycles: int = typer.Option(1, help="Number of complete mode cycles to apply."),
+) -> None:
+    """Cycle named network modes to make bandwidth/latency wander during a test."""
+    scenario = load_lab_scenario_file(path)
+    mode_names = [mode.strip() for mode in modes.split(",") if mode.strip()]
+    if not mode_names:
+        typer.echo("at least one network mode is required", err=True)
+        raise typer.Exit(1)
+    for cycle in range(cycles):
+        for mode_name in mode_names:
+            typer.echo(f"lab network mode: cycle={cycle + 1}/{cycles} applying={mode_name}")
+            try:
+                _render_shape_results(apply_lab_network_mode(scenario, mode_name))
+            except ValueError as exc:
+                typer.echo(str(exc), err=True)
+                raise typer.Exit(1) from exc
+            if interval > 0:
+                time.sleep(interval)
 
 
 @app.command("apply-profile")

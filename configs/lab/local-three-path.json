@@ -1,0 +1,337 @@
+{
+  "schema_version": 1,
+  "name": "local-three-path",
+  "scenario": "local-multi-path",
+  "description": "Three unprivileged Gatherlink lab paths for scheduler and path-behavior testing.",
+  "security": {
+    "mode": "none"
+  },
+  "runtime_dir": ".lab/local-three-path",
+  "nodes": [
+    {
+      "name": "client",
+      "role": "client",
+      "config_path": "configs/examples/minimal-client.json",
+      "run_as": "current-user"
+    },
+    {
+      "name": "server",
+      "role": "server",
+      "config_path": "configs/examples/minimal-server.json",
+      "run_as": "current-user"
+    }
+  ],
+  "paths": [
+    {
+      "name": "path-a",
+      "family": "ipv4",
+      "client_address": "10.81.1.1",
+      "server_address": "10.81.1.2",
+      "subnet": "10.81.1.0/30",
+      "default_max_speed": "50mbit",
+      "shape": {
+        "rate": "50mbit"
+      }
+    },
+    {
+      "name": "path-b",
+      "family": "ipv4",
+      "client_address": "10.81.2.1",
+      "server_address": "10.81.2.2",
+      "subnet": "10.81.2.0/30",
+      "default_max_speed": "50mbit",
+      "shape": {
+        "rate": "50mbit"
+      }
+    },
+    {
+      "name": "path-c",
+      "family": "ipv4",
+      "client_address": "10.81.3.1",
+      "server_address": "10.81.3.2",
+      "subnet": "10.81.3.0/30",
+      "default_max_speed": "50mbit",
+      "shape": {
+        "rate": "50mbit"
+      }
+    }
+  ],
+  "traffic": {
+    "generator": "iperf3",
+    "listen": "127.0.0.1:55280",
+    "target": "127.0.0.1:51920",
+    "duration_seconds": 10,
+    "bandwidth": "12mbit"
+  },
+  "reorder_policies": [
+    {
+      "node_pair": "client<->server",
+      "max_hold": "150ms"
+    }
+  ],
+  "profiles": {
+    "clean": {
+      "path-a": {
+        "state": "up"
+      },
+      "path-b": {
+        "state": "up"
+      },
+      "path-c": {
+        "state": "up"
+      }
+    },
+    "path-a-down": {
+      "path-a": {
+        "state": "down"
+      }
+    },
+    "path-c-blackhole": {
+      "path-c": {
+        "blackhole": true
+      }
+    }
+  },
+  "network_modes": {
+    "clean-50mbit": {
+      "description": "Restore all paths to clean 50mbit links.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "50mbit"
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "50mbit"
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "50mbit"
+          }
+        }
+      ]
+    },
+    "normal-saturated": {
+      "description": "Three shaped paths with realistic queues so overload can show latency, backlog, and drops.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "3.2mbit"
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "2mbit"
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "5mbit"
+          }
+        }
+      ]
+    },
+    "forced-drop": {
+      "description": "Same shaped rates with tight queues so over-capacity tests report visible drops quickly.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "3.2mbit",
+            "limit": 32
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "2mbit",
+            "limit": 20
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "5mbit",
+            "limit": 40
+          }
+        }
+      ]
+    },
+    "latency-jitter-skew": {
+      "description": "Low-latency path-a, moderate path-b, and high-jitter path-c for reorder testing.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "3.2mbit",
+            "delay": "10ms",
+            "jitter": "2ms"
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "2mbit",
+            "delay": "45ms",
+            "jitter": "8ms"
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "5mbit",
+            "delay": "120ms",
+            "jitter": "35ms"
+          }
+        }
+      ]
+    },
+    "loss-on-fast-path": {
+      "description": "Path-a is still low latency but lossy, useful for loss-aware policy checks.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "3.2mbit",
+            "delay": "10ms",
+            "jitter": "2ms",
+            "loss": "5%"
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "2mbit",
+            "delay": "35ms"
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "5mbit",
+            "delay": "55ms"
+          }
+        }
+      ]
+    },
+    "wander-low": {
+      "description": "Low-capacity step for three-path bandwidth cycling.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "2mbit",
+            "limit": 24
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "1.2mbit",
+            "limit": 16
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "3mbit",
+            "limit": 32
+          }
+        }
+      ]
+    },
+    "wander-mid": {
+      "description": "Middle-capacity step for three-path bandwidth cycling.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "3.4mbit",
+            "limit": 32
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "2mbit",
+            "limit": 20
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "5mbit",
+            "limit": 40
+          }
+        }
+      ]
+    },
+    "wander-high": {
+      "description": "High-capacity step for three-path bandwidth cycling.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "5mbit",
+            "limit": 64
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "3mbit",
+            "limit": 32
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "8mbit",
+            "limit": 64
+          }
+        }
+      ]
+    }
+  },
+  "future_features": [
+    "fixed-round-robin",
+    "path-down-recovery",
+    "netem-loss-jitter-reorder",
+    "mtu-mismatch",
+    "receiver-metrics",
+    "ipv6-dual-path",
+    "rust-backed-lab-forwarder"
+  ]
+}

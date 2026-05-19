@@ -5,11 +5,11 @@
 
 use std::net::SocketAddr;
 
-use gatherlink_dataplane::engine::{ForwardOutcome, ReapplyOutcome};
+use gatherlink_dataplane::engine::{ForwardOutcome, ReapplyOutcome, RemoteDeliverOutcome, ReservedServiceEvent};
 use gatherlink_dataplane::runtime_config::{
     CorePathConfig, PathSchedulerPrimitives, PathSchedulerState, SchedulerConfig, SchedulerMode,
 };
-use gatherlink_dataplane::udp_service::UdpServiceConfig;
+use gatherlink_dataplane::udp_service::{ServiceReturnMode, ServiceSchedulerConfig, UdpServiceConfig};
 use pyo3::prelude::*;
 
 use crate::errors::udp_error_to_py;
@@ -25,8 +25,26 @@ pub struct PyUdpServiceConfig {
 impl PyUdpServiceConfig {
     /// Create a compiled UDP service config from explicit socket addresses.
     #[new]
-    #[pyo3(signature = (name, target, listen = None, priority = 100))]
-    pub fn new(name: String, target: String, listen: Option<String>, priority: u16) -> PyResult<Self> {
+    #[pyo3(signature = (
+        name,
+        target,
+        listen = None,
+        priority = 100,
+        return_mode = "fixed",
+        service_id = 0,
+        scheduler_fanout = 1,
+        scheduler_fanout_below_bytes = 0,
+    ))]
+    pub fn new(
+        name: String,
+        target: String,
+        listen: Option<String>,
+        priority: u16,
+        return_mode: &str,
+        service_id: u16,
+        scheduler_fanout: u16,
+        scheduler_fanout_below_bytes: usize,
+    ) -> PyResult<Self> {
         let target_addr = target
             .parse::<SocketAddr>()
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
@@ -35,9 +53,24 @@ impl PyUdpServiceConfig {
             .transpose()
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
-        let inner =
-            UdpServiceConfig::new_with_priority(name, listen_addr, target_addr, priority).map_err(udp_error_to_py)?;
+        let return_mode = parse_service_return_mode(return_mode)?;
+        let scheduler = ServiceSchedulerConfig::new(scheduler_fanout, scheduler_fanout_below_bytes);
+        let inner = UdpServiceConfig::new_with_scheduler(
+            service_id,
+            name,
+            listen_addr,
+            target_addr,
+            priority,
+            return_mode,
+            scheduler,
+        )
+        .map_err(udp_error_to_py)?;
         Ok(Self { inner })
+    }
+
+    /// Compact service id carried in Gatherlink frames.
+    pub fn service_id(&self) -> u16 {
+        self.inner.service_id()
     }
 
     /// Stable service name.
@@ -59,11 +92,43 @@ impl PyUdpServiceConfig {
     pub fn priority(&self) -> u16 {
         self.inner.priority()
     }
+
+    /// Configured return behavior for remote payloads.
+    pub fn return_mode(&self) -> String {
+        format_service_return_mode(self.inner.return_mode()).to_owned()
+    }
+
+    /// Service-level fanout selected by Python. Zero means every eligible path.
+    pub fn scheduler_fanout(&self) -> u16 {
+        self.inner.scheduler().fanout()
+    }
+
+    /// Payload threshold for service fanout, or zero when fanout always applies.
+    pub fn scheduler_fanout_below_bytes(&self) -> usize {
+        self.inner.scheduler().fanout_below_bytes()
+    }
 }
 
 impl PyUdpServiceConfig {
     pub(crate) fn inner(&self) -> UdpServiceConfig {
         self.inner.clone()
+    }
+}
+
+fn parse_service_return_mode(mode: &str) -> PyResult<ServiceReturnMode> {
+    match mode {
+        "fixed" => Ok(ServiceReturnMode::Fixed),
+        "learned-single-source" => Ok(ServiceReturnMode::LearnedSingleSource),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown service return mode: {other}"
+        ))),
+    }
+}
+
+fn format_service_return_mode(mode: ServiceReturnMode) -> &'static str {
+    match mode {
+        ServiceReturnMode::Fixed => "fixed",
+        ServiceReturnMode::LearnedSingleSource => "learned-single-source",
     }
 }
 
@@ -93,6 +158,8 @@ impl PyPathConfig {
         reorder_hold_us = 0,
         max_in_flight_packets = 0,
         max_in_flight_bytes = 0,
+        transport_bind = None,
+        transport_remote = None,
     ))]
     pub fn new(
         path_id: u16,
@@ -109,6 +176,8 @@ impl PyPathConfig {
         reorder_hold_us: u32,
         max_in_flight_packets: u16,
         max_in_flight_bytes: u32,
+        transport_bind: Option<String>,
+        transport_remote: Option<String>,
     ) -> PyResult<Self> {
         let state = if busy {
             PathSchedulerState::Busy
@@ -124,9 +193,18 @@ impl PyPathConfig {
             max_in_flight_packets,
             max_in_flight_bytes,
         );
-        let inner =
+        let mut inner =
             CorePathConfig::new_with_scheduler_primitives(path_id, route_id, mtu, enabled, state, weight, primitives)
                 .map_err(udp_error_to_py)?;
+        if let (Some(bind), Some(remote)) = (transport_bind, transport_remote) {
+            let bind_addr = bind
+                .parse::<SocketAddr>()
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+            let remote_addr = remote
+                .parse::<SocketAddr>()
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+            inner = inner.with_transport(bind_addr, remote_addr);
+        }
         Ok(Self { inner })
     }
 
@@ -185,6 +263,14 @@ impl PyPathConfig {
     pub fn max_in_flight_bytes(&self) -> u32 {
         self.inner.primitives().max_in_flight_bytes()
     }
+
+    pub fn transport_bind(&self) -> Option<String> {
+        self.inner.transport_bind().map(|addr| addr.to_string())
+    }
+
+    pub fn transport_remote(&self) -> Option<String> {
+        self.inner.transport_remote().map(|addr| addr.to_string())
+    }
 }
 
 impl PyPathConfig {
@@ -229,6 +315,15 @@ impl PySchedulerConfig {
     pub fn new(mode: &str) -> PyResult<Self> {
         let mode = match mode {
             "round_robin" => SchedulerMode::RoundRobin,
+            "weighted_round_robin" => SchedulerMode::WeightedRoundRobin,
+            "lowest_latency" => SchedulerMode::LowestLatency,
+            "loss_aware" => SchedulerMode::LossAware,
+            "capacity_aware" => SchedulerMode::CapacityAware,
+            "least_queue" => SchedulerMode::LeastQueue,
+            "earliest_completion_first" => SchedulerMode::EarliestCompletionFirst,
+            "blocking_estimation" => SchedulerMode::BlockingEstimation,
+            "balanced" => SchedulerMode::Balanced,
+            "adaptive" => SchedulerMode::Adaptive,
             other => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "unknown scheduler mode: {other}"
@@ -243,6 +338,15 @@ impl PySchedulerConfig {
     pub fn mode(&self) -> String {
         match self.inner.mode() {
             SchedulerMode::RoundRobin => "round_robin".to_owned(),
+            SchedulerMode::WeightedRoundRobin => "weighted_round_robin".to_owned(),
+            SchedulerMode::LowestLatency => "lowest_latency".to_owned(),
+            SchedulerMode::LossAware => "loss_aware".to_owned(),
+            SchedulerMode::CapacityAware => "capacity_aware".to_owned(),
+            SchedulerMode::LeastQueue => "least_queue".to_owned(),
+            SchedulerMode::EarliestCompletionFirst => "earliest_completion_first".to_owned(),
+            SchedulerMode::BlockingEstimation => "blocking_estimation".to_owned(),
+            SchedulerMode::Balanced => "balanced".to_owned(),
+            SchedulerMode::Adaptive => "adaptive".to_owned(),
         }
     }
 }
@@ -301,6 +405,78 @@ impl PyForwardOutcome {
 
 impl From<ForwardOutcome> for PyForwardOutcome {
     fn from(inner: ForwardOutcome) -> Self {
+        Self { inner }
+    }
+}
+
+/// Observable result from one remote Gatherlink frame delivered locally.
+#[pyclass(name = "RemoteDeliverOutcome")]
+#[derive(Clone)]
+pub struct PyRemoteDeliverOutcome {
+    inner: RemoteDeliverOutcome,
+}
+
+#[pymethods]
+impl PyRemoteDeliverOutcome {
+    pub fn service(&self) -> String {
+        self.inner.service.clone()
+    }
+
+    pub fn target(&self) -> String {
+        self.inner.target.to_string()
+    }
+
+    pub fn payload_len(&self) -> usize {
+        self.inner.payload_len
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.inner.sequence
+    }
+
+    pub fn path_id(&self) -> u16 {
+        self.inner.path_id
+    }
+}
+
+impl From<RemoteDeliverOutcome> for PyRemoteDeliverOutcome {
+    fn from(inner: RemoteDeliverOutcome) -> Self {
+        Self { inner }
+    }
+}
+
+/// Reserved Gatherlink service payload for Python-owned decoding.
+#[pyclass(name = "ReservedServiceEvent")]
+#[derive(Clone)]
+pub struct PyReservedServiceEvent {
+    inner: ReservedServiceEvent,
+}
+
+#[pymethods]
+impl PyReservedServiceEvent {
+    pub fn service_id(&self) -> u16 {
+        self.inner.service_id
+    }
+
+    pub fn path_id(&self) -> u16 {
+        self.inner.path_id
+    }
+
+    pub fn sequence(&self) -> u64 {
+        self.inner.sequence
+    }
+
+    pub fn payload(&self) -> Vec<u8> {
+        self.inner.payload.clone()
+    }
+
+    pub fn frame_bytes(&self) -> usize {
+        self.inner.frame_bytes
+    }
+}
+
+impl From<ReservedServiceEvent> for PyReservedServiceEvent {
+    fn from(inner: ReservedServiceEvent) -> Self {
         Self { inner }
     }
 }

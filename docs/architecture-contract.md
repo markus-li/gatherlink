@@ -45,6 +45,14 @@ general diagnostics client: it may request temporary higher-rate control
 metadata from any service, and the service must automatically return to baseline
 cadence after the request expires.
 
+Python owns every reserved-service payload decoder. Rust may recognize that a
+compact service id is reserved so it can keep those bytes away from application
+UDP targets, but it must queue the payload for Python instead of interpreting
+control metadata, remote status, DNS helper messages, config apply messages, or
+future auth handshakes. If Python receives a reserved id without a decoder, or a
+non-reserved id through the reserved dispatcher, it logs a loud error and drops
+the payload.
+
 ## Rust owns packet execution
 
 Rust owns packet receive/send, encoded runtime state execution, frame encode/decode, AEAD
@@ -53,6 +61,12 @@ MTU eligibility checks, and minimal hot-path weighted scheduling.
 
 Rust must not own business policy, config interpretation, Linux environment policy, DNS policy,
 peer strategy, overlay planning, or helper behavior.
+
+Rust also must not grow semantic control-plane branches. The allowed Rust
+reserved-service behavior is deliberately mechanical: forward `0..255` payloads
+to Python, send Python-provided service payloads through the Python-compiled
+service/path scheduler primitives, maintain cheap counters, and execute
+Python-compiled runtime state.
 
 ## Non-root design
 
@@ -115,7 +129,8 @@ per-path values that are cheap to consult in the packet path.
 Remote metric reporting is mandatory for serious scheduling. Do not ACK every packet.
 
 Receiver reports should include received packet count, missing sequence ranges or loss estimate,
-duplicates, out-of-order count, jitter, receive rate, auth/decode failures, and last received sequence.
+unexpected duplicates, expected fanout duplicates suppressed before application emit, out-of-order count,
+jitter, receive rate, auth/decode failures, and last received sequence.
 
 ## MTU policy
 
@@ -175,6 +190,13 @@ Bootstrap is not just DNS lookup. It is resolve candidate endpoint -> try path/c
 authenticated probe -> cache only after success.
 
 Methods may include cache, static IP, direct DNS, DoH, and later HTTPS metadata.
+
+The current implementation exposes only the policy scaffold: static endpoints,
+last-known cache entries, and an explicit insecure lab probe. It must not treat
+that plaintext probe as production authentication. When crypto lands, Python
+should promote endpoints into the cache only after the authenticated probe has
+validated the peer identity and selected carrier profile. Rust should still only
+receive the compiled path/service runtime state that results from that decision.
 
 ## DNS helper
 

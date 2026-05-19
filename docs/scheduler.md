@@ -7,24 +7,62 @@ operator-facing explanations, and future adaptive behavior. Rust owns only the
 compiled hot-path scheduler state it needs to choose a path cheaply while
 encoding packets.
 
-## MVP Mode
+## Runtime Modes
 
-The MVP scheduler mode is `round_robin`.
+The default scheduler mode is still `round_robin`, but the runtime contract now
+has named modes that let Python choose a policy and keep Rust on primitive
+execution:
 
-`round_robin` is intentionally simple:
+- `round_robin`: visit compiled paths in order, applying weights and MTU/state eligibility
+- `weighted_round_robin`: explicit alias for the weighted path sequence Rust already executes
+- `srtt`: Python policy alias for lowest-smoothed-latency selection, inspired by MPTCP's default RTT-first behavior
+- `lowest_latency`: pick the eligible path with the lowest compiled latency estimate
+- `loss_aware`: pick the eligible path with the lowest compiled loss estimate
+- `capacity_aware`: pick the eligible path with the highest compiled TX capacity estimate
+- `least_queue`: reserved for queue-depth-driven selection as soon as live queue counters are wired into the send path
+- `earliest_completion_first`: MPTCP ECF-inspired policy using latency plus estimated transmit time
+- `blocking_estimation`: BLEST-inspired policy that avoids paths likely to create reorder blocking
+- `balanced`: hybrid policy that combines capacity, latency, loss, and queue facts
+- `adaptive`: Python scoring compiles live telemetry into weights, states, and primitive limits; Rust executes it like weighted round-robin
+
+`round_robin` remains intentionally simple:
 
 - paths are visited in the order Python compiled into runtime config
 - each datagram advances the next-path cursor
 - Rust still applies MTU eligibility before emitting a frame
-- path `enabled`, `state`, `weight`, and MTU are compiled by Python
+- path `enabled`, `state`, `weight`, MTU, and primitive limits are compiled by Python
 - `active` MTU-eligible paths are preferred for whole packets
 - if no path can carry the datagram whole, Rust may use a non-busy path for
   fragmentation
 - `busy`, `drain`, and `disabled` are inputs from Python, not Rust policy
 - `weight` repeats a path in the simple round-robin sequence
 
-This gives the dataplane a real scheduling insertion point without moving
-adaptive policy into Rust too early.
+This gives the dataplane real scheduling modes without moving adaptive policy
+into Rust.
+
+Service redundancy is a Python-owned policy that compiles to a tiny Rust fanout
+primitive. Rust receives `fanout` and `fanout_below_bytes`: `fanout=1` means one
+scheduled path, `fanout=0` means every eligible path, and values above one mean
+that many eligible paths. `fanout_below_bytes=0` makes fanout apply to every
+payload; otherwise larger payloads fall back to one scheduled path. Python can
+therefore expose modes like `duplicate`, `duplicate_small`, or control metadata
+all-path delivery without Rust learning those policy names.
+
+## Primitive Contract
+
+Python may use user config, lab qdisc counters, peer control metadata, service
+priority, path history, and future helper facts to decide what each path should
+do. Rust receives only cheap execution primitives:
+
+- `tx_capacity_bps` and `rx_capacity_bps` for directional bandwidth estimates
+- `latency_us` for the compact latency value used by packet-time selection
+- `loss_ppm` for smoothed loss in parts per million
+- `reorder_hold_us` for path-specific reorder timing selected by Python
+- `max_in_flight_packets` and `max_in_flight_bytes` for bounded pressure limits
+- `enabled`, `state`, `weight`, and `mtu` for direct path eligibility
+
+The important boundary is that Python explains and changes these values. Rust
+only follows them and reports counters back.
 
 ## Service Priority
 
@@ -39,12 +77,10 @@ multi-service fairness because the first lab carries one virtual UDP service.
 When multiple services share constrained paths, Python should compile the chosen
 fairness policy into explicit runtime state before Rust executes it.
 
-## Future Modes
+## Future Work
 
-Future scheduler modes may include fixed weights, weighted round-robin, least
-queue, loss-aware, RTT-aware, service-priority aware, and receiver-metric driven
-adaptive scheduling. Those modes should be compiled by Python into explicit
-runtime state before Rust executes them.
+Service-priority-aware fairness and receiver-metric-driven adaptation should be
+compiled by Python into explicit runtime state before Rust executes them.
 
 Rust should not parse user config, discover links, score carriers, explain path
 choices, or own failover policy. It should execute the scheduler state, count

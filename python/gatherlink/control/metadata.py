@@ -25,10 +25,22 @@ def empty_control_metadata() -> dict[str, object]:
         "path_control_count": 0,
         "path_metadata": {},
         "path_metadata_count": 0,
+        "service_metadata": {},
+        "service_metadata_count": 0,
+        "service_endpoint_assertions": {},
+        "service_endpoint_assertion_count": 0,
+        "service_disables": {},
+        "service_disable_count": 0,
+        "service_scheduler_policies": {},
+        "service_scheduler_policy_count": 0,
+        "service_endpoint_mismatches": {},
+        "service_endpoint_mismatch_count": 0,
         "path_capacity": {},
         "path_capacity_count": 0,
         "path_latency": {},
         "path_latency_count": 0,
+        "path_mtu": {},
+        "path_mtu_count": 0,
         "internal_clock": {
             "role": None,
             "offset_us": None,
@@ -188,6 +200,7 @@ def record_control_metadata_sent(
     path_metadata: dict[int, str],
     path_capacity: dict[str, dict[str, int | str | None]],
     path_latency: dict[str, dict[str, int | str | None]],
+    path_mtu: dict[str, dict[str, int | str | None]] | None = None,
     internal_clock: dict[str, int | str | None],
     sink_time: list[SinkTimeMessage],
     ntp_sample: DirectNtpSample | None = None,
@@ -205,6 +218,7 @@ def record_control_metadata_sent(
     merge_control_path_metadata(control_metadata, path_metadata)
     merge_control_path_capacity(control_metadata, path_capacity)
     merge_control_path_latency(control_metadata, path_latency)
+    merge_control_path_mtu(control_metadata, path_mtu or {})
     merge_internal_clock_sync(control_metadata, internal_clock)
     record_sink_time(
         control_metadata,
@@ -228,8 +242,13 @@ def record_control_metadata_received(
     assert isinstance(received, dict)
     message_count = (
         len(control_frame.path_metadata)
+        + len(control_frame.service_metadata)
+        + len(control_frame.service_endpoint_assertions)
+        + len(control_frame.service_disables)
+        + len(control_frame.service_scheduler_policies)
         + len(control_frame.path_capacity_bps)
         + len(control_frame.path_latency_us)
+        + len(control_frame.path_mtu)
         + len(control_frame.internal_clock_sync)
         + len(control_frame.sink_time)
     )
@@ -241,6 +260,11 @@ def record_control_metadata_received(
     if path_name is not None:
         record_path_control(control_metadata, path_name, "rx", frame_bytes, message_count)
     merge_control_path_metadata(control_metadata, control_frame.path_metadata)
+    merge_control_service_metadata(control_metadata, control_frame.service_metadata)
+    merge_control_service_endpoint_assertions(control_metadata, control_frame.service_endpoint_assertions)
+    merge_control_service_disables(control_metadata, control_frame.service_disables)
+    merge_control_service_scheduler_policies(control_metadata, control_frame.service_scheduler_policies)
+    record_control_path_mtu(control_metadata, control_frame.path_mtu, control_frame.path_metadata, {})
 
 
 def record_path_control(
@@ -278,6 +302,89 @@ def merge_control_path_metadata(control_metadata: dict[str, object], path_metada
     control_metadata["path_metadata_count"] = len(recorded)
 
 
+def merge_control_service_metadata(control_metadata: dict[str, object], service_metadata: dict[int, str]) -> None:
+    """Merge service-id to service-name metadata without accepting endpoints."""
+    recorded = control_metadata["service_metadata"]
+    assert isinstance(recorded, dict)
+    for service_id, service_name in service_metadata.items():
+        recorded[str(service_id)] = service_name
+    control_metadata["service_metadata_count"] = len(recorded)
+
+
+def merge_control_service_endpoint_assertions(
+    control_metadata: dict[str, object],
+    service_endpoint_assertions: dict[int, str],
+) -> None:
+    """Merge peer endpoint assertions as verification facts, not config."""
+    recorded = control_metadata["service_endpoint_assertions"]
+    assert isinstance(recorded, dict)
+    for service_id, target in service_endpoint_assertions.items():
+        recorded[str(service_id)] = target
+    control_metadata["service_endpoint_assertion_count"] = len(recorded)
+
+
+def merge_control_service_disables(
+    control_metadata: dict[str, object],
+    service_disables: dict[int, str],
+) -> None:
+    """Merge peer service-disable assertions for loud monitor and policy visibility."""
+    recorded = control_metadata["service_disables"]
+    assert isinstance(recorded, dict)
+    for service_id, reason in service_disables.items():
+        recorded[str(service_id)] = reason
+    control_metadata["service_disable_count"] = len(recorded)
+
+
+def merge_control_service_scheduler_policies(
+    control_metadata: dict[str, object],
+    service_scheduler_policies: dict[int, tuple[int, int]],
+) -> None:
+    """Merge peer-advertised service scheduler policy facts for Python to compile locally."""
+    recorded = control_metadata["service_scheduler_policies"]
+    assert isinstance(recorded, dict)
+    for service_id, (fanout, fanout_below_bytes) in service_scheduler_policies.items():
+        recorded[str(service_id)] = {
+            "fanout": int(fanout),
+            "fanout_below_bytes": int(fanout_below_bytes),
+        }
+    control_metadata["service_scheduler_policy_count"] = len(recorded)
+
+
+def verify_service_endpoint_assertions(
+    control_metadata: dict[str, object],
+    local_targets_by_service_id: dict[int, str],
+) -> dict[int, str]:
+    """
+    Compare peer endpoint assertions against explicit local config.
+
+    The assertion data is never used to set config. A mismatch is recorded so
+    the runtime can stop traffic and the service monitor can show the reason.
+    """
+    assertions = control_metadata.get("service_endpoint_assertions")
+    if not isinstance(assertions, dict):
+        return {}
+    mismatches: dict[int, str] = {}
+    for service_id_text, peer_target in assertions.items():
+        try:
+            service_id = int(service_id_text)
+        except (TypeError, ValueError):
+            continue
+        local_target = local_targets_by_service_id.get(service_id)
+        if local_target is None:
+            mismatches[service_id] = f"peer asserted endpoint for unknown service id {service_id}: {peer_target}"
+        elif str(peer_target) != local_target:
+            mismatches[service_id] = (
+                f"peer endpoint assertion mismatch for service id {service_id}: "
+                f"local target {local_target} != peer target {peer_target}"
+            )
+    recorded = control_metadata["service_endpoint_mismatches"]
+    assert isinstance(recorded, dict)
+    for service_id, reason in mismatches.items():
+        recorded[str(service_id)] = reason
+    control_metadata["service_endpoint_mismatch_count"] = len(recorded)
+    return mismatches
+
+
 def merge_control_path_capacity(
     control_metadata: dict[str, object],
     path_capacity: dict[str, dict[str, int | str | None]],
@@ -302,6 +409,19 @@ def merge_control_path_latency(
         existing = recorded.get(path_name)
         recorded[path_name] = merge_latency_record(existing, latency) if isinstance(existing, dict) else latency
     control_metadata["path_latency_count"] = len(recorded)
+
+
+def merge_control_path_mtu(
+    control_metadata: dict[str, object],
+    path_mtu: dict[str, dict[str, int | str | None]],
+) -> None:
+    """Merge sparse directional path MTU observations without dropping the opposite direction."""
+    recorded = control_metadata["path_mtu"]
+    assert isinstance(recorded, dict)
+    for path_name, mtu in path_mtu.items():
+        existing = recorded.get(path_name)
+        recorded[path_name] = merge_mtu_record(existing, mtu) if isinstance(existing, dict) else mtu
+    control_metadata["path_mtu_count"] = len(recorded)
 
 
 def merge_internal_clock_sync(
@@ -361,6 +481,31 @@ def record_control_path_latency(
             "updated_at": datetime.now(UTC).isoformat(),
         }
     merge_control_path_latency(control_metadata, named_latency)
+
+
+def record_control_path_mtu(
+    control_metadata: dict[str, object],
+    path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]],
+    learned_path_names_by_id: dict[int, str],
+    configured_path_names_by_id: dict[int, str],
+) -> None:
+    """Store peer-advertised MTU observations in local directions using the best known path name."""
+    named_mtu: dict[str, dict[str, int | str | None]] = {}
+    for path_id, (tx_link_mtu, tx_frame_mtu, rx_link_mtu, rx_frame_mtu) in path_mtu.items():
+        path_name = (
+            learned_path_names_by_id.get(path_id) or configured_path_names_by_id.get(path_id) or f"path-id:{path_id}"
+        )
+        named_mtu[path_name] = {
+            "tx_link_mtu": rx_link_mtu,
+            "tx_frame_mtu": rx_frame_mtu,
+            "tx_payload_mtu": payload_mtu_or_none(rx_frame_mtu),
+            "rx_link_mtu": tx_link_mtu,
+            "rx_frame_mtu": tx_frame_mtu,
+            "rx_payload_mtu": payload_mtu_or_none(tx_frame_mtu),
+            "source": "peer",
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    merge_control_path_mtu(control_metadata, named_mtu)
 
 
 def clock_sync_sent_status(path_clock_sync: list[InternalClockSyncMessage]) -> dict[str, int | str | None]:
@@ -434,6 +579,25 @@ def latency_by_path_id(
     return latency_by_id
 
 
+def mtu_by_path_id(
+    path_mtu: dict[str, dict[str, int | str | None]],
+    path_ids: dict[str, int],
+) -> dict[int, tuple[int | None, int | None, int | None, int | None]]:
+    """Convert named local-view MTU observations into path-id keyed control payloads."""
+    mtu_by_id = {}
+    for path_name, mtu in path_mtu.items():
+        if path_name not in path_ids:
+            continue
+        tx_link_mtu = int_or_none(mtu.get("tx_link_mtu", mtu.get("link_mtu")))
+        tx_frame_mtu = int_or_none(mtu.get("tx_frame_mtu", mtu.get("frame_mtu")))
+        rx_link_mtu = int_or_none(mtu.get("rx_link_mtu"))
+        rx_frame_mtu = int_or_none(mtu.get("rx_frame_mtu"))
+        if tx_link_mtu is None and rx_link_mtu is None:
+            continue
+        mtu_by_id[path_ids[path_name]] = (tx_link_mtu, tx_frame_mtu, rx_link_mtu, rx_frame_mtu)
+    return mtu_by_id
+
+
 def int_or_none(value: object) -> int | None:
     """Return an integer when a value is numeric, otherwise ``None``."""
     if value is None:
@@ -467,3 +631,38 @@ def merge_latency_record(
             continue
         merged[key] = value
     return merged
+
+
+def merge_mtu_record(
+    existing: dict[str, int | str | None],
+    update: dict[str, int | str | None],
+) -> dict[str, int | str | None]:
+    """Merge sparse MTU updates while preserving known directional values."""
+    merged = dict(existing)
+    directional_keys = {
+        "tx_link_mtu",
+        "tx_frame_mtu",
+        "tx_payload_mtu",
+        "rx_link_mtu",
+        "rx_frame_mtu",
+        "rx_payload_mtu",
+    }
+    for key, value in update.items():
+        if value is None and key in directional_keys and merged.get(key) is not None:
+            continue
+        merged[key] = value
+
+    # Keep legacy display keys aligned with TX because older running services
+    # and ad hoc diagnostics may still read the old flat names during rollout.
+    if merged.get("tx_link_mtu") is not None:
+        merged["link_mtu"] = merged["tx_link_mtu"]
+    if merged.get("tx_frame_mtu") is not None:
+        merged["frame_mtu"] = merged["tx_frame_mtu"]
+    if merged.get("tx_payload_mtu") is not None:
+        merged["payload_mtu"] = merged["tx_payload_mtu"]
+    return merged
+
+
+def payload_mtu_or_none(frame_mtu: int | None) -> int | None:
+    """Return v1 payload MTU for a reported frame MTU."""
+    return max(frame_mtu - 38, 0) if frame_mtu is not None else None

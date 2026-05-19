@@ -8,13 +8,14 @@ from pathlib import Path
 
 import typer
 
-from gatherlink.cli import config, lab, run, services
+from gatherlink.cli import bootstrap, config, lab, run, services
 from gatherlink.cli.lab import down as lab_down
 from gatherlink.cli.lab import status as lab_status
 from gatherlink.cli.lab import up as lab_up
 
 app = typer.Typer(help="Gatherlink carrier-aware multipath UDP transport.")
 DEFAULT_LAB_CONFIG = Path("configs/lab/local-dual-path.json")
+app.add_typer(bootstrap.app, name="bootstrap")
 app.add_typer(config.app, name="config")
 app.add_typer(lab.app, name="lab")
 app.add_typer(run.app, name="run")

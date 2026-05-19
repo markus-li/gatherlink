@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from gatherlink.config import expand_config, validate_config_file
+from gatherlink.config.models import GatherlinkConfig
 from gatherlink.runtime import plan_runtime_start
 
 EXAMPLES = Path("configs/examples")
@@ -30,6 +31,9 @@ def test_runtime_plan_binds_udp_listener_for_core_service() -> None:
     assert service_step.details["target"] == "127.0.0.1:51820"
     assert service_step.details["priority"] == "normal"
     assert service_step.details["priority_value"] == 100
+    assert service_step.details["return_mode"] == "fixed"
+    assert service_step.details["service_id"] == 256
+    assert service_step.details["service_id_explicit"] is False
 
 
 def test_runtime_plan_does_not_start_helpers_or_tunnels() -> None:
@@ -60,3 +64,28 @@ def test_runtime_plan_includes_plaintext_warning_details() -> None:
     core_step = plan.steps[0]
     assert core_step.details["security_mode"] == "none"
     assert core_step.details["warnings"] == plan.warnings
+
+
+def test_runtime_plan_warns_when_service_id_is_explicit() -> None:
+    runtime_config = expand_config(
+        GatherlinkConfig(
+            schema_version=1,
+            role="client",
+            peer="remote",
+            services=[
+                {
+                    "name": "udp-main",
+                    "service_id": 300,
+                    "listen": "127.0.0.1:55180",
+                    "target": "127.0.0.1:51820",
+                }
+            ],
+        )
+    )
+
+    plan = plan_runtime_start(runtime_config)
+
+    assert any("explicit service_id is not recommended" in warning for warning in plan.warnings)
+    service_step = next(step for step in plan.steps if step.component == "core-service:udp-main")
+    assert service_step.details["service_id"] == 300
+    assert service_step.details["service_id_explicit"] is True

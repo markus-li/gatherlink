@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 
 use gatherlink_protocol::frame::{FRAGMENT_EXTENSION_LEN, V1_HEADER_LEN};
-use gatherlink_protocol::ids::{PathId, RouteId};
+use gatherlink_protocol::ids::{PathId, RouteId, ServiceId, USER_SERVICE_ID_START};
 
 use crate::udp_service::{UdpServiceConfig, UdpServiceError};
 
@@ -47,10 +47,19 @@ impl Default for SchedulerConfig {
     }
 }
 
-/// Scheduler modes intentionally remain tiny until Python supplies richer policy.
+/// Scheduler modes chosen by Python and executed with already-compiled primitives.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SchedulerMode {
     RoundRobin,
+    WeightedRoundRobin,
+    LowestLatency,
+    LossAware,
+    CapacityAware,
+    LeastQueue,
+    EarliestCompletionFirst,
+    BlockingEstimation,
+    Balanced,
+    Adaptive,
 }
 
 /// Compiled per-path scheduler state. Python owns the policy that produces this.
@@ -138,6 +147,8 @@ pub struct CorePathConfig {
     path_id: PathId,
     route_id: RouteId,
     mtu: usize,
+    transport_bind: Option<SocketAddr>,
+    transport_remote: Option<SocketAddr>,
     enabled: bool,
     state: PathSchedulerState,
     weight: u16,
@@ -205,6 +216,8 @@ impl CorePathConfig {
             path_id,
             route_id,
             mtu,
+            transport_bind: None,
+            transport_remote: None,
             enabled,
             state,
             weight,
@@ -225,6 +238,23 @@ impl CorePathConfig {
     /// Maximum encoded frame size for this path.
     pub fn mtu(&self) -> usize {
         self.mtu
+    }
+
+    /// Local path transport socket bind address, when this path carries real frames.
+    pub fn transport_bind(&self) -> Option<SocketAddr> {
+        self.transport_bind
+    }
+
+    /// Remote path transport address, when this path carries real frames.
+    pub fn transport_remote(&self) -> Option<SocketAddr> {
+        self.transport_remote
+    }
+
+    /// Return a copy with production path transport endpoints attached.
+    pub fn with_transport(mut self, bind: SocketAddr, remote: SocketAddr) -> Self {
+        self.transport_bind = Some(bind);
+        self.transport_remote = Some(remote);
+        self
     }
 
     /// Capacity hint compiled by Python from live path telemetry.
@@ -293,8 +323,24 @@ impl CoreRuntimeConfig {
         paths: Vec<CorePathConfig>,
         scheduler: SchedulerConfig,
     ) -> Result<Self, UdpServiceError> {
+        let max_user_services = usize::from(ServiceId::MAX - USER_SERVICE_ID_START) + 1;
+        if services.len() > max_user_services {
+            return Err(UdpServiceError::TooManyServices {
+                count: services.len(),
+                max: max_user_services,
+            });
+        }
+
+        let mut finalized_services = Vec::with_capacity(services.len());
         let mut names = HashSet::new();
         let mut listens = HashSet::new();
+        let mut service_ids = HashSet::new();
+        let explicit_service_ids: HashSet<ServiceId> = services
+            .iter()
+            .map(UdpServiceConfig::service_id)
+            .filter(|service_id| *service_id != 0)
+            .collect();
+        let mut next_service_id = USER_SERVICE_ID_START;
         for service in &services {
             if !names.insert(service.name()) {
                 return Err(UdpServiceError::DuplicateServiceName(service.name().to_owned()));
@@ -305,6 +351,27 @@ impl CoreRuntimeConfig {
                     return Err(UdpServiceError::DuplicateListenAddress(listen));
                 }
             }
+
+            let service_id = if service.service_id() == 0 {
+                while explicit_service_ids.contains(&next_service_id) {
+                    next_service_id = next_service_id.checked_add(1).ok_or(UdpServiceError::TooManyServices {
+                        count: services.len(),
+                        max: max_user_services,
+                    })?;
+                }
+                let assigned = next_service_id;
+                next_service_id = next_service_id.checked_add(1).ok_or(UdpServiceError::TooManyServices {
+                    count: services.len(),
+                    max: max_user_services,
+                })?;
+                assigned
+            } else {
+                service.service_id()
+            };
+            if !service_ids.insert(service_id) {
+                return Err(UdpServiceError::DuplicateServiceId(service_id));
+            }
+            finalized_services.push(service.with_assigned_service_id(service_id)?);
         }
 
         let mut path_ids = HashSet::new();
@@ -318,7 +385,7 @@ impl CoreRuntimeConfig {
         }
 
         Ok(Self {
-            services,
+            services: finalized_services,
             paths,
             scheduler,
         })

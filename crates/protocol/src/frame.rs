@@ -11,7 +11,7 @@ use crate::ids::{PathId, RouteId, SequenceNumber, ServiceId, SessionId};
 use crate::version::PROTOCOL_VERSION;
 
 /// Current fixed header length in bytes.
-pub const V1_HEADER_LEN: usize = 44;
+pub const V1_HEADER_LEN: usize = 38;
 
 /// Max v1 payload length before future fragmentation is needed.
 pub const MAX_V1_PAYLOAD_LEN: usize = u16::MAX as usize;
@@ -180,11 +180,11 @@ impl FrameHeader {
         write_u16(output, 2, self.header_len);
         write_u16(output, 4, self.flags.bits());
         write_u128(output, 6, self.session_id);
-        write_u64(output, 22, self.service_id);
-        write_u16(output, 30, self.path_id);
-        write_u16(output, 32, self.route_id);
-        write_u64(output, 34, self.sequence);
-        write_u16(output, 42, self.payload_len);
+        write_u16(output, 22, self.service_id);
+        write_u16(output, 24, self.path_id);
+        write_u16(output, 26, self.route_id);
+        write_u64(output, 28, self.sequence);
+        write_u16(output, 36, self.payload_len);
         Ok(())
     }
 
@@ -215,11 +215,11 @@ impl FrameHeader {
             header_len,
             flags,
             session_id: read_u128(input, 6),
-            service_id: read_u64(input, 22),
-            path_id: read_u16(input, 30),
-            route_id: read_u16(input, 32),
-            sequence: read_u64(input, 34),
-            payload_len: read_u16(input, 42),
+            service_id: read_u16(input, 22),
+            path_id: read_u16(input, 24),
+            route_id: read_u16(input, 26),
+            sequence: read_u64(input, 28),
+            payload_len: read_u16(input, 36),
         })
     }
 }

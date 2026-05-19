@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use gatherlink_protocol::control::{
     ClockSyncMode, ControlMessage, ControlPayload, InternalClockSync, NtpState, PathCapacity, PathLatency,
-    PathMetadata, SinkTime,
+    PathMetadata, ServiceEndpointAssertion, ServiceMetadata, SinkTime,
 };
 use gatherlink_pybindings::dto::{PyPathConfig, PySchedulerConfig, PyUdpServiceConfig};
 use gatherlink_pybindings::engine_api::PyCoreDataplane;
@@ -19,6 +19,10 @@ fn python_facing_dataplane_forwards_one_udp_payload() {
         target.local_addr().unwrap().to_string(),
         Some("127.0.0.1:0".to_owned()),
         100,
+        "fixed",
+        0,
+        1,
+        0,
     )
     .unwrap();
     let mut dataplane = PyCoreDataplane::bind(vec![service]).unwrap();
@@ -70,6 +74,10 @@ fn python_facing_status_exposes_received_control_metadata() {
         target.local_addr().unwrap().to_string(),
         Some("127.0.0.1:0".to_owned()),
         100,
+        "fixed",
+        0,
+        1,
+        0,
     )
     .unwrap();
     let mut dataplane = PyCoreDataplane::bind(vec![service]).unwrap();
@@ -89,17 +97,32 @@ fn python_facing_status_exposes_received_control_metadata() {
             .unwrap(),
         ),
         ControlMessage::SinkTime(SinkTime::new(3, 1_776_000_000_000_000, 77_000_000, NtpState::Synchronized).unwrap()),
+        ControlMessage::ServiceMetadata(ServiceMetadata::new(256, "udp-main").unwrap()),
+        ControlMessage::ServiceEndpointAssertion(
+            ServiceEndpointAssertion::new(256, target.local_addr().unwrap().to_string()).unwrap(),
+        ),
     ])
     .unwrap()
     .encode()
     .unwrap();
 
-    dataplane.observe_received_data_frame(1, 3, 1, 512);
-    dataplane
-        .observe_received_control_payload(&control, control.len() + 44, Some(3))
-        .unwrap();
+    dataplane.observe_received_data_frame(256, 3, 1, 512);
+    dataplane.observe_received_reserved_service_payload(
+        1,
+        3,
+        41,
+        &control,
+        control.len() + gatherlink_protocol::frame::V1_HEADER_LEN,
+    );
 
     Python::with_gil(|py| {
+        let events = dataplane.drain_reserved_service_events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].service_id(), 1);
+        assert_eq!(events[0].path_id(), 3);
+        assert_eq!(events[0].sequence(), 41);
+        assert_eq!(events[0].payload(), control);
+
         let status = dataplane.status_snapshot(py).unwrap();
         let root = status.bind(py).downcast::<PyDict>().unwrap();
         let path_stats_value = root.get_item("path_stats").unwrap().unwrap();
@@ -124,15 +147,6 @@ fn python_facing_status_exposes_received_control_metadata() {
             received.get_item("frames").unwrap().unwrap().extract::<u64>().unwrap(),
             1
         );
-        assert_eq!(
-            received
-                .get_item("messages")
-                .unwrap()
-                .unwrap()
-                .extract::<u64>()
-                .unwrap(),
-            5
-        );
         let path_control_value = control_metadata.get_item("path_control").unwrap().unwrap();
         let path_control = path_control_value.downcast::<PyDict>().unwrap();
         let path_three_control_value = path_control.get_item("3").unwrap().unwrap();
@@ -140,85 +154,6 @@ fn python_facing_status_exposes_received_control_metadata() {
         let rx_value = path_three_control.get_item("rx").unwrap().unwrap();
         let rx = rx_value.downcast::<PyDict>().unwrap();
         assert_eq!(rx.get_item("frames").unwrap().unwrap().extract::<u64>().unwrap(), 1);
-
-        let names_value = control_metadata.get_item("path_metadata").unwrap().unwrap();
-        let names = names_value.downcast::<PyDict>().unwrap();
-        assert_eq!(
-            names.get_item("3").unwrap().unwrap().extract::<String>().unwrap(),
-            "path-three"
-        );
-        let capacity_value = control_metadata.get_item("path_capacity").unwrap().unwrap();
-        let capacity = capacity_value.downcast::<PyDict>().unwrap();
-        let path_capacity_value = capacity.get_item("3").unwrap().unwrap();
-        let path_capacity = path_capacity_value.downcast::<PyDict>().unwrap();
-        assert_eq!(
-            path_capacity
-                .get_item("tx_bps")
-                .unwrap()
-                .unwrap()
-                .extract::<u64>()
-                .unwrap(),
-            10_000_000
-        );
-        let latency_value = control_metadata.get_item("path_latency").unwrap().unwrap();
-        let latency = latency_value.downcast::<PyDict>().unwrap();
-        let path_latency_value = latency.get_item("3").unwrap().unwrap();
-        let path_latency = path_latency_value.downcast::<PyDict>().unwrap();
-        assert_eq!(
-            path_latency
-                .get_item("tx_current_us")
-                .unwrap()
-                .unwrap()
-                .extract::<u32>()
-                .unwrap(),
-            2_500
-        );
-        assert_eq!(
-            path_latency
-                .get_item("tx_mean_us")
-                .unwrap()
-                .unwrap()
-                .extract::<u32>()
-                .unwrap(),
-            2_000
-        );
-        assert!(path_latency.get_item("rx_current_us").unwrap().unwrap().is_none());
-        assert_eq!(
-            path_latency
-                .get_item("rx_mean_us")
-                .unwrap()
-                .unwrap()
-                .extract::<u32>()
-                .unwrap(),
-            3_000
-        );
-        let sync_value = control_metadata.get_item("internal_clock_sync").unwrap().unwrap();
-        let sync = sync_value.downcast::<PyDict>().unwrap();
-        assert_eq!(
-            sync.get_item("exchange_id").unwrap().unwrap().extract::<u64>().unwrap(),
-            41
-        );
-        assert_eq!(sync.get_item("mode").unwrap().unwrap().extract::<u8>().unwrap(), 2);
-        let sink_time_value = control_metadata.get_item("sink_time").unwrap().unwrap();
-        let sink_time = sink_time_value.downcast::<PyDict>().unwrap();
-        assert_eq!(
-            sink_time
-                .get_item("sink_unix_us")
-                .unwrap()
-                .unwrap()
-                .extract::<u64>()
-                .unwrap(),
-            1_776_000_000_000_000
-        );
-        assert_eq!(
-            sink_time
-                .get_item("ntp_state")
-                .unwrap()
-                .unwrap()
-                .extract::<u8>()
-                .unwrap(),
-            1
-        );
     });
 }
 
@@ -231,6 +166,10 @@ fn python_facing_dataplane_forwards_ipv6_udp_payload() {
         target.local_addr().unwrap().to_string(),
         Some("[::1]:0".to_owned()),
         100,
+        "fixed",
+        0,
+        1,
+        0,
     )
     .unwrap();
     let mut dataplane = PyCoreDataplane::bind(vec![service]).unwrap();
@@ -256,6 +195,10 @@ fn python_facing_dataplane_reapplies_target_update() {
         first_target.local_addr().unwrap().to_string(),
         Some("127.0.0.1:0".to_owned()),
         100,
+        "fixed",
+        0,
+        1,
+        0,
     )
     .unwrap();
     let mut dataplane = PyCoreDataplane::bind(vec![service]).unwrap();
@@ -265,6 +208,10 @@ fn python_facing_dataplane_reapplies_target_update() {
         second_target.local_addr().unwrap().to_string(),
         Some(listen.clone()),
         100,
+        "fixed",
+        0,
+        1,
+        0,
     )
     .unwrap();
 
@@ -287,10 +234,18 @@ fn python_facing_dataplane_accepts_explicit_paths() {
         target.local_addr().unwrap().to_string(),
         Some("127.0.0.1:0".to_owned()),
         200,
+        "learned-single-source",
+        0,
+        1,
+        0,
     )
     .unwrap();
     assert_eq!(service.priority(), 200);
-    let path = PyPathConfig::new(3, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0).unwrap();
+    assert_eq!(service.return_mode(), "learned-single-source");
+    let path = PyPathConfig::new(
+        3, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+    )
+    .unwrap();
     assert_eq!(path.tx_capacity_bps(), None);
     let mut dataplane = PyCoreDataplane::bind_with_paths(vec![service], vec![path]).unwrap();
     let service_addr = dataplane.service_local_addr("udp-main").unwrap();
@@ -323,6 +278,8 @@ fn python_facing_path_config_accepts_scheduler_primitives() {
         150_000,
         64,
         524_288,
+        Some("127.0.0.1:10000".to_owned()),
+        Some("127.0.0.1:10001".to_owned()),
     )
     .unwrap();
 
@@ -334,6 +291,8 @@ fn python_facing_path_config_accepts_scheduler_primitives() {
     assert_eq!(path.reorder_hold_us(), 150_000);
     assert_eq!(path.max_in_flight_packets(), 64);
     assert_eq!(path.max_in_flight_bytes(), 524_288);
+    assert_eq!(path.transport_bind().as_deref(), Some("127.0.0.1:10000"));
+    assert_eq!(path.transport_remote().as_deref(), Some("127.0.0.1:10001"));
 }
 
 #[test]
@@ -345,11 +304,21 @@ fn python_facing_dataplane_accepts_scheduler_config() {
         target.local_addr().unwrap().to_string(),
         Some("127.0.0.1:0".to_owned()),
         100,
+        "fixed",
+        0,
+        1,
+        0,
     )
     .unwrap();
     let paths = vec![
-        PyPathConfig::new(5, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0).unwrap(),
-        PyPathConfig::new(6, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0).unwrap(),
+        PyPathConfig::new(
+            5, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+        )
+        .unwrap(),
+        PyPathConfig::new(
+            6, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+        )
+        .unwrap(),
     ];
     let scheduler = PySchedulerConfig::new("round_robin").unwrap();
     let mut dataplane = PyCoreDataplane::bind_with_scheduler(vec![service], paths, scheduler).unwrap();
@@ -365,4 +334,46 @@ fn python_facing_dataplane_accepts_scheduler_config() {
     target.recv_from(&mut buffer).unwrap();
     assert_eq!(outcomes[0].path_id(), 5);
     assert_eq!(outcomes[1].path_id(), 6);
+}
+
+#[test]
+fn python_nonblocking_forward_returns_empty_when_app_socket_is_quiet() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service = PyUdpServiceConfig::new(
+        "udp-main".to_owned(),
+        target.local_addr().unwrap().to_string(),
+        Some("127.0.0.1:0".to_owned()),
+        100,
+        "fixed",
+        0,
+        1,
+        0,
+    )
+    .unwrap();
+    let mut dataplane = PyCoreDataplane::bind(vec![service]).unwrap();
+
+    let outcomes = dataplane
+        .forward_available_for_service_nonblocking("udp-main", 8)
+        .unwrap();
+
+    assert!(outcomes.is_empty());
+}
+
+#[test]
+fn python_facing_scheduler_config_accepts_all_compiled_modes() {
+    for mode in [
+        "round_robin",
+        "weighted_round_robin",
+        "lowest_latency",
+        "loss_aware",
+        "capacity_aware",
+        "least_queue",
+        "earliest_completion_first",
+        "blocking_estimation",
+        "balanced",
+        "adaptive",
+    ] {
+        let scheduler = PySchedulerConfig::new(mode).unwrap();
+        assert_eq!(scheduler.mode(), mode);
+    }
 }

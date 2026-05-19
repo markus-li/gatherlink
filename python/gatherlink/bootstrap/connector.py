@@ -8,11 +8,48 @@ should receive already-validated runtime state and should not contain business l
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
+from gatherlink.bootstrap.cache import BootstrapEndpoint
 from gatherlink.shared.logging import get_logger
+from gatherlink.shared.models import GatherlinkBaseModel
 
 logger = get_logger(__name__)
 
-# File-specific TODO:
-# - Validate candidate endpoint by authenticated probe.
-# - Try alternate resolve method, path, carrier, and protocol on failure.
-# - Cache last-known-good endpoint/profile only after authenticated success.
+
+class BootstrapProbeResult(GatherlinkBaseModel):
+    """Result of validating one bootstrap candidate."""
+
+    endpoint: BootstrapEndpoint
+    reachable: bool
+    authenticated: bool
+    checked_at: datetime
+    warning: str | None = None
+
+
+def probe_candidate(endpoint: BootstrapEndpoint, *, allow_insecure: bool = False) -> BootstrapProbeResult:
+    """
+    Validate whether a candidate can be used for bootstrap.
+
+    TODO(bootstrap-auth): Replace this plaintext lab probe with an authenticated
+    challenge once identity, signing, and crypto are in place. Until then this
+    function intentionally refuses production-style validation unless the caller
+    opts into insecure local bootstrap behavior.
+    """
+    if not allow_insecure:
+        return BootstrapProbeResult(
+            endpoint=endpoint,
+            reachable=False,
+            authenticated=False,
+            checked_at=datetime.now(UTC),
+            warning="authenticated bootstrap probes are not implemented yet",
+        )
+
+    logger.warning("using insecure bootstrap candidate %s; this is only acceptable for local labs", endpoint.authority())
+    return BootstrapProbeResult(
+        endpoint=endpoint,
+        reachable=True,
+        authenticated=False,
+        checked_at=datetime.now(UTC),
+        warning="insecure plaintext bootstrap accepted for local lab use",
+    )

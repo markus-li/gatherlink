@@ -1,6 +1,7 @@
 use gatherlink_protocol::control::{
     ClockSyncMode, ControlMessage, ControlPayload, GlobalSequenceTracker, InternalClockSync, MissingRange, NtpState,
-    PathAssignment, PathCapacity, PathLatency, PathMetadata, SinkTime,
+    PathAssignment, PathCapacity, PathLatency, PathMetadata, PathMtu, ServiceDisable, ServiceEndpointAssertion,
+    ServiceMetadata, ServiceSchedulerPolicy, SinkTime,
 };
 use gatherlink_protocol::frame::{Frame, FrameKind};
 
@@ -14,6 +15,7 @@ fn control_payload_round_trips_telemetry_messages() {
         ControlMessage::PathLatency(
             PathLatency::new(7, Some(12_000), Some(10_000), Some(14_000), Some(11_000)).unwrap(),
         ),
+        ControlMessage::PathMtu(PathMtu::new(7, Some(1500), Some(1200), Some(1400), Some(1180)).unwrap()),
         ControlMessage::InternalClockSync(
             InternalClockSync::new(
                 99,
@@ -26,6 +28,10 @@ fn control_payload_round_trips_telemetry_messages() {
             .unwrap(),
         ),
         ControlMessage::SinkTime(SinkTime::new(7, 1_776_000_000_000_000, 77_000_000, NtpState::Synchronized).unwrap()),
+        ControlMessage::ServiceMetadata(ServiceMetadata::new(256, "udp-main").unwrap()),
+        ControlMessage::ServiceEndpointAssertion(ServiceEndpointAssertion::new(256, "127.0.0.1:51820").unwrap()),
+        ControlMessage::ServiceDisable(ServiceDisable::new(256, "sink declined service").unwrap()),
+        ControlMessage::ServiceSchedulerPolicy(ServiceSchedulerPolicy::new(256, 2, 512).unwrap()),
     ])
     .unwrap();
 

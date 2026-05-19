@@ -1,7 +1,7 @@
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
 
-use gatherlink_dataplane::udp_service::{UdpServiceConfig, UdpServiceError, UserlandUdpService};
+use gatherlink_dataplane::udp_service::{ServiceReturnMode, UdpServiceConfig, UdpServiceError, UserlandUdpService};
 
 #[test]
 fn binds_loopback_udp_socket_without_root() {
@@ -106,4 +106,18 @@ fn rejects_empty_service_name() {
     let err = UdpServiceConfig::new("  ", None, target).unwrap_err();
 
     assert!(matches!(err, UdpServiceError::EmptyServiceName));
+}
+
+#[test]
+fn stores_service_return_mode_from_compiled_config() {
+    let config = UdpServiceConfig::new_with_return_mode(
+        "udp-main",
+        Some("127.0.0.1:0".parse().unwrap()),
+        "127.0.0.1:51820".parse().unwrap(),
+        100,
+        ServiceReturnMode::LearnedSingleSource,
+    )
+    .unwrap();
+
+    assert_eq!(config.return_mode(), ServiceReturnMode::LearnedSingleSource);
 }

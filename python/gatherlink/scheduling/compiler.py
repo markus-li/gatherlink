@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from gatherlink.config.models import GatherlinkConfig, PathConfig, ServicePriority
 from gatherlink.config.runtime import RuntimePathSchedulerConfig, RuntimeSchedulerConfig
+from gatherlink.scheduling.metrics import SchedulerTelemetrySnapshot
+from gatherlink.scheduling.policies import compile_path_policy, rust_mode_for_policy
 from gatherlink.shared.logging import get_logger
 
 logger = get_logger(__name__)
@@ -27,25 +29,30 @@ def compile_service_priority(priority: ServicePriority) -> int:
     return SERVICE_PRIORITY_VALUES[priority]
 
 
-def compile_path_scheduler(path: PathConfig, *, index: int) -> RuntimePathSchedulerConfig:
+def compile_path_scheduler(
+    path: PathConfig,
+    *,
+    index: int,
+    config: GatherlinkConfig,
+    telemetry: SchedulerTelemetrySnapshot | None = None,
+) -> RuntimePathSchedulerConfig:
     """Compile one path's Python-owned scheduling hints into Rust-ready state."""
-    state = "disabled" if not path.scheduler.enabled else path.scheduler.state
-    return RuntimePathSchedulerConfig(
-        path_id=index,
-        route_id=0,
-        enabled=path.scheduler.enabled and state != "disabled",
-        state=state,
-        weight=path.scheduler.weight,
-        mtu=path.scheduler.mtu,
-    )
+    return compile_path_policy(path, index=index, mode=config.scheduler.mode, telemetry=telemetry)
 
 
-def compile_scheduler(config: GatherlinkConfig) -> RuntimeSchedulerConfig:
+def compile_scheduler(
+    config: GatherlinkConfig,
+    *,
+    telemetry: SchedulerTelemetrySnapshot | None = None,
+) -> RuntimeSchedulerConfig:
     """Compile scheduler policy into a small runtime DTO for Rust execution."""
-    # TODO: Add weighted/adaptive modes here once Python has trustworthy path
-    # metrics. Rust should only receive the selected mode and precompiled path
-    # execution state.
+    # TODO(scheduler-hot-reapply): Feed this function from the path manager's
+    # live telemetry loop. The shape is ready now: Python can recompile mode,
+    # path state, weights, and primitive limits without moving policy to Rust.
     return RuntimeSchedulerConfig(
-        mode="round_robin",
-        paths=[compile_path_scheduler(path, index=index) for index, path in enumerate(config.paths)],
+        mode=rust_mode_for_policy(config.scheduler.mode),
+        paths=[
+            compile_path_scheduler(path, index=index, config=config, telemetry=telemetry)
+            for index, path in enumerate(config.paths)
+        ],
     )

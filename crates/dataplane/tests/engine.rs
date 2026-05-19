@@ -4,9 +4,7 @@ use std::time::Duration;
 use gatherlink_dataplane::engine::{CoreDataplane, ReapplyOutcome};
 use gatherlink_dataplane::runtime_config::{CorePathConfig, CoreRuntimeConfig, PathSchedulerState};
 use gatherlink_dataplane::udp_service::UdpServiceConfig;
-use gatherlink_protocol::control::{
-    ClockSyncMode, ControlMessage, ControlPayload, InternalClockSync, PathCapacity, PathLatency, PathMetadata,
-};
+use gatherlink_protocol::control::{ControlMessage, ControlPayload, PathMetadata};
 
 #[test]
 fn forwards_one_udp_payload_through_core_frame_boundary() {
@@ -45,62 +43,61 @@ fn forwards_one_udp_payload_through_core_frame_boundary() {
 }
 
 #[test]
+fn python_applied_service_disable_stops_service_traffic() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config =
+        CoreRuntimeConfig::single_udp_service("udp-main", "127.0.0.1:0".parse().unwrap(), target.local_addr().unwrap())
+            .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+
+    dataplane.disable_service(256, "python policy stopped service");
+    let disabled = dataplane.disabled_services_snapshot();
+    assert!(disabled[&256].contains("python policy"));
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    sender.send_to(b"must-stop", service_addr).unwrap();
+    let err = dataplane.forward_one_for_service("udp-main").unwrap_err();
+    assert!(err.to_string().contains("service id 256 is disabled"));
+}
+
+#[test]
 fn telemetry_records_received_data_and_control_facts() {
     let target = UdpSocket::bind("127.0.0.1:0").unwrap();
     let config =
         CoreRuntimeConfig::single_udp_service("udp-main", "127.0.0.1:0".parse().unwrap(), target.local_addr().unwrap())
             .unwrap();
     let mut dataplane = CoreDataplane::bind(config).unwrap();
-    let control = ControlPayload::new(vec![
-        ControlMessage::PathMetadata(PathMetadata::new(7, "path-a").unwrap()),
-        ControlMessage::PathCapacity(PathCapacity::new(7, Some(3_000_000), Some(1_500_000)).unwrap()),
-        ControlMessage::PathLatency(
-            PathLatency::new(7, Some(12_000), Some(10_000), Some(14_000), Some(11_000)).unwrap(),
-        ),
-        ControlMessage::InternalClockSync(
-            InternalClockSync::new(
-                99,
-                7,
-                ClockSyncMode::Response,
-                1_000_000,
-                Some(1_010_000),
-                Some(1_011_000),
-            )
-            .unwrap(),
-        ),
-    ])
+    let control = ControlPayload::new(vec![ControlMessage::PathMetadata(
+        PathMetadata::new(7, "path-a").unwrap(),
+    )])
+    .unwrap()
+    .encode()
     .unwrap();
 
-    dataplane.observe_received_data_frame(1, 7, 1, 1200);
-    dataplane.observe_received_control_payload_on_path(7, &control, 128);
+    dataplane.observe_received_data_frame(256, 7, 1, 1200);
+    dataplane.observe_received_reserved_service_payload(1, 7, 99, control.clone(), 128);
 
     let metrics = dataplane.metrics_snapshot();
     assert_eq!(metrics.paths[&7].rx_packets, 1);
     assert_eq!(metrics.paths[&7].rx_bytes, 1200);
     assert_eq!(metrics.control_metadata.received.frames, 1);
-    assert_eq!(metrics.control_metadata.received.messages, 4);
     assert_eq!(metrics.control_metadata.received.bytes, 128);
     assert_eq!(metrics.control_metadata.path_control[&7].rx.frames, 1);
     assert_eq!(metrics.control_metadata.path_control[&7].rx.bytes, 128);
-    assert_eq!(metrics.control_metadata.path_metadata[&7], "path-a");
-    assert_eq!(metrics.control_metadata.path_capacity[&7].tx_bps, Some(3_000_000));
-    assert_eq!(metrics.control_metadata.path_capacity[&7].rx_bps, Some(1_500_000));
-    assert_eq!(metrics.control_metadata.path_latency[&7].tx_current_us, Some(12_000));
-    assert_eq!(metrics.control_metadata.path_latency[&7].tx_mean_us, Some(10_000));
-    assert_eq!(metrics.control_metadata.path_latency[&7].rx_current_us, Some(14_000));
-    assert_eq!(metrics.control_metadata.path_latency[&7].rx_mean_us, Some(11_000));
-    let sync = metrics.control_metadata.internal_clock_sync.unwrap();
-    assert_eq!(sync.exchange_id, 99);
-    assert_eq!(sync.path_id, 7);
-    assert_eq!(sync.mode, 2);
-    assert_eq!(sync.origin_us, 1_000_000);
-    assert_eq!(sync.receive_us, Some(1_010_000));
-    assert_eq!(sync.transmit_us, Some(1_011_000));
+    let events = dataplane.drain_reserved_service_events();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].service_id, 1);
+    assert_eq!(events[0].path_id, 7);
+    assert_eq!(events[0].sequence, 99);
+    assert_eq!(events[0].payload, control);
 }
 
 #[test]
 fn control_payload_duplication_uses_all_enabled_paths_with_one_sequence() {
     let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let path_a_remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let path_b_remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let path_c_remote = UdpSocket::bind("127.0.0.1:0").unwrap();
     let config = CoreRuntimeConfig::new_with_paths(
         vec![UdpServiceConfig::new(
             "udp-main",
@@ -109,9 +106,15 @@ fn control_payload_duplication_uses_all_enabled_paths_with_one_sequence() {
         )
         .unwrap()],
         vec![
-            CorePathConfig::new_with_scheduler(10, 0, 1200, true, PathSchedulerState::Active, 1).unwrap(),
-            CorePathConfig::new_with_scheduler(20, 0, 1200, true, PathSchedulerState::Busy, 1).unwrap(),
-            CorePathConfig::new_with_scheduler(30, 0, 1200, false, PathSchedulerState::Disabled, 1).unwrap(),
+            CorePathConfig::new_with_scheduler(10, 0, 1200, true, PathSchedulerState::Active, 1)
+                .unwrap()
+                .with_transport("127.0.0.1:0".parse().unwrap(), path_a_remote.local_addr().unwrap()),
+            CorePathConfig::new_with_scheduler(20, 0, 1200, true, PathSchedulerState::Busy, 1)
+                .unwrap()
+                .with_transport("127.0.0.1:0".parse().unwrap(), path_b_remote.local_addr().unwrap()),
+            CorePathConfig::new_with_scheduler(30, 0, 1200, false, PathSchedulerState::Disabled, 1)
+                .unwrap()
+                .with_transport("127.0.0.1:0".parse().unwrap(), path_c_remote.local_addr().unwrap()),
         ],
     )
     .unwrap();
@@ -123,9 +126,8 @@ fn control_payload_duplication_uses_all_enabled_paths_with_one_sequence() {
     .encode()
     .unwrap();
 
-    let plans = dataplane
-        .duplicate_control_payload_for_all_paths(1, control.clone())
-        .unwrap();
+    dataplane.set_service_scheduler(1, gatherlink_dataplane::udp_service::ServiceSchedulerConfig::new(0, 0));
+    let plans = dataplane.transmit_service_payload(1, control.clone()).unwrap();
 
     assert_eq!(plans.len(), 2);
     assert_eq!(plans.iter().map(|plan| plan.path_id).collect::<Vec<_>>(), vec![10, 20]);
@@ -303,8 +305,8 @@ fn fragments_oversized_udp_payload_when_no_path_can_fit_it_whole() {
     let (length, _source) = target.recv_from(&mut buffer).unwrap();
     assert_eq!(&buffer[..length], payload.as_slice());
     assert_eq!(outcome.path_id, 9);
-    assert_eq!(outcome.frame_count, 5);
-    assert_eq!(outcome.fragment_count, 4);
+    assert_eq!(outcome.frame_count, 4);
+    assert_eq!(outcome.fragment_count, 3);
     assert_eq!(outcome.batch_count, 0);
 }
 
@@ -337,8 +339,8 @@ fn fragments_onto_available_path_when_whole_fit_path_is_busy() {
     let (length, _source) = target.recv_from(&mut buffer).unwrap();
     assert_eq!(&buffer[..length], payload.as_slice());
     assert_eq!(outcome.path_id, 2);
-    assert_eq!(outcome.frame_count, 5);
-    assert_eq!(outcome.fragment_count, 4);
+    assert_eq!(outcome.frame_count, 4);
+    assert_eq!(outcome.fragment_count, 3);
 }
 
 #[test]

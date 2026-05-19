@@ -4,4 +4,5 @@
 //! compiled scheduler mode and path state handed to Rust.
 
 pub mod all_paths;
+pub mod compiled;
 pub mod weighted_rr;

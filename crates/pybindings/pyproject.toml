@@ -1,0 +1,13 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "gatherlink-pybindings"
+version = "0.1.0"
+description = "Python extension module for the Gatherlink Rust dataplane"
+requires-python = ">=3.12"
+
+[tool.maturin]
+module-name = "gatherlink_pybindings"
+features = ["extension-module"]

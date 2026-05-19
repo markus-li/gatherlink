@@ -13,10 +13,27 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from gatherlink.config.models import NodeRole, PathSchedulerState, SecurityMode, ServicePriority
+from gatherlink.config.models import (
+    NodeRole,
+    PathSchedulerState,
+    SecurityMode,
+    ServicePriority,
+    ServiceReturnMode,
+)
 from gatherlink.shared.models import GatherlinkBaseModel
 
-SchedulerMode = Literal["round_robin"]
+SchedulerMode = Literal[
+    "round_robin",
+    "weighted_round_robin",
+    "lowest_latency",
+    "loss_aware",
+    "capacity_aware",
+    "least_queue",
+    "earliest_completion_first",
+    "blocking_estimation",
+    "balanced",
+    "adaptive",
+]
 
 
 class RuntimePathSchedulerConfig(GatherlinkBaseModel):
@@ -28,6 +45,13 @@ class RuntimePathSchedulerConfig(GatherlinkBaseModel):
     state: PathSchedulerState = "active"
     weight: int = 1
     mtu: int = 1200
+    tx_capacity_bps: int | None = None
+    rx_capacity_bps: int | None = None
+    latency_us: int | None = None
+    loss_ppm: int = Field(default=0, ge=0, le=1_000_000)
+    reorder_hold_us: int = Field(default=0, ge=0)
+    max_in_flight_packets: int = Field(default=0, ge=0, le=65535)
+    max_in_flight_bytes: int = Field(default=0, ge=0)
 
 
 class RuntimeSchedulerConfig(GatherlinkBaseModel):
@@ -44,18 +68,25 @@ class RuntimePathConfig(GatherlinkBaseModel):
     interface: str
     source_ip: str | None = None
     gateway: str | None = None
+    transport_bind: str | None = None
+    transport_remote: str | None = None
     scheduler: RuntimePathSchedulerConfig
 
 
 class RuntimeServiceConfig(GatherlinkBaseModel):
     """A UDP service with all runtime-visible endpoints made explicit."""
 
+    service_id: int
+    service_id_explicit: bool = False
     name: str
     protocol: Literal["udp"] = "udp"
     target: str
     listen: str | None = None
     priority: ServicePriority = "normal"
     priority_value: int = 100
+    return_mode: ServiceReturnMode = "fixed"
+    scheduler_fanout: int = 1
+    scheduler_fanout_below_bytes: int = 0
 
 
 class RuntimeSecurityConfig(GatherlinkBaseModel):

@@ -8,7 +8,7 @@ should receive already-validated runtime state and should not contain business l
 
 from __future__ import annotations
 
-from gatherlink.config.models import GatherlinkConfig, ServiceConfig
+from gatherlink.config.models import USER_SERVICE_ID_START, GatherlinkConfig, ServiceConfig
 from gatherlink.config.runtime import (
     RuntimeConfig,
     RuntimeDnsHelperConfig,
@@ -40,6 +40,8 @@ def _expand_paths(
             interface=path.interface,
             source_ip=path.source_ip,
             gateway=path.gateway,
+            transport_bind=path.transport_bind,
+            transport_remote=path.transport_remote,
             scheduler=scheduler_paths[index],
         )
         for index, path in enumerate(config.paths)
@@ -48,16 +50,47 @@ def _expand_paths(
 
 def _expand_services(config: GatherlinkConfig) -> list[RuntimeServiceConfig]:
     """Copy services into runtime objects with the protocol made explicit."""
+    service_ids = _allocate_service_ids(config.services)
     return [
         RuntimeServiceConfig(
+            service_id=service_ids[index],
+            service_id_explicit=service.service_id is not None,
             name=service.name,
             target=service.target,
             listen=service.listen,
             priority=service.priority,
             priority_value=compile_service_priority(service.priority),
+            return_mode=service.return_mode,
+            scheduler_fanout=service.scheduler_fanout,
+            scheduler_fanout_below_bytes=service.scheduler_fanout_below_bytes,
         )
-        for service in config.services
+        for index, service in enumerate(config.services)
     ]
+
+
+def _allocate_service_ids(services: list[ServiceConfig]) -> list[int]:
+    """
+    Assign deterministic user/application service ids while respecting explicit ids.
+
+    The config validator rejects duplicate explicit ids and reserved ids. This
+    allocator also skips explicit ids when filling automatic ids, so mixed
+    explicit/implicit service lists never collide before they reach Rust.
+    """
+    explicit_ids = {service.service_id for service in services if service.service_id is not None}
+    next_service_id = USER_SERVICE_ID_START
+    assigned: list[int] = []
+    for service in services:
+        if service.service_id is not None:
+            assigned.append(service.service_id)
+            continue
+
+        while next_service_id in explicit_ids:
+            next_service_id += 1
+        if next_service_id > 65535:
+            raise ValueError("too many services for the u16 user service id range")
+        assigned.append(next_service_id)
+        next_service_id += 1
+    return assigned
 
 
 def _expand_helpers(config: GatherlinkConfig) -> list[RuntimeWireGuardHelperConfig | RuntimeDnsHelperConfig]:

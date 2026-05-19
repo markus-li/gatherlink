@@ -16,16 +16,32 @@ from gatherlink.time.offset import InternalClockSyncMessage, SinkTimeMessage
 GATHERLINK_PROTOCOL_VERSION = 1
 GATHERLINK_KIND_DATA = 1
 GATHERLINK_KIND_CONTROL = 2
-GATHERLINK_V1_HEADER_LEN = 44
+GATHERLINK_V1_HEADER_LEN = 38
+SERVICE_ID_INVALID = 0
+SERVICE_ID_CONTROL_METADATA = 1
+SERVICE_ID_TIME_SYNC = 2
+SERVICE_ID_INTERNAL_DNS = 3
+SERVICE_ID_PATH_DISCOVERY = 4
+SERVICE_ID_DIAGNOSTICS = 5
+SERVICE_ID_CONFIG_APPLY = 6
+SERVICE_ID_AUTH_CRYPTO = 7
+SERVICE_ID_REMOTE_STATUS = 8
+RESERVED_SERVICE_ID_END = 255
+USER_SERVICE_ID_START = RESERVED_SERVICE_ID_END + 1
 CONTROL_PAYLOAD_VERSION = 1
 CONTROL_TYPE_PATH_METADATA = 3
 CONTROL_TYPE_PATH_CAPACITY = 4
 CONTROL_TYPE_PATH_LATENCY = 5
 CONTROL_TYPE_INTERNAL_CLOCK_SYNC = 6
 CONTROL_TYPE_SINK_TIME = 7
+CONTROL_TYPE_SERVICE_METADATA = 8
+CONTROL_TYPE_SERVICE_ENDPOINT_ASSERTION = 9
+CONTROL_TYPE_SERVICE_DISABLE = 10
+CONTROL_TYPE_PATH_MTU = 11
+CONTROL_TYPE_SERVICE_SCHEDULER_POLICY = 12
 SEQUENCE_SPACE = 1 << 64
 DEFAULT_SESSION_ID = 0
-DEFAULT_SERVICE_ID = 0
+DEFAULT_SERVICE_ID = USER_SERVICE_ID_START
 DEFAULT_ROUTE_ID = 0
 
 
@@ -43,8 +59,13 @@ class ControlFrame:
     """Decoded control frame fields used for peer names and telemetry."""
 
     path_metadata: dict[int, str]
+    service_metadata: dict[int, str]
+    service_endpoint_assertions: dict[int, str]
+    service_disables: dict[int, str]
+    service_scheduler_policies: dict[int, tuple[int, int]]
     path_capacity_bps: dict[int, tuple[int | None, int | None]]
     path_latency_us: dict[int, tuple[int | None, int | None, int | None, int | None]]
+    path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]]
     internal_clock_sync: list[InternalClockSyncMessage]
     sink_time: list[SinkTimeMessage]
 
@@ -67,11 +88,11 @@ def encode_data_frame(sequence: int, path_id: int, payload: bytes) -> bytes:
     _write_u16(header, 2, GATHERLINK_V1_HEADER_LEN)
     _write_u16(header, 4, 0)
     _write_u128(header, 6, DEFAULT_SESSION_ID)
-    _write_u64(header, 22, DEFAULT_SERVICE_ID)
-    _write_u16(header, 30, path_id)
-    _write_u16(header, 32, DEFAULT_ROUTE_ID)
-    _write_u64(header, 34, sequence)
-    _write_u16(header, 42, len(payload))
+    _write_u16(header, 22, DEFAULT_SERVICE_ID)
+    _write_u16(header, 24, path_id)
+    _write_u16(header, 26, DEFAULT_ROUTE_ID)
+    _write_u64(header, 28, sequence)
+    _write_u16(header, 36, len(payload))
     return bytes(header) + payload
 
 
@@ -85,11 +106,11 @@ def encode_control_frame(path_id: int, payload: bytes) -> bytes:
     _write_u16(header, 2, GATHERLINK_V1_HEADER_LEN)
     _write_u16(header, 4, 0)
     _write_u128(header, 6, DEFAULT_SESSION_ID)
-    _write_u64(header, 22, DEFAULT_SERVICE_ID)
-    _write_u16(header, 30, path_id)
-    _write_u16(header, 32, DEFAULT_ROUTE_ID)
-    _write_u64(header, 34, 0)
-    _write_u16(header, 42, len(payload))
+    _write_u16(header, 22, SERVICE_ID_CONTROL_METADATA)
+    _write_u16(header, 24, path_id)
+    _write_u16(header, 26, DEFAULT_ROUTE_ID)
+    _write_u64(header, 28, 0)
+    _write_u16(header, 36, len(payload))
     return bytes(header) + payload
 
 
@@ -101,13 +122,13 @@ def decode_data_frame(payload: bytes) -> DataFrame | None:
         return None
 
     header_len = _read_u16(payload, 2)
-    payload_len = _read_u16(payload, 42)
+    payload_len = _read_u16(payload, 36)
     if header_len < GATHERLINK_V1_HEADER_LEN or len(payload) != header_len + payload_len:
         return None
 
     return DataFrame(
-        path_id=_read_u16(payload, 30),
-        sequence=_read_u64(payload, 34),
+        path_id=_read_u16(payload, 24),
+        sequence=_read_u64(payload, 28),
         payload=payload[header_len:],
     )
 
@@ -120,7 +141,7 @@ def decode_control_frame(payload: bytes) -> ControlFrame | None:
         return None
 
     header_len = _read_u16(payload, 2)
-    payload_len = _read_u16(payload, 42)
+    payload_len = _read_u16(payload, 36)
     if header_len < GATHERLINK_V1_HEADER_LEN or len(payload) != header_len + payload_len:
         return None
 
@@ -129,18 +150,37 @@ def decode_control_frame(payload: bytes) -> ControlFrame | None:
 
 def encode_control_payload(
     path_metadata: dict[int, str],
+    service_metadata: dict[int, str] | None = None,
+    service_endpoint_assertions: dict[int, str] | None = None,
+    service_disables: dict[int, str] | None = None,
+    service_scheduler_policies: dict[int, tuple[int, int]] | None = None,
     path_capacity_bps: dict[int, tuple[int | None, int | None]] | None = None,
     path_latency_us: dict[int, tuple[int | None, int | None, int | None, int | None]] | None = None,
+    path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]] | None = None,
     path_clock_sync: list[InternalClockSyncMessage] | None = None,
     sink_time: list[SinkTimeMessage] | None = None,
 ) -> bytes:
     """Encode optional control messages; absent fields cost no bytes on the wire."""
+    service_metadata = service_metadata or {}
+    service_endpoint_assertions = service_endpoint_assertions or {}
+    service_disables = service_disables or {}
+    service_scheduler_policies = service_scheduler_policies or {}
     path_capacity_bps = path_capacity_bps or {}
     path_latency_us = path_latency_us or {}
+    path_mtu = path_mtu or {}
     path_clock_sync = path_clock_sync or []
     sink_time = sink_time or []
     message_count = (
-        len(path_metadata) + len(path_capacity_bps) + len(path_latency_us) + len(path_clock_sync) + len(sink_time)
+        len(path_metadata)
+        + len(service_metadata)
+        + len(service_endpoint_assertions)
+        + len(service_disables)
+        + len(service_scheduler_policies)
+        + len(path_capacity_bps)
+        + len(path_latency_us)
+        + len(path_mtu)
+        + len(path_clock_sync)
+        + len(sink_time)
     )
     if message_count == 0:
         raise ValueError("control payload must include at least one message")
@@ -148,8 +188,13 @@ def encode_control_payload(
     output.append(CONTROL_PAYLOAD_VERSION)
     _append_u16(output, message_count)
     _encode_path_metadata(output, path_metadata)
+    _encode_service_metadata(output, service_metadata)
+    _encode_service_endpoint_assertions(output, service_endpoint_assertions)
+    _encode_service_disables(output, service_disables)
+    _encode_service_scheduler_policies(output, service_scheduler_policies)
     _encode_path_capacity(output, path_capacity_bps)
     _encode_path_latency(output, path_latency_us)
+    _encode_path_mtu(output, path_mtu)
     _encode_internal_clock_sync(output, path_clock_sync)
     _encode_sink_time(output, sink_time)
     if len(output) > _u16_max():
@@ -169,8 +214,13 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
     message_count = _read_u16(payload, 1)
     cursor = 3
     path_metadata: dict[int, str] = {}
+    service_metadata: dict[int, str] = {}
+    service_endpoint_assertions: dict[int, str] = {}
+    service_disables: dict[int, str] = {}
+    service_scheduler_policies: dict[int, tuple[int, int]] = {}
     path_capacity_bps: dict[int, tuple[int | None, int | None]] = {}
     path_latency_us: dict[int, tuple[int | None, int | None, int | None, int | None]] = {}
+    path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]] = {}
     internal_clock_sync: list[InternalClockSyncMessage] = []
     sink_time: list[SinkTimeMessage] = []
     for _ in range(message_count):
@@ -189,6 +239,30 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
                 return None
             path_id, path_name = decoded
             path_metadata[path_id] = path_name
+        elif message_type == CONTROL_TYPE_SERVICE_METADATA:
+            decoded = _decode_service_metadata_value(value)
+            if decoded is None:
+                return None
+            service_id, service_name = decoded
+            service_metadata[service_id] = service_name
+        elif message_type == CONTROL_TYPE_SERVICE_ENDPOINT_ASSERTION:
+            decoded = _decode_service_endpoint_assertion_value(value)
+            if decoded is None:
+                return None
+            service_id, target = decoded
+            service_endpoint_assertions[service_id] = target
+        elif message_type == CONTROL_TYPE_SERVICE_DISABLE:
+            decoded = _decode_service_disable_value(value)
+            if decoded is None:
+                return None
+            service_id, reason = decoded
+            service_disables[service_id] = reason
+        elif message_type == CONTROL_TYPE_SERVICE_SCHEDULER_POLICY:
+            decoded_policy = _decode_service_scheduler_policy_value(value)
+            if decoded_policy is None:
+                return None
+            service_id, fanout, fanout_below_bytes = decoded_policy
+            service_scheduler_policies[service_id] = (fanout, fanout_below_bytes)
         elif message_type == CONTROL_TYPE_PATH_CAPACITY:
             decoded_capacity = _decode_path_capacity_value(value)
             if decoded_capacity is None:
@@ -201,6 +275,12 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
                 return None
             path_id, tx_current_us, tx_mean_us, rx_current_us, rx_mean_us = decoded_latency
             path_latency_us[path_id] = (tx_current_us, tx_mean_us, rx_current_us, rx_mean_us)
+        elif message_type == CONTROL_TYPE_PATH_MTU:
+            decoded_mtu = _decode_path_mtu_value(value)
+            if decoded_mtu is None:
+                return None
+            path_id, tx_link_mtu, tx_frame_mtu, rx_link_mtu, rx_frame_mtu = decoded_mtu
+            path_mtu[path_id] = (tx_link_mtu, tx_frame_mtu, rx_link_mtu, rx_frame_mtu)
         elif message_type == CONTROL_TYPE_INTERNAL_CLOCK_SYNC:
             decoded_sync = _decode_internal_clock_sync_value(value)
             if decoded_sync is None:
@@ -215,8 +295,13 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
         return None
     return ControlFrame(
         path_metadata=path_metadata,
+        service_metadata=service_metadata,
+        service_endpoint_assertions=service_endpoint_assertions,
+        service_disables=service_disables,
+        service_scheduler_policies=service_scheduler_policies,
         path_capacity_bps=path_capacity_bps,
         path_latency_us=path_latency_us,
+        path_mtu=path_mtu,
         internal_clock_sync=internal_clock_sync,
         sink_time=sink_time,
     )
@@ -232,6 +317,70 @@ def _encode_path_metadata(output: bytearray, path_metadata: dict[int, str]) -> N
         _append_u16(output, path_id)
         output.append(len(encoded_name))
         output.extend(encoded_name)
+
+
+def _encode_service_metadata(output: bytearray, service_metadata: dict[int, str]) -> None:
+    for service_id, service_name in service_metadata.items():
+        encoded_name = service_name.encode("utf-8")
+        if service_id < USER_SERVICE_ID_START or service_id > _u16_max() or not encoded_name or len(encoded_name) > 255:
+            raise ValueError("service metadata value out of range")
+        output.append(CONTROL_TYPE_SERVICE_METADATA)
+        _append_u16(output, 3 + len(encoded_name))
+        _append_u16(output, service_id)
+        output.append(len(encoded_name))
+        output.extend(encoded_name)
+
+
+def _encode_service_endpoint_assertions(output: bytearray, service_endpoint_assertions: dict[int, str]) -> None:
+    for service_id, target in service_endpoint_assertions.items():
+        encoded_target = target.encode("utf-8")
+        if (
+            service_id < USER_SERVICE_ID_START
+            or service_id > _u16_max()
+            or not encoded_target
+            or len(encoded_target) > 255
+        ):
+            raise ValueError("service endpoint assertion value out of range")
+        output.append(CONTROL_TYPE_SERVICE_ENDPOINT_ASSERTION)
+        _append_u16(output, 3 + len(encoded_target))
+        _append_u16(output, service_id)
+        output.append(len(encoded_target))
+        output.extend(encoded_target)
+
+
+def _encode_service_disables(output: bytearray, service_disables: dict[int, str]) -> None:
+    for service_id, reason in service_disables.items():
+        encoded_reason = reason.encode("utf-8")
+        if (
+            service_id < USER_SERVICE_ID_START
+            or service_id > _u16_max()
+            or not encoded_reason
+            or len(encoded_reason) > 255
+        ):
+            raise ValueError("service disable value out of range")
+        output.append(CONTROL_TYPE_SERVICE_DISABLE)
+        _append_u16(output, 3 + len(encoded_reason))
+        _append_u16(output, service_id)
+        output.append(len(encoded_reason))
+        output.extend(encoded_reason)
+
+
+def _encode_service_scheduler_policies(output: bytearray, service_scheduler_policies: dict[int, tuple[int, int]]) -> None:
+    for service_id, (fanout, fanout_below_bytes) in service_scheduler_policies.items():
+        if (
+            service_id < USER_SERVICE_ID_START
+            or service_id > _u16_max()
+            or fanout < 0
+            or fanout > _u16_max()
+            or fanout_below_bytes < 0
+            or fanout_below_bytes > _u32_max()
+        ):
+            raise ValueError("service scheduler policy value out of range")
+        output.append(CONTROL_TYPE_SERVICE_SCHEDULER_POLICY)
+        _append_u16(output, 8)
+        _append_u16(output, service_id)
+        _append_u16(output, fanout)
+        _append_u32(output, fanout_below_bytes)
 
 
 def _encode_path_capacity(output: bytearray, path_capacity_bps: dict[int, tuple[int | None, int | None]]) -> None:
@@ -259,6 +408,28 @@ def _encode_path_latency(
         _append_u32(output, _optional_u32(tx_mean_us))
         _append_u32(output, _optional_u32(rx_current_us))
         _append_u32(output, _optional_u32(rx_mean_us))
+
+
+def _encode_path_mtu(
+    output: bytearray,
+    path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]],
+) -> None:
+    for path_id, (tx_link_mtu, tx_frame_mtu, rx_link_mtu, rx_frame_mtu) in path_mtu.items():
+        if (
+            path_id < 0
+            or path_id > _u16_max()
+            or not _valid_mtu_pair(tx_link_mtu, tx_frame_mtu)
+            or not _valid_mtu_pair(rx_link_mtu, rx_frame_mtu)
+            or (tx_link_mtu is None and rx_link_mtu is None)
+        ):
+            raise ValueError("path MTU value out of range")
+        output.append(CONTROL_TYPE_PATH_MTU)
+        _append_u16(output, 10)
+        _append_u16(output, path_id)
+        _append_u16(output, _optional_u16(tx_link_mtu))
+        _append_u16(output, _optional_u16(tx_frame_mtu))
+        _append_u16(output, _optional_u16(rx_link_mtu))
+        _append_u16(output, _optional_u16(rx_frame_mtu))
 
 
 def _encode_internal_clock_sync(
@@ -312,6 +483,63 @@ def _decode_path_metadata_value(value: bytes) -> tuple[int, str] | None:
     return path_id, path_name
 
 
+def _decode_service_metadata_value(value: bytes) -> tuple[int, str] | None:
+    if len(value) < 3:
+        return None
+    service_id = _read_u16(value, 0)
+    name_len = value[2]
+    if service_id < USER_SERVICE_ID_START or len(value) != 3 + name_len:
+        return None
+    try:
+        service_name = value[3:].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not service_name:
+        return None
+    return service_id, service_name
+
+
+def _decode_service_endpoint_assertion_value(value: bytes) -> tuple[int, str] | None:
+    if len(value) < 3:
+        return None
+    service_id = _read_u16(value, 0)
+    target_len = value[2]
+    if service_id < USER_SERVICE_ID_START or len(value) != 3 + target_len:
+        return None
+    try:
+        target = value[3:].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not target:
+        return None
+    return service_id, target
+
+
+def _decode_service_disable_value(value: bytes) -> tuple[int, str] | None:
+    if len(value) < 3:
+        return None
+    service_id = _read_u16(value, 0)
+    reason_len = value[2]
+    if service_id < USER_SERVICE_ID_START or len(value) != 3 + reason_len:
+        return None
+    try:
+        reason = value[3:].decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    if not reason:
+        return None
+    return service_id, reason
+
+
+def _decode_service_scheduler_policy_value(value: bytes) -> tuple[int, int, int] | None:
+    if len(value) != 8:
+        return None
+    service_id = _read_u16(value, 0)
+    if service_id < USER_SERVICE_ID_START:
+        return None
+    return service_id, _read_u16(value, 2), _read_u32(value, 4)
+
+
 def _decode_path_capacity_value(value: bytes) -> tuple[int, int | None, int | None] | None:
     if len(value) != 18:
         return None
@@ -328,6 +556,23 @@ def _decode_path_latency_value(value: bytes) -> tuple[int, int | None, int | Non
         _decode_optional_u32(_read_u32(value, 10)),
         _decode_optional_u32(_read_u32(value, 14)),
     )
+
+
+def _decode_path_mtu_value(value: bytes) -> tuple[int, int | None, int | None, int | None, int | None] | None:
+    if len(value) != 10:
+        return None
+    path_id = _read_u16(value, 0)
+    tx_link_mtu = _decode_optional_u16(_read_u16(value, 2))
+    tx_frame_mtu = _decode_optional_u16(_read_u16(value, 4))
+    rx_link_mtu = _decode_optional_u16(_read_u16(value, 6))
+    rx_frame_mtu = _decode_optional_u16(_read_u16(value, 8))
+    if (
+        not _valid_mtu_pair(tx_link_mtu, tx_frame_mtu)
+        or not _valid_mtu_pair(rx_link_mtu, rx_frame_mtu)
+        or (tx_link_mtu is None and rx_link_mtu is None)
+    ):
+        return None
+    return path_id, tx_link_mtu, tx_frame_mtu, rx_link_mtu, rx_frame_mtu
 
 
 def _decode_internal_clock_sync_value(value: bytes) -> InternalClockSyncMessage | None:
@@ -388,12 +633,32 @@ def _optional_u32(value: int | None) -> int:
     return value
 
 
+def _optional_u16(value: int | None) -> int:
+    if value is None:
+        return 0
+    if value <= 0 or value > _u16_max():
+        raise ValueError("path MTU value out of range")
+    return value
+
+
 def _decode_optional_u64(value: int) -> int | None:
     return value or None
 
 
 def _decode_optional_u32(value: int) -> int | None:
     return value or None
+
+
+def _decode_optional_u16(value: int) -> int | None:
+    return value or None
+
+
+def _valid_mtu_pair(link_mtu: int | None, frame_mtu: int | None) -> bool:
+    if link_mtu is None and frame_mtu is None:
+        return True
+    if link_mtu is None or frame_mtu is None:
+        return False
+    return frame_mtu > 0 and frame_mtu <= link_mtu
 
 
 def _u16_max() -> int:
