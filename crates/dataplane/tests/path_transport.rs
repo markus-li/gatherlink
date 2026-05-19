@@ -2,8 +2,13 @@ use std::net::{SocketAddr, UdpSocket};
 use std::thread;
 use std::time::Duration;
 
+use gatherlink_crypto::envelope::{
+    decrypt_packet_without_replay, ENCRYPTED_DATA_HEADER_LEN, PACKET_TYPE_ENCRYPTED_DATA_V1,
+};
 use gatherlink_dataplane::engine::CoreDataplane;
-use gatherlink_dataplane::runtime_config::{CorePathConfig, CoreRuntimeConfig};
+use gatherlink_dataplane::runtime_config::{
+    CorePathConfig, CoreRuntimeConfig, SchedulerConfig, TransportSecurityConfig,
+};
 use gatherlink_dataplane::udp_service::UdpServiceConfig;
 use gatherlink_protocol::control::{ControlMessage, ControlPayload, PathMetadata};
 use gatherlink_protocol::frame::{Frame, FrameKind};
@@ -20,6 +25,26 @@ fn path(path_id: u16, bind: SocketAddr, remote: SocketAddr) -> CorePathConfig {
     CorePathConfig::new(path_id, 0, 1200, false)
         .unwrap()
         .with_transport(bind, remote)
+}
+
+fn secure_config(
+    services: Vec<UdpServiceConfig>,
+    paths: Vec<CorePathConfig>,
+    receiver_index: u32,
+    send_key: [u8; 32],
+    receive_key: [u8; 32],
+) -> CoreRuntimeConfig {
+    CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        services,
+        paths,
+        SchedulerConfig::default(),
+        TransportSecurityConfig::Static {
+            receiver_index,
+            send_key,
+            receive_key,
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -50,6 +75,40 @@ fn path_transport_sends_encoded_gatherlink_frame_not_raw_payload() {
     assert_eq!(frame.payload, b"wireguard-like-payload");
     assert_eq!(outcome.path_id, 42);
     assert_eq!(outcome.payload_len, b"wireguard-like-payload".len());
+}
+
+#[test]
+fn encrypted_path_transport_sends_aead_packet_not_plain_frame() {
+    let path_bind = reserve_loopback_addr();
+    let path_remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+    path_remote.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let send_key = [0x33_u8; 32];
+    let config = secure_config(
+        vec![service("udp-main", target.local_addr().unwrap())],
+        vec![path(42, path_bind, path_remote.local_addr().unwrap())],
+        1234,
+        send_key,
+        [0x44_u8; 32],
+    );
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let app_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+
+    app_sender.send_to(b"secret-payload", service_addr).unwrap();
+    dataplane.forward_one_for_service("udp-main").unwrap();
+
+    let mut buffer = [0_u8; 1500];
+    let (length, _source) = path_remote.recv_from(&mut buffer).unwrap();
+    let packet = &buffer[..length];
+    assert_eq!(packet[0], PACKET_TYPE_ENCRYPTED_DATA_V1);
+    let decrypted = decrypt_packet_without_replay(&send_key, packet).unwrap();
+    assert_eq!(decrypted.receiver_index, 1234);
+    assert!(Frame::decode(&decrypted.plaintext).is_err());
+    let frame = Frame::decode_v2(&decrypted.plaintext).unwrap();
+    assert_eq!(frame.header.service_id, 256);
+    assert_eq!(frame.header.path_id, 42);
+    assert_eq!(frame.payload, b"secret-payload");
 }
 
 #[test]
@@ -92,6 +151,74 @@ fn two_dataplanes_forward_payload_over_path_transport_to_fixed_target() {
     assert_eq!(
         server.metrics_snapshot().services.get("udp-main").unwrap().rx_packets,
         1
+    );
+}
+
+#[test]
+fn encrypted_path_transport_carries_aead_packet_and_receiver_decrypts_frame() {
+    let client_path_addr = reserve_loopback_addr();
+    let server_path_addr = reserve_loopback_addr();
+    let remote_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    remote_target
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let client_to_server = [0x11_u8; 32];
+    let server_to_client = [0x22_u8; 32];
+
+    let client_config = secure_config(
+        vec![service("udp-main", remote_target.local_addr().unwrap())],
+        vec![path(7, client_path_addr, server_path_addr)],
+        99,
+        client_to_server,
+        server_to_client,
+    );
+    let server_config = secure_config(
+        vec![service("udp-main", remote_target.local_addr().unwrap())],
+        vec![path(7, server_path_addr, client_path_addr)],
+        99,
+        server_to_client,
+        client_to_server,
+    );
+    let mut client = CoreDataplane::bind(client_config).unwrap();
+    let mut server = CoreDataplane::bind(server_config).unwrap();
+    let sniffer = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let client_service_addr = client.service("udp-main").unwrap().local_addr().unwrap();
+    let app_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+    app_sender
+        .send_to(b"encrypted-fixed-target", client_service_addr)
+        .unwrap();
+    client.forward_one_for_service("udp-main").unwrap();
+
+    let delivered = server.receive_available_from_paths(8).unwrap();
+    let mut buffer = [0_u8; 128];
+    let (length, _source) = remote_target.recv_from(&mut buffer).unwrap();
+    assert_eq!(&buffer[..length], b"encrypted-fixed-target");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].path_id, 7);
+
+    // A random plaintext frame sent to an encrypted transport is silently ignored.
+    let plaintext = Frame::data(0, 256, 7, 0, 123, b"not-authenticated".to_vec())
+        .unwrap()
+        .encode()
+        .unwrap();
+    sniffer.send_to(&plaintext, server_path_addr).unwrap();
+    assert!(server.receive_available_from_paths(8).unwrap().is_empty());
+
+    // The packet format itself is validated by the crypto crate: clear type,
+    // receiver index, counter, ciphertext, and tag around the inner frame.
+    let compact_v2 = Frame::decode(&plaintext).unwrap().encode_v2().unwrap();
+    let packet =
+        gatherlink_crypto::envelope::encrypt_frame_with_counter(99, &client_to_server, 77, &compact_v2).unwrap();
+    assert_eq!(packet[0], PACKET_TYPE_ENCRYPTED_DATA_V1);
+    assert!(packet.len() >= ENCRYPTED_DATA_HEADER_LEN + 16);
+    let decrypted = decrypt_packet_without_replay(&client_to_server, &packet).unwrap();
+    assert_eq!(decrypted.receiver_index, 99);
+    assert_eq!(decrypted.counter, 77);
+    assert_eq!(decrypted.plaintext, compact_v2);
+    assert_eq!(
+        Frame::decode_v2(&decrypted.plaintext).unwrap().payload,
+        b"not-authenticated"
     );
 }
 

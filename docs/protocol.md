@@ -1,33 +1,204 @@
 # Protocol
 
-Gatherlink v1 uses a compact fixed base header for UDP-carried data and control
-frames. The base header is intentionally small; future features such as
-fragmentation should use optional extension headers rather than charging every
-packet for fields that are normally unused.
+Gatherlink v1 should use a compact versioned logical frame shape for plaintext
+lab mode and other contexts that do not have authenticated session state yet.
+The frame carries a visible protocol version plus endpoint semantics that cannot
+be derived from local config context: frame kind, service id, path id, logical
+sequence, optional fragment metadata, and payload.
 
-## V1 Base Header
+In secure transport mode, the encrypted plaintext uses the compact v2 logical
+frame, which is the same as v1 except it omits the visible `version` byte.
+Version, suite, and key phase are selected by authenticated session context and
+successful AEAD authentication. Unauthenticated observers and untrusted relays
+see only `packet_type`, `receiver_index`, packet counter, ciphertext, and tag.
+`service_id`, `path_id`, frame kind, control metadata, and virtual UDP payloads
+are encrypted by default.
+
+Older 38-byte draft frame layouts may exist in early code. They should be
+treated as migration scaffolding, not the target v1 wire contract.
+
+## V1 Versioned Logical Header
 
 All integer fields are encoded big-endian.
 
 | Offset | Size | Field | Notes |
 | ---: | ---: | --- | --- |
 | 0 | 1 | `version` | Current value: `1` |
-| 1 | 1 | `kind` | `1=data`, `2=control`, `3=batch` |
-| 2 | 2 | `header_len` | `38` when no optional extension bytes are present |
-| 4 | 2 | `flags` | No v1 flags are currently defined |
-| 6 | 16 | `session_id` | Authenticated peer/session context |
-| 22 | 2 | `service_id` | Virtual UDP or internal Gatherlink service identifier |
-| 24 | 2 | `path_id` | Logical path/carrier id, full `u16` range |
-| 26 | 2 | `route_id` | Compact route/transit id for future overlay plans |
-| 28 | 8 | `sequence` | Global per-session/service packet sequence number |
-| 36 | 2 | `payload_len` | Payload bytes following the header |
+| 1 | 1 | `kind_flags` | Bits `0..1` kind, bit `2` fragment-present, bits `3..7` reserved zero |
+| 2 | 2 | `service_id` | Virtual UDP or internal Gatherlink service identifier |
+| 4 | 2 | `path_id` | Logical path/carrier id, full `u16` range |
+| 6 | 8 | `sequence` | Global per-session/service packet sequence number |
+| 14 | variable | `payload` | Payload bytes, or fragment metadata followed by fragment payload |
 
-The v1 base header is 38 bytes.
+The normal v1 logical header is 14 bytes.
 
-`header_len == 38` means the frame has no extension bytes. If `header_len` is
-larger than 38, bytes `[38..header_len)` are the optional extension area and
-the payload starts at `header_len`. V1 emits no extension bytes unless a feature
-explicitly needs them, so ordinary data traffic pays no extension overhead.
+`kind_flags`:
+
+```text
+bits 0..1: kind
+  0 = data
+  1 = control
+  2 = batch
+  3 = reserved
+bit 2: fragment metadata present
+bits 3..7: reserved, must be zero
+```
+
+When `fragment-present` is set, fixed metadata follows the 14-byte header:
+
+```text
+14     u32  datagram_id
+18     u16  fragment_index
+20     u16  fragment_count
+22     u16  original_len
+24     ...  fragment_payload
+```
+
+Fragmented v1 packets pay 24 bytes before fragment payload. There is no general
+`header_len`; the fragment-present bit is the only hot-path variable header
+indicator. Payload length is derived from the received plaintext datagram length
+in plaintext lab mode, or from the authenticated plaintext length in secure
+mode.
+
+## V2 Decrypted Logical Header
+
+V2 is the secure-mode decrypted logical header. It is v1 without the visible
+`version` byte, because the authenticated session already selects the protocol
+version.
+
+```text
+0      u8   kind_flags       bits 0..1 kind, bit 2 fragment-present
+1      u16  service_id       virtual UDP or internal Gatherlink service
+3      u16  path_id          logical path/carrier id
+5      u64  sequence         logical per-session/service packet sequence
+13     ...  payload          when fragment-present is unset
+```
+
+V2 normal overhead is 13 bytes. Fragmented v2 packets use the same fixed
+fragment metadata immediately after the 13-byte header and pay 23 bytes before
+fragment payload.
+
+## Secure Transport Envelope
+
+Secure transport has two layers:
+
+- a clear crypto envelope for session lookup, AEAD, and replay protection
+- the encrypted compact v2 logical frame for endpoint service/path/dedupe
+  handling
+
+Clear encrypted envelope:
+
+```text
+0      u8   packet_type        0x01 = encrypted data
+1      u32  receiver_index     opaque session receiver index
+5      u64  counter            per-direction packet counter
+13     ...  ciphertext         encrypted v2 logical frame bytes
+end-16 16B  tag                ChaCha20-Poly1305 tag
+```
+
+The clear envelope is 13 bytes, or 29 bytes including the AEAD tag. Untrusted
+relays forward using explicit control-plane state keyed by `receiver_index` and
+local tunnel/session context. They must not need plaintext `service_id`,
+`path_id`, or `route_id` to forward end-to-end encrypted data.
+
+If older code needs the previous draft's richer header shape, it should
+synthesize that view from compact v1/v2 plus authenticated context:
+
+| Legacy field | Source |
+| --- | --- |
+| `version` | v1 `version`, or authenticated session/protocol context for v2 |
+| `kind` | `kind_flags` low bits |
+| `header_len` | fixed compact length, plus fragment metadata when present |
+| `flags` | `kind_flags` reserved bits, normally zero |
+| `session_id` | `receiver_index` to session mapping in secure mode, or local plaintext context |
+| `service_id` | compact v1/v2 `service_id` |
+| `path_id` | compact v1/v2 `path_id` |
+| `route_id` | derived from `service_id` and authenticated config/control context |
+| `sequence` | compact v1/v2 `sequence` |
+| `payload_len` | received/authenticated plaintext length minus compact header/fragment metadata |
+
+The target v1 wire format carries `version`, but not separate `header_len`,
+`flags`, `session_id`, `route_id`, or `payload_len` fields. V2 omits `version`
+as well.
+
+## Encrypted Relay Routing
+
+Gatherlink does not support plaintext routing labels for secure transport.
+Relays must not forward by reading plaintext `service_id`, `path_id`,
+`route_id`, endpoint addresses, tenant names, or policy names from data packets.
+Those values are endpoint/control-plane semantics and either stay encrypted or
+are derived from authenticated context.
+
+Relay forwarding uses hop-level authenticated encryption around the end-to-end
+packet:
+
+```text
+HopPacket {
+  packet_type
+  relay_receiver_index
+  relay_counter
+  ciphertext(InnerPacket)
+  relay_tag
+}
+
+InnerPacket {
+  packet_type
+  endpoint_receiver_index
+  endpoint_counter
+  ciphertext(V2LogicalHeader || payload)
+  endpoint_tag
+}
+```
+
+The relay can authenticate and replay-check the hop packet, then forward the
+inner packet according to explicit relay session state. The relay cannot decrypt
+the inner endpoint packet and cannot see `service_id`, `path_id`, frame kind,
+sequence, control metadata, or payload.
+
+Relay receive order:
+
+```text
+read hop packet
+lookup relay_receiver_index
+AEAD authenticate/decrypt hop payload
+check relay replay window
+check relay session authorization, expiry, direction, rate limits
+forward inner packet to the configured next hop
+```
+
+All failures are silent drops or local rate-limited diagnostics:
+
+- unknown relay receiver index
+- malformed hop packet
+- failed hop AEAD authentication
+- replayed relay counter
+- expired relay session
+- unauthorized direction or next hop
+- rate limit exceeded
+- malformed inner packet envelope
+
+This prevents blind forwarding: a relay only forwards packets that authenticate
+under a relay-hop session it was explicitly configured to accept. Endpoint
+service routing happens only at the final decrypting peer:
+
+```text
+endpoint receiver_index -> endpoint session
+AEAD decrypt endpoint packet
+parse v2 logical frame
+service_id + authenticated config/control context -> local service/exit
+```
+
+Each relay hop adds one 29-byte hop envelope. Normal overhead is therefore:
+
+```text
+direct secure path: 29-byte endpoint envelope + 13-byte v2 header = 42 bytes
+one relay hop:      29-byte hop envelope + 42-byte endpoint packet = 71 bytes
+two relay hops:     29 + 29 + 42 = 100 bytes
+```
+
+Batching remains the preferred way to amortize this overhead for small payloads.
+The extra hop envelope is intentional: it buys authenticated relay admission,
+relay replay protection, rate limiting, and no plaintext routing metadata.
 
 ## Service IDs
 
@@ -111,9 +282,10 @@ compiled for the service/node pair.
 
 ## Batch Frames
 
-Batch frames coalesce multiple virtual UDP payloads that share the same
-`session_id`, `service_id`, `path_id`, and `route_id`. This keeps small-packet
-traffic efficient without making single-packet frames larger.
+Batch frames coalesce multiple virtual UDP payloads that share the same compact
+logical context: `service_id` and `path_id` on the wire, plus the authenticated
+session and derived route context known locally after receive. This keeps
+small-packet traffic efficient without making single-packet frames larger.
 
 The batch frame payload is:
 
@@ -126,14 +298,17 @@ The frame header `sequence` is the first item's sequence number. Each following
 item is implicitly `sequence + item_index` in payload order. Batches must not
 mix paths because the base header carries exactly one `path_id`.
 
-Batch overhead is `38 + 2 + (2 * item_count)` bytes plus the summed payload
-bytes. A single data frame remains `38 + payload_len` bytes, so batching should
-be used when coalescing saves header overhead while still respecting the
-configured MTU.
+Batch overhead is the compact logical header plus `2 + (2 * item_count)` bytes
+and the summed payload bytes. In plaintext compact v1 that is
+`14 + 2 + (2 * item_count)` bytes before payloads. In secure compact v2 that is
+`13 + 2 + (2 * item_count)` bytes inside the AEAD plaintext. A single data frame
+is `14 + payload_len` in compact v1 or `13 + payload_len` in compact v2, so
+batching should be used when coalescing saves header overhead while still
+respecting the configured MTU.
 
 ## Control Metaband
 
-Control frames (`kind=2`) carry a versioned, extensible metaband payload. This
+Control frames (`kind=1`) carry a versioned, extensible metaband payload. This
 lane is for sparse peer telemetry and safe control data that should not increase
 every data packet. The initial payload shape is:
 
@@ -198,8 +373,10 @@ This is enough for real telemetry:
   `tx_link_mtu`, `tx_frame_mtu`, `rx_link_mtu`, and `rx_frame_mtu`. A missing
   direction is encoded as zero, just like capacity/latency. Python records peer
   TX as local RX, because MTU is direction-specific per path. The maximum
-  single-frame payload is `frame_mtu - 38` before optional extensions such as
-  fragmentation. Python should passively recheck carrier/interface TX MTU at
+  normal single-frame payload is `frame_mtu - 14` for plaintext compact v1 and
+  `frame_mtu - 13` for secure compact v2 plaintext before the outer AEAD
+  envelope is applied. Fragmented packets use the fixed fragment metadata
+  described below. Python should passively recheck carrier/interface TX MTU at
   startup and sparse intervals, and should actively re-probe only when a fault
   suggests the cached ceiling is stale.
 - peers can exchange `InternalClockSync` messages that mirror NTP's four
@@ -279,36 +456,39 @@ is not misdiagnosed as an MTU drop.
 
 ## Fragmentation
 
-Fragmentation uses optional extension bytes on `data` frames. It is not present
-on normal data or batch frames.
+Fragmentation uses the `fragment-present` bit on `data` frames. It is not
+present on normal data or batch frames and does not use a generic extension
+header.
 
 Gatherlink should fragment only when the selected packet cannot fit a useful
 whole-packet path, or when the path that can fit it is marked busy and another
 path has available capacity. The Python control plane owns the live capacity
 model; Rust consumes the compiled path MTU and busy hints at packet time.
 
-The v1 fragment extension is a compact TLV:
+When `fragment-present` is set, fixed metadata follows the compact logical
+header:
 
 | Size | Field | Notes |
 | ---: | --- | --- |
-| 1 | `extension_type` | `1=fragment` |
-| 1 | `extension_len` | Current value: `10` |
 | 4 | `datagram_id` | Reassembly key for one virtual UDP datagram |
 | 2 | `fragment_index` | Zero-based fragment index |
 | 2 | `fragment_count` | Number of fragments for the datagram |
 | 2 | `original_len` | Original virtual UDP payload length |
 
-The fragment extension adds 12 bytes to the header, so a path with MTU `M` can
-carry `M - 38 - 12` bytes of virtual payload per fragment. Receivers reassemble
-fragments by `datagram_id` and `fragment_index`; packet-level logs and counters
-should report both the final virtual datagram and the fragment/frame work that
-was needed to carry it.
+The fixed fragment metadata is 10 bytes. A compact v1 fragmented frame has
+`14 + 10 = 24` bytes before fragment payload; a compact v2 fragmented frame has
+`13 + 10 = 23` bytes before fragment payload. A path with frame MTU `M` can
+therefore carry `M - 24` bytes of compact v1 fragment payload or `M - 23` bytes
+of compact v2 fragment payload before considering the outer secure envelope.
+Receivers reassemble fragments by `datagram_id` and `fragment_index`;
+packet-level logs and counters should report both the final virtual datagram and
+the fragment/frame work that was needed to carry it.
 
 ## Future Extensions
 
-`header_len` allows a frame to add extension bytes after the base header.
-Fragmentation, richer route metadata, capability negotiation, optional
-diagnostic fields, or security metadata should live there instead of expanding
-the base v1 header. Implementations should keep extensions sparse and feature
-gated: if a receiver can infer the value from config or control-plane state, it
-does not belong on every data packet.
+Compact v1/v2 deliberately avoid a general `header_len` field. Future hot-path
+wire changes should either fit the existing compact fields, use a new
+authenticated frame version, or move sparse information into reserved services
+such as control metadata, diagnostics, capability negotiation, or config apply.
+If a receiver can infer a value from config or authenticated control-plane
+state, it does not belong on every data packet.

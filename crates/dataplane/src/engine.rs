@@ -4,10 +4,11 @@
 //! frame boundary before emitting virtual UDP payloads. Business policy stays in
 //! Python; this module executes already-compiled runtime state.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
 
+use gatherlink_crypto::errors::CryptoError;
 use gatherlink_protocol::errors::ProtocolError;
 use gatherlink_protocol::frame::{Frame, FrameKind, V1_HEADER_LEN};
 use gatherlink_protocol::ids::{is_reserved_service_id, ServiceId};
@@ -15,9 +16,10 @@ use gatherlink_protocol::ids::{is_reserved_service_id, ServiceId};
 use crate::dedupe::{DedupeObservation, DedupeWindow};
 use crate::fragmentation::{fragment_datagram, FragmentReassembly};
 use crate::metrics::{DataplaneMetrics, MetricsSnapshot};
-use crate::runtime_config::{CorePathConfig, CoreRuntimeConfig};
+use crate::runtime_config::{CorePathConfig, CoreRuntimeConfig, SchedulerConfig};
 use crate::scheduler::all_paths::AllPathSelector;
 use crate::scheduler::compiled::CompiledScheduler;
+use crate::security::TransportSecurity;
 use crate::sockets::PathTransportSet;
 use crate::udp_service::{ServiceReturnMode, ServiceSchedulerConfig, UdpServiceError, UserlandUdpService};
 
@@ -27,6 +29,7 @@ pub struct CoreDataplane {
     services: Vec<UserlandUdpService>,
     paths: Vec<CorePathConfig>,
     path_transports: PathTransportSet,
+    transport_security: TransportSecurity,
     scheduler: CompiledScheduler,
     next_sequence: u64,
     next_datagram_id: u32,
@@ -59,6 +62,7 @@ impl CoreDataplane {
             services,
             paths: config.paths().to_vec(),
             path_transports: PathTransportSet::bind(config.paths())?,
+            transport_security: TransportSecurity::from_config(config.security()),
             scheduler: CompiledScheduler::compile(config.scheduler().mode(), config.paths()),
             next_sequence: 1,
             next_datagram_id: 1,
@@ -127,9 +131,45 @@ impl CoreDataplane {
         });
         self.paths = config.paths().to_vec();
         self.path_transports = PathTransportSet::bind(config.paths())?;
+        self.transport_security = TransportSecurity::from_config(config.security());
         self.scheduler = CompiledScheduler::compile(config.scheduler().mode(), config.paths());
         self.metrics.reconcile_paths(config.paths());
         Ok(outcome)
+    }
+
+    /// Hot-apply Python-compiled scheduler primitives without touching sockets.
+    ///
+    /// Full config reapply is allowed to add/remove UDP services and rebuild path
+    /// transport sockets. Live telemetry refreshes must be much narrower: Python
+    /// may update weights, path state, MTU, and primitive scheduler facts, while
+    /// Rust keeps the already-bound userland and carrier sockets in place.
+    pub fn reapply_scheduler(
+        &mut self,
+        paths: Vec<CorePathConfig>,
+        scheduler: SchedulerConfig,
+    ) -> Result<ReapplyOutcome, DataplaneError> {
+        if paths.is_empty() {
+            return Err(DataplaneError::UdpService(UdpServiceError::MissingPath));
+        }
+        let mut path_ids = HashSet::with_capacity(paths.len());
+        for path in &paths {
+            if !path_ids.insert(path.path_id()) {
+                return Err(DataplaneError::UdpService(UdpServiceError::DuplicatePathId(
+                    path.path_id(),
+                )));
+            }
+        }
+
+        self.paths = paths;
+        self.scheduler = CompiledScheduler::compile(scheduler.mode(), &self.paths);
+        self.metrics.reconcile_paths(&self.paths);
+        Ok(ReapplyOutcome {
+            unchanged: self.services.len(),
+            updated: self.paths.len(),
+            rebound: 0,
+            added: 0,
+            removed: 0,
+        })
     }
 
     /// Return a bound service by name.
@@ -370,7 +410,12 @@ impl CoreDataplane {
         let frames = self.path_transports.receive_available(max_frames)?;
         let mut outcomes = Vec::new();
         for received in frames {
-            let decoded = Frame::decode(&received.bytes)?;
+            let frame_bytes = match self.transport_security.unprotect_packet(&received.bytes) {
+                Ok(bytes) => bytes,
+                Err(CryptoError::SilentDrop) => continue,
+                Err(error) => return Err(DataplaneError::Crypto(error)),
+            };
+            let decoded = Frame::decode(&frame_bytes)?;
             match decoded.header.kind {
                 FrameKind::Data => {
                     if let Some(payload) = self.remote_fragments.push_or_payload(&decoded)? {
@@ -380,7 +425,7 @@ impl CoreDataplane {
                                 decoded.header.path_id,
                                 decoded.header.sequence,
                                 payload,
-                                received.bytes.len(),
+                                frame_bytes.len(),
                             );
                         } else {
                             if self.observe_user_payload_first_seen(
@@ -408,7 +453,7 @@ impl CoreDataplane {
                                 decoded.header.path_id,
                                 sequence,
                                 payload.clone(),
-                                received.bytes.len(),
+                                frame_bytes.len(),
                             );
                         } else if self.observe_user_payload_first_seen(
                             decoded.header.service_id,
@@ -431,7 +476,7 @@ impl CoreDataplane {
                         decoded.header.path_id,
                         decoded.header.sequence,
                         decoded.payload,
-                        received.bytes.len(),
+                        frame_bytes.len(),
                     );
                 }
             }
@@ -659,7 +704,11 @@ impl CoreDataplane {
         encoded: &[u8],
         expected_fanout: bool,
     ) -> Result<bool, DataplaneError> {
-        match self.path_transports.send_frame(path_id, encoded) {
+        let packet = self
+            .transport_security
+            .protect_frame(encoded)
+            .map_err(DataplaneError::Crypto)?;
+        match self.path_transports.send_frame(path_id, &packet) {
             Ok(_sent) => Ok(true),
             Err(UdpServiceError::SendFailed(_error)) => {
                 self.metrics.record_send_failed(path_id, encoded.len(), expected_fanout);
@@ -945,6 +994,7 @@ pub struct ControlTransmitPlan {
 pub enum DataplaneError {
     UdpService(UdpServiceError),
     Protocol(ProtocolError),
+    Crypto(CryptoError),
     UnknownService(String),
     UnknownServiceId(ServiceId),
     ServiceDisabled { service_id: ServiceId, reason: String },
@@ -962,6 +1012,7 @@ impl fmt::Display for DataplaneError {
         match self {
             Self::UdpService(error) => write!(formatter, "{error}"),
             Self::Protocol(error) => write!(formatter, "{error}"),
+            Self::Crypto(error) => write!(formatter, "{error}"),
             Self::UnknownService(name) => write!(formatter, "unknown UDP service: {name}"),
             Self::UnknownServiceId(service_id) => write!(formatter, "unknown UDP service id: {service_id}"),
             Self::ServiceDisabled { service_id, reason } => {

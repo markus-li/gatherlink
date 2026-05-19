@@ -7,6 +7,7 @@ input format has been normalized.
 
 from __future__ import annotations
 
+from base64 import b64decode
 from typing import ClassVar, Literal
 
 from pydantic import Field, model_validator
@@ -14,7 +15,7 @@ from pydantic import Field, model_validator
 from gatherlink.shared.models import FieldTransform, GatherlinkBaseModel
 
 NodeRole = Literal["client", "server"]
-SecurityMode = Literal["none"]
+SecurityMode = Literal["none", "static"]
 ConfigFormat = Literal["minimal-client", "minimal-server", "wireguard-client", "wireguard-server", "dns-helper"]
 PathSchedulerState = Literal["active", "busy", "drain", "disabled"]
 SchedulerPolicy = Literal[
@@ -107,10 +108,29 @@ class ServiceConfig(GatherlinkBaseModel):
 class SecurityConfig(GatherlinkBaseModel):
     """Transport security mode selected by the Python control plane."""
 
-    # TODO: Add authenticated modes here when packet crypto lands. Keeping the
-    # plaintext mode explicit now lets the local lab run while making the unsafe
-    # boundary visible in runtime plans and logs.
+    # TODO(security-handshake): Replace static key material with authenticated
+    # Noise-derived sessions. The static mode exists so labs can exercise the
+    # production AEAD path before the full identity handshake is wired in.
     mode: SecurityMode = "none"
+    receiver_index: int = Field(default=1, ge=0, le=2**32 - 1)
+    send_key: str | None = None
+    receive_key: str | None = None
+
+    @model_validator(mode="after")
+    def validate_security_material(self) -> SecurityConfig:
+        """Ensure explicit static crypto material is complete and well sized."""
+        if self.mode == "none":
+            return self
+        if self.send_key is None or self.receive_key is None:
+            raise ValueError("security.mode=static requires send_key and receive_key")
+        for field_name, value in {"send_key": self.send_key, "receive_key": self.receive_key}.items():
+            try:
+                decoded = b64decode(value, validate=True)
+            except ValueError as exc:
+                raise ValueError(f"security.{field_name} must be base64") from exc
+            if len(decoded) != 32:
+                raise ValueError(f"security.{field_name} must decode to 32 bytes")
+        return self
 
 
 def _security_or_default(value: dict | None) -> dict:

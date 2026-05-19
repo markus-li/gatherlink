@@ -6,6 +6,8 @@ requires-python = ">=3.12"
 dependencies = [
   "pydantic>=2.7",
   "typer>=0.12",
+  "cryptography>=42.0",
+  "cbor2>=5.6",
 ]
 
 [project.scripts]

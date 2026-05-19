@@ -14,9 +14,14 @@ from dataclasses import dataclass
 from gatherlink.time.offset import InternalClockSyncMessage, SinkTimeMessage
 
 GATHERLINK_PROTOCOL_VERSION = 1
-GATHERLINK_KIND_DATA = 1
-GATHERLINK_KIND_CONTROL = 2
-GATHERLINK_V1_HEADER_LEN = 38
+GATHERLINK_KIND_DATA = 0
+GATHERLINK_KIND_CONTROL = 1
+GATHERLINK_KIND_BATCH = 2
+GATHERLINK_KIND_MASK = 0b0000_0011
+GATHERLINK_FRAGMENT_PRESENT = 0b0000_0100
+GATHERLINK_KIND_FLAGS_RESERVED_MASK = 0b1111_1000
+GATHERLINK_V1_HEADER_LEN = 14
+GATHERLINK_FRAGMENT_METADATA_LEN = 10
 SERVICE_ID_INVALID = 0
 SERVICE_ID_CONTROL_METADATA = 1
 SERVICE_ID_TIME_SYNC = 2
@@ -85,14 +90,9 @@ def encode_data_frame(sequence: int, path_id: int, payload: bytes) -> bytes:
     header = bytearray(GATHERLINK_V1_HEADER_LEN)
     header[0] = GATHERLINK_PROTOCOL_VERSION
     header[1] = GATHERLINK_KIND_DATA
-    _write_u16(header, 2, GATHERLINK_V1_HEADER_LEN)
-    _write_u16(header, 4, 0)
-    _write_u128(header, 6, DEFAULT_SESSION_ID)
-    _write_u16(header, 22, DEFAULT_SERVICE_ID)
-    _write_u16(header, 24, path_id)
-    _write_u16(header, 26, DEFAULT_ROUTE_ID)
-    _write_u64(header, 28, sequence)
-    _write_u16(header, 36, len(payload))
+    _write_u16(header, 2, DEFAULT_SERVICE_ID)
+    _write_u16(header, 4, path_id)
+    _write_u64(header, 6, sequence)
     return bytes(header) + payload
 
 
@@ -103,14 +103,9 @@ def encode_control_frame(path_id: int, payload: bytes) -> bytes:
     header = bytearray(GATHERLINK_V1_HEADER_LEN)
     header[0] = GATHERLINK_PROTOCOL_VERSION
     header[1] = GATHERLINK_KIND_CONTROL
-    _write_u16(header, 2, GATHERLINK_V1_HEADER_LEN)
-    _write_u16(header, 4, 0)
-    _write_u128(header, 6, DEFAULT_SESSION_ID)
-    _write_u16(header, 22, SERVICE_ID_CONTROL_METADATA)
-    _write_u16(header, 24, path_id)
-    _write_u16(header, 26, DEFAULT_ROUTE_ID)
-    _write_u64(header, 28, 0)
-    _write_u16(header, 36, len(payload))
+    _write_u16(header, 2, SERVICE_ID_CONTROL_METADATA)
+    _write_u16(header, 4, path_id)
+    _write_u64(header, 6, 0)
     return bytes(header) + payload
 
 
@@ -118,17 +113,20 @@ def decode_data_frame(payload: bytes) -> DataFrame | None:
     """Decode one v1 data frame and return the original UDP payload."""
     if len(payload) < GATHERLINK_V1_HEADER_LEN:
         return None
-    if payload[0] != GATHERLINK_PROTOCOL_VERSION or payload[1] != GATHERLINK_KIND_DATA:
+    if payload[0] != GATHERLINK_PROTOCOL_VERSION:
         return None
-
-    header_len = _read_u16(payload, 2)
-    payload_len = _read_u16(payload, 36)
-    if header_len < GATHERLINK_V1_HEADER_LEN or len(payload) != header_len + payload_len:
+    kind_flags = payload[1]
+    if kind_flags & GATHERLINK_KIND_FLAGS_RESERVED_MASK or (kind_flags & GATHERLINK_KIND_MASK) != GATHERLINK_KIND_DATA:
+        return None
+    header_len = GATHERLINK_V1_HEADER_LEN
+    if kind_flags & GATHERLINK_FRAGMENT_PRESENT:
+        header_len += GATHERLINK_FRAGMENT_METADATA_LEN
+    if len(payload) < header_len:
         return None
 
     return DataFrame(
-        path_id=_read_u16(payload, 24),
-        sequence=_read_u64(payload, 28),
+        path_id=_read_u16(payload, 4),
+        sequence=_read_u64(payload, 6),
         payload=payload[header_len:],
     )
 
@@ -137,12 +135,18 @@ def decode_control_frame(payload: bytes) -> ControlFrame | None:
     """Decode the Python-supported subset of the v1 control metaband."""
     if len(payload) < GATHERLINK_V1_HEADER_LEN:
         return None
-    if payload[0] != GATHERLINK_PROTOCOL_VERSION or payload[1] != GATHERLINK_KIND_CONTROL:
+    if payload[0] != GATHERLINK_PROTOCOL_VERSION:
         return None
-
-    header_len = _read_u16(payload, 2)
-    payload_len = _read_u16(payload, 36)
-    if header_len < GATHERLINK_V1_HEADER_LEN or len(payload) != header_len + payload_len:
+    kind_flags = payload[1]
+    if (
+        kind_flags & GATHERLINK_KIND_FLAGS_RESERVED_MASK
+        or (kind_flags & GATHERLINK_KIND_MASK) != GATHERLINK_KIND_CONTROL
+    ):
+        return None
+    header_len = GATHERLINK_V1_HEADER_LEN
+    if kind_flags & GATHERLINK_FRAGMENT_PRESENT:
+        header_len += GATHERLINK_FRAGMENT_METADATA_LEN
+    if len(payload) < header_len:
         return None
 
     return decode_control_payload(payload[header_len:])
@@ -691,10 +695,6 @@ def _write_u16(output: bytearray, offset: int, value: int) -> None:
 
 def _write_u64(output: bytearray, offset: int, value: int) -> None:
     output[offset : offset + 8] = value.to_bytes(8, "big")
-
-
-def _write_u128(output: bytearray, offset: int, value: int) -> None:
-    output[offset : offset + 16] = value.to_bytes(16, "big")
 
 
 def _read_u16(input_bytes: bytes, offset: int) -> int:

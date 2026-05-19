@@ -10,7 +10,8 @@ from typing import Any
 
 DEFAULT_SAFE_FRAME_MTU = 1200
 MIN_GATHERLINK_FRAME_MTU = 64
-V1_BASE_HEADER_LEN = 38
+V1_BASE_HEADER_LEN = 14
+V2_BASE_HEADER_LEN = 13
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,12 @@ def detect_interface_mtu(interface: str, *, sys_class_net: Path = Path("/sys/cla
         return None
 
 
-def observe_path_mtu(interface: str, configured_frame_mtu: int) -> PathMtuObservation:
+def observe_path_mtu(
+    interface: str,
+    configured_frame_mtu: int,
+    *,
+    frame_header_len: int = V1_BASE_HEADER_LEN,
+) -> PathMtuObservation:
     """
     Return the safe frame MTU Python should advertise and eventually compile.
 
@@ -78,7 +84,7 @@ def observe_path_mtu(interface: str, configured_frame_mtu: int) -> PathMtuObserv
         link_mtu=link_mtu,
         configured_frame_mtu=configured_frame_mtu,
         frame_mtu=frame_mtu,
-        payload_mtu=max(frame_mtu - V1_BASE_HEADER_LEN, 0),
+        payload_mtu=max(frame_mtu - frame_header_len, 0),
         status=status,
         source="interface",
         updated_at=datetime.now(UTC).isoformat(),
@@ -92,8 +98,9 @@ def detect_runtime_path_mtu(
 ) -> dict[str, dict[str, int | str | None]]:
     """Passively detect each runtime path's local interface MTU for control metadata."""
     observations: dict[str, dict[str, int | str | None]] = {}
+    frame_header_len = V2_BASE_HEADER_LEN if getattr(runtime_config.security, "mode", "none") == "static" else V1_BASE_HEADER_LEN
     for path in runtime_config.paths:
-        observation = observe_path_mtu(path.interface, path.scheduler.mtu)
+        observation = observe_path_mtu(path.interface, path.scheduler.mtu, frame_header_len=frame_header_len)
         observations[path.name] = observation.export_dict()
         if observation.status != "ok":
             _log(

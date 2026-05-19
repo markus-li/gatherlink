@@ -321,7 +321,7 @@ fn python_facing_dataplane_accepts_scheduler_config() {
         .unwrap(),
     ];
     let scheduler = PySchedulerConfig::new("round_robin").unwrap();
-    let mut dataplane = PyCoreDataplane::bind_with_scheduler(vec![service], paths, scheduler).unwrap();
+    let mut dataplane = PyCoreDataplane::bind_with_scheduler(vec![service], paths, scheduler, None).unwrap();
     let service_addr = dataplane.service_local_addr("udp-main").unwrap();
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
 
@@ -334,6 +334,57 @@ fn python_facing_dataplane_accepts_scheduler_config() {
     target.recv_from(&mut buffer).unwrap();
     assert_eq!(outcomes[0].path_id(), 5);
     assert_eq!(outcomes[1].path_id(), 6);
+}
+
+#[test]
+fn python_facing_scheduler_reapply_preserves_bound_service_socket() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service = PyUdpServiceConfig::new(
+        "udp-main".to_owned(),
+        target.local_addr().unwrap().to_string(),
+        Some("127.0.0.1:0".to_owned()),
+        100,
+        "fixed",
+        0,
+        1,
+        0,
+    )
+    .unwrap();
+    let paths = vec![PyPathConfig::new(
+        5, 1200, 0, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+    )
+    .unwrap()];
+    let scheduler = PySchedulerConfig::new("round_robin").unwrap();
+    let mut dataplane = PyCoreDataplane::bind_with_scheduler(vec![service], paths, scheduler, None).unwrap();
+    let original_listen = dataplane.service_local_addr("udp-main").unwrap();
+
+    let updated_paths = vec![PyPathConfig::new(
+        5,
+        1180,
+        0,
+        false,
+        true,
+        "active",
+        3,
+        Some(3_000_000),
+        Some(3_000_000),
+        Some(2_000),
+        0,
+        2_000,
+        0,
+        0,
+        None,
+        None,
+    )
+    .unwrap()];
+    let outcome = dataplane
+        .reapply_scheduler(updated_paths, PySchedulerConfig::new("capacity_aware").unwrap())
+        .unwrap();
+
+    assert_eq!(dataplane.service_local_addr("udp-main").unwrap(), original_listen);
+    assert_eq!(outcome.unchanged(), 1);
+    assert_eq!(outcome.updated(), 1);
+    assert_eq!(outcome.rebound(), 0);
 }
 
 #[test]

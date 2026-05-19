@@ -8,6 +8,7 @@ use std::net::SocketAddr;
 use gatherlink_dataplane::engine::{ForwardOutcome, ReapplyOutcome, RemoteDeliverOutcome, ReservedServiceEvent};
 use gatherlink_dataplane::runtime_config::{
     CorePathConfig, PathSchedulerPrimitives, PathSchedulerState, SchedulerConfig, SchedulerMode,
+    TransportSecurityConfig,
 };
 use gatherlink_dataplane::udp_service::{ServiceReturnMode, ServiceSchedulerConfig, UdpServiceConfig};
 use pyo3::prelude::*;
@@ -355,6 +356,55 @@ impl PySchedulerConfig {
     pub(crate) fn inner(&self) -> SchedulerConfig {
         self.inner
     }
+}
+
+/// Python DTO for compiled transport-security state.
+#[pyclass(name = "TransportSecurityConfig")]
+#[derive(Clone)]
+pub struct PyTransportSecurityConfig {
+    inner: TransportSecurityConfig,
+}
+
+#[pymethods]
+impl PyTransportSecurityConfig {
+    /// Plain path-socket frames. This is intentionally explicit for lab use.
+    #[staticmethod]
+    pub fn none() -> Self {
+        Self {
+            inner: TransportSecurityConfig::None,
+        }
+    }
+
+    /// Static authenticated encryption material compiled by Python.
+    #[staticmethod]
+    pub fn static_keys(receiver_index: u32, send_key: &[u8], receive_key: &[u8]) -> PyResult<Self> {
+        Ok(Self {
+            inner: TransportSecurityConfig::Static {
+                receiver_index,
+                send_key: key_bytes(send_key, "send_key")?,
+                receive_key: key_bytes(receive_key, "receive_key")?,
+            },
+        })
+    }
+
+    pub fn mode(&self) -> String {
+        match self.inner {
+            TransportSecurityConfig::None => "none".to_owned(),
+            TransportSecurityConfig::Static { .. } => "static".to_owned(),
+        }
+    }
+}
+
+impl PyTransportSecurityConfig {
+    pub(crate) fn inner(&self) -> TransportSecurityConfig {
+        self.inner.clone()
+    }
+}
+
+fn key_bytes(value: &[u8], field: &str) -> PyResult<[u8; 32]> {
+    value
+        .try_into()
+        .map_err(|_| pyo3::exceptions::PyValueError::new_err(format!("{field} must be exactly 32 bytes")))
 }
 
 /// Observable result from one forwarded datagram.

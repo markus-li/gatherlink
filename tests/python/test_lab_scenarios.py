@@ -881,7 +881,7 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
             "path-a": {
                 "tx_link_mtu": 1500,
                 "tx_frame_mtu": 1200,
-                "tx_payload_mtu": 1162,
+                "tx_payload_mtu": 1186,
                 "source": "interface",
             }
         },
@@ -953,7 +953,7 @@ def test_reserved_service_dispatch_decodes_control_metadata_and_logs_unknown() -
             return self._payload
 
         def frame_bytes(self) -> int:
-            return len(self._payload) + 38
+            return len(self._payload) + 14
 
     class FakeDataplane:
         def drain_reserved_service_events(self):
@@ -1113,8 +1113,8 @@ def test_service_monitor_summarizes_control_metadata_separately() -> None:
             },
             "path_latency_count": 2,
             "path_mtu": {
-                "path-a": {"tx_link_mtu": 1500, "tx_frame_mtu": 1200, "tx_payload_mtu": 1162},
-                "path-b": {"rx_link_mtu": 1400, "rx_frame_mtu": 1200, "rx_payload_mtu": 1162},
+                "path-a": {"tx_link_mtu": 1500, "tx_frame_mtu": 1200, "tx_payload_mtu": 1186},
+                "path-b": {"rx_link_mtu": 1400, "rx_frame_mtu": 1200, "rx_payload_mtu": 1186},
             },
             "path_mtu_count": 2,
             "internal_clock": {
@@ -1141,7 +1141,7 @@ def test_service_monitor_summarizes_control_metadata_separately() -> None:
     assert "listen=127.0.0.1:51820" in context
     assert control.startswith("rx=2/126B clk=off+2.5/+2.0ms rtt=8.0ms n=3 paths=2 svc=1 " "pctrl=1 lat=2 last=")
     assert _path_capacity_context(status["control_metadata"], "path-a") == "tx=3.0Mb rx=- tl=2.5/2.0ms rl=-/-"
-    assert "tx=frm:1200/pay:1162/lnk:1500" in _path_mtu_context(status["control_metadata"], "path-a")
+    assert "tx=frm:1200/pay:1186/lnk:1500" in _path_mtu_context(status["control_metadata"], "path-a")
     assert (
         _path_control_context(status["control_metadata"], "path-a")
         == "ctx=2/256B crx=1/128B tx=3.0Mb rx=- tl=2.5/2.0ms rl=-/-"
@@ -1245,4 +1245,4 @@ def test_path_mtu_detection_reads_interface_and_clamps_to_link(tmp_path: Path) -
 
     observation = observe_path_mtu("missing-test", 1200)
     assert observation.frame_mtu == 1200
-    assert observation.payload_mtu == 1162
+    assert observation.payload_mtu == 1186

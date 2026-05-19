@@ -41,6 +41,7 @@ pub fn dataplane_error_to_py(error: DataplaneError) -> PyErr {
         | DataplaneError::NoDatagramForwarded => PyValueError::new_err(error.to_string()),
         DataplaneError::UdpService(error) => udp_error_to_py(error),
         DataplaneError::Protocol(_)
+        | DataplaneError::Crypto(_)
         | DataplaneError::NoPathAvailable
         | DataplaneError::UnexpectedFrameKind
         | DataplaneError::BatchDatagramMismatch

@@ -8,9 +8,11 @@ import socket
 import subprocess
 import sys
 import time
+from base64 import b64encode
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from threading import Event
 
@@ -285,7 +287,13 @@ class _LabControlState:
 
 def _lab_runtime_config(config: LabScenarioConfig, *, role: str):
     """Build the production Gatherlink config used by one lab node."""
-    from gatherlink.config.models import GatherlinkConfig, PathConfig, PathSchedulerConfig, ServiceConfig
+    from gatherlink.config.models import (
+        GatherlinkConfig,
+        PathConfig,
+        PathSchedulerConfig,
+        SecurityConfig,
+        ServiceConfig,
+    )
 
     _listen_host, path_port = _split_host_port(config.traffic.target)
     paths: list[PathConfig] = []
@@ -330,19 +338,52 @@ def _lab_runtime_config(config: LabScenarioConfig, *, role: str):
         node=f"{config.name}-{role}",
         role="client" if role == "client" else "server",
         peer=f"{config.name}-server" if role == "client" else f"{config.name}-client",
-        security=config.security,
+        security=_lab_runtime_security(config, role=role, security_cls=SecurityConfig),
         paths=paths,
         services=[service],
     )
+
+
+def _lab_runtime_security(config: LabScenarioConfig, *, role: str, security_cls):
+    """Return role-specific security material while keeping lab policy outside Rust."""
+    if config.security.mode == "none":
+        return config.security
+    if config.security.mode != "static":
+        raise ValueError(f"unsupported lab security mode: {config.security.mode}")
+
+    client_to_server = config.security.send_key or _lab_static_key(config, "client-to-server")
+    server_to_client = config.security.receive_key or _lab_static_key(config, "server-to-client")
+    if role == "client":
+        send_key = client_to_server
+        receive_key = server_to_client
+    elif role == "server":
+        send_key = server_to_client
+        receive_key = client_to_server
+    else:
+        raise ValueError(f"unknown lab Rust role: {role}")
+    return security_cls(
+        mode="static",
+        receiver_index=config.security.receiver_index,
+        send_key=send_key,
+        receive_key=receive_key,
+    )
+
+
+def _lab_static_key(config: LabScenarioConfig, label: str) -> str:
+    """Derive deterministic lab-only static keys when a scenario opts into static crypto."""
+    digest = sha256(f"gatherlink lab static key v1:{config.name}:{label}".encode()).digest()
+    return b64encode(digest).decode("ascii")
 
 
 def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
     """Run one long-lived lab node using the production Rust dataplane transport."""
     from gatherlink.config.expansion import expand_config
     from gatherlink.dataplane.rust_backend import bind_core_dataplane
+    from gatherlink.runtime.reload import hot_reapply_scheduler_from_status
 
     ensure_service_not_root()
-    runtime_config = expand_config(_lab_runtime_config(config, role=role))
+    base_runtime_config = _lab_runtime_config(config, role=role)
+    runtime_config = expand_config(base_runtime_config)
     dataplane = bind_core_dataplane(runtime_config)
     # Python owns service scheduling policy. Reserved control metadata is just
     # another service id from Rust's point of view; Python marks it as duplicated
@@ -466,6 +507,17 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
                     ntp_sample=ntp_sample,
                     control_state=control_state,
                 )
+                runtime_config = hot_reapply_scheduler_from_status(
+                    dataplane,
+                    base_runtime_config,
+                    runtime_config,
+                    {
+                        "control_metadata": control_state.control_metadata,
+                        "path_stats": path_stats,
+                    },
+                )
+                dataplane.set_service_scheduler(1, 0)
+                dataplane.set_service_scheduler(_SERVICE_ID_REMOTE_STATUS, 1)
                 traffic_total = _rust_lab_traffic_total(dataplane)
                 next_control_metadata_at = time.monotonic() + control_cadence.next_interval(traffic_total)
             did_work = _step_rust_lab_dataplane(dataplane)

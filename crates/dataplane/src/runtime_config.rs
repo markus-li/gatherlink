@@ -21,6 +21,43 @@ pub struct CoreRuntimeConfig {
     services: Vec<UdpServiceConfig>,
     paths: Vec<CorePathConfig>,
     scheduler: SchedulerConfig,
+    security: TransportSecurityConfig,
+}
+
+/// Transport-security state already compiled by Python.
+///
+/// Rust does not decide whether a peer is trusted. It only executes the packet
+/// protection parameters that Python handed over after config/handshake policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TransportSecurityConfig {
+    /// Plain Gatherlink frames on path sockets. This remains useful for labs.
+    None,
+    /// Static authenticated encryption material for early labs and future
+    /// Python-compiled handshakes. Production handshakes should compile into
+    /// this same low-level shape rather than teaching Rust identity policy.
+    Static {
+        receiver_index: u32,
+        send_key: [u8; 32],
+        receive_key: [u8; 32],
+    },
+}
+
+impl Default for TransportSecurityConfig {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+impl TransportSecurityConfig {
+    /// Return the packet overhead added outside an encoded Gatherlink frame.
+    pub fn packet_overhead(&self) -> usize {
+        match self {
+            Self::None => 0,
+            Self::Static { .. } => {
+                gatherlink_crypto::envelope::ENCRYPTED_DATA_HEADER_LEN + gatherlink_crypto::envelope::AEAD_TAG_LEN
+            }
+        }
+    }
 }
 
 /// Minimal compiled scheduler config executed by Rust.
@@ -323,6 +360,16 @@ impl CoreRuntimeConfig {
         paths: Vec<CorePathConfig>,
         scheduler: SchedulerConfig,
     ) -> Result<Self, UdpServiceError> {
+        Self::new_with_paths_scheduler_and_security(services, paths, scheduler, TransportSecurityConfig::None)
+    }
+
+    /// Build a core runtime config with explicit path, scheduler, and transport security state.
+    pub fn new_with_paths_scheduler_and_security(
+        services: Vec<UdpServiceConfig>,
+        paths: Vec<CorePathConfig>,
+        scheduler: SchedulerConfig,
+        security: TransportSecurityConfig,
+    ) -> Result<Self, UdpServiceError> {
         let max_user_services = usize::from(ServiceId::MAX - USER_SERVICE_ID_START) + 1;
         if services.len() > max_user_services {
             return Err(UdpServiceError::TooManyServices {
@@ -388,6 +435,7 @@ impl CoreRuntimeConfig {
             services: finalized_services,
             paths,
             scheduler,
+            security,
         })
     }
 
@@ -404,6 +452,11 @@ impl CoreRuntimeConfig {
     /// Return the compiled scheduler config.
     pub fn scheduler(&self) -> SchedulerConfig {
         self.scheduler
+    }
+
+    /// Return compiled transport security state.
+    pub fn security(&self) -> &TransportSecurityConfig {
+        &self.security
     }
 
     /// Convenience constructor for the first pure userland UDP test target.

@@ -24,6 +24,17 @@ Relays may be authorized to forward traffic, report metrics, participate in peer
 failover, and act as exit/site-gateway for configured services. Relays must not
 silently rewrite service intent.
 
+Secure relay forwarding is hop-authenticated. Gatherlink does not support
+plaintext routing labels for secure transport: relays must not forward by
+reading plaintext service ids, path ids, route ids, endpoint addresses, tenant
+names, or policy labels from data packets.
+
+An untrusted relay forwards only after authenticating a per-hop encrypted relay
+packet, checking replay protection, and enforcing explicit control-plane relay
+state. The inner endpoint packet remains end-to-end encrypted and is opaque to
+the relay. The final decrypting endpoint alone maps `service_id` plus
+authenticated config/control context to a local service or exit decision.
+
 ## Hosted relays
 
 Hosted relays require tenant isolation, key lifecycle, audit events, rate limits,

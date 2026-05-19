@@ -12,7 +12,7 @@ use pyo3::types::PyDict;
 
 use crate::dto::{
     PyForwardOutcome, PyPathConfig, PyReapplyOutcome, PyRemoteDeliverOutcome, PyReservedServiceEvent,
-    PySchedulerConfig, PyUdpServiceConfig,
+    PySchedulerConfig, PyTransportSecurityConfig, PyUdpServiceConfig,
 };
 use crate::errors::{dataplane_error_to_py, udp_error_to_py};
 use gatherlink_dataplane::udp_service::ServiceSchedulerConfig;
@@ -46,15 +46,19 @@ impl PyCoreDataplane {
 
     /// Bind compiled UDP services with explicit path and scheduler runtime state.
     #[staticmethod]
+    #[pyo3(signature = (services, paths, scheduler, security = None))]
     pub fn bind_with_scheduler(
         services: Vec<PyUdpServiceConfig>,
         paths: Vec<PyPathConfig>,
         scheduler: PySchedulerConfig,
+        security: Option<PyTransportSecurityConfig>,
     ) -> PyResult<Self> {
         let services = services.into_iter().map(|service| service.inner()).collect();
         let paths = paths.into_iter().map(|path| path.inner()).collect();
-        let config = CoreRuntimeConfig::new_with_paths_and_scheduler(services, paths, scheduler.inner())
-            .map_err(udp_error_to_py)?;
+        let security = security.map(|security| security.inner()).unwrap_or_default();
+        let config =
+            CoreRuntimeConfig::new_with_paths_scheduler_and_security(services, paths, scheduler.inner(), security)
+                .map_err(udp_error_to_py)?;
         let inner = CoreDataplane::bind(config).map_err(dataplane_error_to_py)?;
         Ok(Self { inner })
     }
@@ -85,18 +89,35 @@ impl PyCoreDataplane {
     }
 
     /// Reapply compiled UDP services, path state, and scheduler state.
+    #[pyo3(signature = (services, paths, scheduler, security = None))]
     pub fn reapply_config_with_scheduler(
         &mut self,
         services: Vec<PyUdpServiceConfig>,
         paths: Vec<PyPathConfig>,
         scheduler: PySchedulerConfig,
+        security: Option<PyTransportSecurityConfig>,
     ) -> PyResult<PyReapplyOutcome> {
         let services = services.into_iter().map(|service| service.inner()).collect();
         let paths = paths.into_iter().map(|path| path.inner()).collect();
-        let config = CoreRuntimeConfig::new_with_paths_and_scheduler(services, paths, scheduler.inner())
-            .map_err(udp_error_to_py)?;
+        let security = security.map(|security| security.inner()).unwrap_or_default();
+        let config =
+            CoreRuntimeConfig::new_with_paths_scheduler_and_security(services, paths, scheduler.inner(), security)
+                .map_err(udp_error_to_py)?;
         self.inner
             .reapply_config(config)
+            .map(PyReapplyOutcome::from)
+            .map_err(dataplane_error_to_py)
+    }
+
+    /// Reapply only path scheduler primitives without rebinding live sockets.
+    pub fn reapply_scheduler(
+        &mut self,
+        paths: Vec<PyPathConfig>,
+        scheduler: PySchedulerConfig,
+    ) -> PyResult<PyReapplyOutcome> {
+        let paths = paths.into_iter().map(|path| path.inner()).collect();
+        self.inner
+            .reapply_scheduler(paths, scheduler.inner())
             .map(PyReapplyOutcome::from)
             .map_err(dataplane_error_to_py)
     }

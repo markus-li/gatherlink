@@ -32,20 +32,28 @@ class RustRuntimeDtos:
     services: list[Any]
     paths: list[Any]
     scheduler: Any
+    security: Any
 
 
 def bind_core_dataplane(runtime_config: RuntimeConfig) -> Any:
     """Bind a Rust core dataplane from already-expanded runtime config."""
     bindings = _load_bindings()
     dtos = build_rust_runtime_dtos(runtime_config, bindings=bindings)
-    return bindings.CoreDataplane.bind_with_scheduler(dtos.services, dtos.paths, dtos.scheduler)
+    return bindings.CoreDataplane.bind_with_scheduler(dtos.services, dtos.paths, dtos.scheduler, dtos.security)
 
 
 def reapply_core_dataplane(dataplane: Any, runtime_config: RuntimeConfig) -> Any:
     """Hot-reapply already-expanded runtime config to an existing Rust dataplane."""
     bindings = _load_bindings()
     dtos = build_rust_runtime_dtos(runtime_config, bindings=bindings)
-    return dataplane.reapply_config_with_scheduler(dtos.services, dtos.paths, dtos.scheduler)
+    return dataplane.reapply_config_with_scheduler(dtos.services, dtos.paths, dtos.scheduler, dtos.security)
+
+
+def reapply_core_scheduler(dataplane: Any, runtime_config: RuntimeConfig) -> Any:
+    """Hot-reapply scheduler/path primitives without rebinding live Rust sockets."""
+    bindings = _load_bindings()
+    dtos = build_rust_runtime_dtos(runtime_config, bindings=bindings)
+    return dataplane.reapply_scheduler(dtos.paths, dtos.scheduler)
 
 
 def build_rust_runtime_dtos(
@@ -57,6 +65,7 @@ def build_rust_runtime_dtos(
         services=[_service_dto(bindings, service) for service in runtime_config.services],
         paths=[_path_dto(bindings, path) for path in runtime_config.paths],
         scheduler=bindings.SchedulerConfig(runtime_config.scheduler.mode),
+        security=_security_dto(bindings, runtime_config.security),
     )
 
 
@@ -106,6 +115,21 @@ def _path_dto(bindings: ModuleType | Any, path: Any) -> Any:
         path.transport_bind,
         path.transport_remote,
     )
+
+
+def _security_dto(bindings: ModuleType | Any, security: Any) -> Any:
+    """Build one Rust transport-security DTO from compiled runtime security."""
+    if security.mode == "none":
+        return bindings.TransportSecurityConfig.none()
+    if security.mode == "static":
+        if security.send_key is None or security.receive_key is None:
+            raise RustRuntimeBridgeError("security.mode=static requires compiled send_key and receive_key")
+        return bindings.TransportSecurityConfig.static_keys(
+            _bounded_u32(security.receiver_index, field="security.receiver_index"),
+            security.send_key,
+            security.receive_key,
+        )
+    raise RustRuntimeBridgeError(f"unsupported security mode: {security.mode}")
 
 
 def _optional_u64(value: int | None, *, field: str) -> int | None:

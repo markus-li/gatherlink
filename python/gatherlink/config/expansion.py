@@ -8,6 +8,8 @@ should receive already-validated runtime state and should not contain business l
 
 from __future__ import annotations
 
+from base64 import b64decode
+
 from gatherlink.config.models import USER_SERVICE_ID_START, GatherlinkConfig, ServiceConfig
 from gatherlink.config.runtime import (
     RuntimeConfig,
@@ -29,23 +31,47 @@ def _service_by_name(services: list[ServiceConfig]) -> dict[str, ServiceConfig]:
 def _expand_paths(
     config: GatherlinkConfig,
     scheduler_paths: list[RuntimePathSchedulerConfig],
+    security: RuntimeSecurityConfig,
 ) -> list[RuntimePathConfig]:
     """Copy declared physical paths into the runtime contract."""
     # TODO: Replace this direct copy with discovered interface facts once the
     # physical path validator knows how to inspect Debian network state. Keeping
     # the function now makes that later enrichment a local change.
-    return [
-        RuntimePathConfig(
-            name=path.name,
-            interface=path.interface,
-            source_ip=path.source_ip,
-            gateway=path.gateway,
-            transport_bind=path.transport_bind,
-            transport_remote=path.transport_remote,
-            scheduler=scheduler_paths[index],
+    expanded: list[RuntimePathConfig] = []
+    for index, path in enumerate(config.paths):
+        scheduler = scheduler_paths[index]
+        if security.packet_overhead:
+            if scheduler.mtu <= security.packet_overhead:
+                raise ValueError(
+                    f"path {path.name} MTU {scheduler.mtu} cannot carry security overhead {security.packet_overhead}"
+                )
+            scheduler = scheduler.model_copy(update={"mtu": scheduler.mtu - security.packet_overhead})
+        expanded.append(
+            RuntimePathConfig(
+                name=path.name,
+                interface=path.interface,
+                source_ip=path.source_ip,
+                gateway=path.gateway,
+                transport_bind=path.transport_bind,
+                transport_remote=path.transport_remote,
+                scheduler=scheduler,
+            )
         )
-        for index, path in enumerate(config.paths)
-    ]
+    return expanded
+
+
+def _expand_security(config: GatherlinkConfig) -> RuntimeSecurityConfig:
+    """Compile user-facing security config into runtime key bytes."""
+    if config.security.mode == "none":
+        return RuntimeSecurityConfig(mode="none")
+    if config.security.send_key is None or config.security.receive_key is None:
+        raise ValueError("security.mode=static requires send_key and receive_key")
+    return RuntimeSecurityConfig(
+        mode="static",
+        receiver_index=config.security.receiver_index,
+        send_key=b64decode(config.security.send_key, validate=True),
+        receive_key=b64decode(config.security.receive_key, validate=True),
+    )
 
 
 def _expand_services(config: GatherlinkConfig) -> list[RuntimeServiceConfig]:
@@ -124,13 +150,14 @@ def _expand_helpers(config: GatherlinkConfig) -> list[RuntimeWireGuardHelperConf
 def expand_config(config: GatherlinkConfig) -> RuntimeConfig:
     """Return the explicit runtime config for a validated user config."""
     scheduler = compile_scheduler(config)
+    security = _expand_security(config)
     return RuntimeConfig(
         schema_version=config.schema_version,
         node=config.node,
         role=config.role,
         peer=config.peer,
-        security=RuntimeSecurityConfig(mode=config.security.mode),
-        paths=_expand_paths(config, scheduler.paths),
+        security=security,
+        paths=_expand_paths(config, scheduler.paths, security),
         services=_expand_services(config),
         scheduler=scheduler,
         helpers=_expand_helpers(config),

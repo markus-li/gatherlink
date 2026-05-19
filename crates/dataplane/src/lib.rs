@@ -13,6 +13,7 @@ pub mod receive;
 pub mod reorder;
 pub mod runtime_config;
 mod scheduler;
+pub mod security;
 pub mod sockets;
 pub mod transmit;
 pub mod udp_service;

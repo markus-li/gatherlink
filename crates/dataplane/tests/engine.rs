@@ -2,7 +2,9 @@ use std::net::UdpSocket;
 use std::time::Duration;
 
 use gatherlink_dataplane::engine::{CoreDataplane, ReapplyOutcome};
-use gatherlink_dataplane::runtime_config::{CorePathConfig, CoreRuntimeConfig, PathSchedulerState};
+use gatherlink_dataplane::runtime_config::{
+    CorePathConfig, CoreRuntimeConfig, PathSchedulerState, SchedulerConfig, SchedulerMode,
+};
 use gatherlink_dataplane::udp_service::UdpServiceConfig;
 use gatherlink_protocol::control::{ControlMessage, ControlPayload, PathMetadata};
 
@@ -305,8 +307,8 @@ fn fragments_oversized_udp_payload_when_no_path_can_fit_it_whole() {
     let (length, _source) = target.recv_from(&mut buffer).unwrap();
     assert_eq!(&buffer[..length], payload.as_slice());
     assert_eq!(outcome.path_id, 9);
-    assert_eq!(outcome.frame_count, 4);
-    assert_eq!(outcome.fragment_count, 3);
+    assert_eq!(outcome.frame_count, 3);
+    assert_eq!(outcome.fragment_count, 2);
     assert_eq!(outcome.batch_count, 0);
 }
 
@@ -339,8 +341,8 @@ fn fragments_onto_available_path_when_whole_fit_path_is_busy() {
     let (length, _source) = target.recv_from(&mut buffer).unwrap();
     assert_eq!(&buffer[..length], payload.as_slice());
     assert_eq!(outcome.path_id, 2);
-    assert_eq!(outcome.frame_count, 4);
-    assert_eq!(outcome.fragment_count, 3);
+    assert_eq!(outcome.frame_count, 2);
+    assert_eq!(outcome.fragment_count, 1);
 }
 
 #[test]
@@ -415,4 +417,37 @@ fn reapply_can_add_and_remove_services() {
     );
     assert!(dataplane.service("udp-main").is_none());
     assert!(dataplane.service("udp-secondary").is_some());
+}
+
+#[test]
+fn scheduler_reapply_preserves_bound_service_socket() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config =
+        CoreRuntimeConfig::single_udp_service("udp-main", "127.0.0.1:0".parse().unwrap(), target.local_addr().unwrap())
+            .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let original_listen = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+    let paths = vec![
+        CorePathConfig::new_with_scheduler(2, 0, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+        CorePathConfig::new_with_scheduler(3, 0, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+    ];
+
+    let outcome = dataplane
+        .reapply_scheduler(paths, SchedulerConfig::new(SchedulerMode::RoundRobin))
+        .unwrap();
+
+    assert_eq!(
+        dataplane.service("udp-main").unwrap().local_addr().unwrap(),
+        original_listen
+    );
+    assert_eq!(
+        outcome,
+        ReapplyOutcome {
+            unchanged: 1,
+            updated: 2,
+            rebound: 0,
+            added: 0,
+            removed: 0,
+        },
+    );
 }

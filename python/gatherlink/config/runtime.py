@@ -93,6 +93,14 @@ class RuntimeSecurityConfig(GatherlinkBaseModel):
     """Runtime-visible transport security mode."""
 
     mode: SecurityMode = "none"
+    receiver_index: int = 1
+    send_key: bytes | None = None
+    receive_key: bytes | None = None
+
+    @property
+    def packet_overhead(self) -> int:
+        """Return bytes added outside the encoded Gatherlink frame."""
+        return 29 if self.mode == "static" else 0
 
 
 class RuntimeWireGuardHelperConfig(GatherlinkBaseModel):

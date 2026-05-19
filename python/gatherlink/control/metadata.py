@@ -495,13 +495,14 @@ def record_control_path_mtu(
         path_name = (
             learned_path_names_by_id.get(path_id) or configured_path_names_by_id.get(path_id) or f"path-id:{path_id}"
         )
+        header_len = _known_payload_header_len(control_metadata, path_name)
         named_mtu[path_name] = {
             "tx_link_mtu": rx_link_mtu,
             "tx_frame_mtu": rx_frame_mtu,
-            "tx_payload_mtu": payload_mtu_or_none(rx_frame_mtu),
+            "tx_payload_mtu": payload_mtu_or_none(rx_frame_mtu, header_len=header_len),
             "rx_link_mtu": tx_link_mtu,
             "rx_frame_mtu": tx_frame_mtu,
-            "rx_payload_mtu": payload_mtu_or_none(tx_frame_mtu),
+            "rx_payload_mtu": payload_mtu_or_none(tx_frame_mtu, header_len=header_len),
             "source": "peer",
             "updated_at": datetime.now(UTC).isoformat(),
         }
@@ -663,6 +664,23 @@ def merge_mtu_record(
     return merged
 
 
-def payload_mtu_or_none(frame_mtu: int | None) -> int | None:
-    """Return v1 payload MTU for a reported frame MTU."""
-    return max(frame_mtu - 38, 0) if frame_mtu is not None else None
+def payload_mtu_or_none(frame_mtu: int | None, *, header_len: int = 14) -> int | None:
+    """Return compact v1 normal payload MTU for a reported frame MTU."""
+    return max(frame_mtu - header_len, 0) if frame_mtu is not None else None
+
+
+def _known_payload_header_len(control_metadata: dict[str, object], path_name: str) -> int:
+    """Infer whether the running service is advertising compact v1 or v2 payload space."""
+    path_mtu = control_metadata.get("path_mtu")
+    if not isinstance(path_mtu, dict):
+        return 14
+    current = path_mtu.get(path_name)
+    if not isinstance(current, dict):
+        return 14
+    frame_mtu = current.get("tx_frame_mtu")
+    payload_mtu = current.get("tx_payload_mtu")
+    if isinstance(frame_mtu, int) and isinstance(payload_mtu, int):
+        header_len = frame_mtu - payload_mtu
+        if header_len in {13, 14}:
+            return header_len
+    return 14
