@@ -649,6 +649,77 @@ def test_secrets_cli_exports_imports_and_lists_trust_roots(tmp_path) -> None:
     assert payload["trust_roots"][0]["node_id"] == exported["node_id"]
 
 
+def test_secrets_cli_topology_diff_explains_candidate_before_install(tmp_path) -> None:
+    runner = CliRunner()
+    issuer_path = tmp_path / "issuer.json"
+    node_a_path = tmp_path / "node-a.json"
+    node_b_path = tmp_path / "node-b.json"
+    current_path = tmp_path / "current.signed.json"
+    candidate_path = tmp_path / "candidate.signed.json"
+
+    assert runner.invoke(app, ["secrets", "identity-create", str(issuer_path)]).exit_code == 0
+    assert runner.invoke(app, ["secrets", "identity-create", str(node_a_path)]).exit_code == 0
+    assert runner.invoke(app, ["secrets", "identity-create", str(node_b_path)]).exit_code == 0
+    assert (
+        runner.invoke(
+            app,
+            [
+                "secrets",
+                "topology-create",
+                "--issuer",
+                str(issuer_path),
+                "--output",
+                str(current_path),
+                "--generation",
+                "1",
+                "--node",
+                f"node-a={node_a_path}",
+            ],
+        ).exit_code
+        == 0
+    )
+    assert (
+        runner.invoke(
+            app,
+            [
+                "secrets",
+                "topology-create",
+                "--issuer",
+                str(issuer_path),
+                "--output",
+                str(candidate_path),
+                "--generation",
+                "2",
+                "--node",
+                f"node-a={node_a_path}",
+                "--node",
+                f"node-b={node_b_path}",
+                "--service",
+                "dns=node-b=257",
+            ],
+        ).exit_code
+        == 0
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "secrets",
+            "topology-diff",
+            str(current_path),
+            str(candidate_path),
+            "--trust-root",
+            str(issuer_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["generation_delta"] == 1
+    assert payload["added_nodes"] == ["node-b"]
+    assert payload["added_services"] == ["dns"]
+
+
 def test_secrets_cli_rejects_unsafe_trust_root_name(tmp_path) -> None:
     runner = CliRunner()
     issuer_path = tmp_path / "issuer.json"

@@ -9,12 +9,13 @@ import dns.name
 import dns.rdataclass
 import dns.rdatatype
 import dns.rrset
+import pytest
 from gatherlink.cli.helpers import _parse_host_port
 from gatherlink.cli.main import app
 from gatherlink.diagnostics import DiagnosticsBus
 from gatherlink.helpers.dns import DnsHelperResolver, DnsResolverPolicy, DnsUpstream
 from gatherlink.helpers.dns.domain_sets import normalize_qname
-from gatherlink.helpers.dns.resolver import query_tunnel_upstream
+from gatherlink.helpers.dns.resolver import _doh_endpoint, query_tunnel_upstream
 from typer.testing import CliRunner
 
 
@@ -222,22 +223,54 @@ def test_dns_helper_tunnel_upstream_sends_dns_datagram_to_service_endpoint() -> 
     assert response.answer[0][0].address == "192.0.2.51"
 
 
-def test_dns_helper_doh_upstream_fails_closed_with_diagnostics() -> None:
-    bus = DiagnosticsBus()
+def test_dns_helper_doh_upstream_uses_dnspython_https_transport() -> None:
+    calls = []
+
+    def fake_doh(query, upstream):
+        calls.append(upstream)
+        response = dns.message.make_response(query)
+        question = query.question[0]
+        response.answer.append(dns.rrset.from_text(question.name, 60, "IN", "A", "192.0.2.60"))
+        return response
+
     resolver = DnsHelperResolver(
-        policy=DnsResolverPolicy(upstreams=[DnsUpstream(name="deferred", kind="doh", address="1.1.1.1")]),
-        diagnostics_bus=bus,
+        policy=DnsResolverPolicy(
+            upstreams=[
+                DnsUpstream(
+                    name="cloudflare",
+                    kind="doh",
+                    address="https://cloudflare-dns.com/dns-query",
+                    port=443,
+                )
+            ]
+        ),
+        doh_upstream_resolver=fake_doh,
     )
     query = dns.message.make_query("doh.example.", dns.rdatatype.A)
 
     result = resolver.resolve_wire(query.to_wire())
     response = dns.message.from_wire(result.response_wire)
 
-    assert response.rcode() == dns.rcode.SERVFAIL
-    assert result.diagnostic.error == "all configured DNS upstreams failed"
-    assert bus.queued_events == 1
-    assert bus._events[0].code == "dns.upstream_failed"
-    assert "not implemented" in bus._events[0].details["error"]
+    assert response.rcode() == dns.rcode.NOERROR
+    assert response.answer[0][0].address == "192.0.2.60"
+    assert result.diagnostic.upstream == "doh:cloudflare@https://cloudflare-dns.com/dns-query:443"
+    assert calls[0].kind == "doh"
+
+
+def test_dns_helper_doh_endpoint_parses_https_urls_and_rejects_plain_http() -> None:
+    endpoint = _doh_endpoint(DnsUpstream(name="cloudflare", kind="doh", address="https://cloudflare-dns.com/dns-query"))
+
+    assert endpoint.host == "cloudflare-dns.com"
+    assert endpoint.port == 443
+    assert endpoint.path == "/dns-query"
+
+    host_endpoint = _doh_endpoint(DnsUpstream(name="google", kind="doh", address="dns.google"))
+    assert host_endpoint.host == "dns.google"
+    assert host_endpoint.port == 443
+    assert host_endpoint.path == "/dns-query"
+
+    with pytest.raises(ValueError, match="https URL"):
+        _doh_endpoint(DnsUpstream(name="bad", kind="doh", address="http://resolver.example/dns-query"))
 
 
 def test_dnssec_require_ad_accepts_authenticated_response() -> None:
@@ -331,3 +364,36 @@ def test_dns_helper_cli_parses_tunnel_upstream(monkeypatch) -> None:
     assert upstream.address == "127.0.0.1"
     assert upstream.port == 55153
     assert upstream.timeout_seconds == 0.5
+
+
+def test_dns_helper_cli_parses_doh_upstream_url_without_udp_port(monkeypatch) -> None:
+    captured = {}
+
+    class FakeServer:
+        def __init__(self, _listen, resolver):
+            captured["resolver"] = resolver
+
+        def serve_forever(self):
+            return None
+
+    monkeypatch.setattr("gatherlink.cli.helpers.DnsUdpServer", FakeServer)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "helpers",
+            "dns-serve",
+            "--listen",
+            "127.0.0.1:5354",
+            "--doh-upstream",
+            "cloudflare=https://cloudflare-dns.com/dns-query,timeout=0.75",
+        ],
+    )
+
+    upstream = captured["resolver"].policy.upstreams[0]
+    assert result.exit_code == 0
+    assert upstream.kind == "doh"
+    assert upstream.name == "cloudflare"
+    assert upstream.address == "https://cloudflare-dns.com/dns-query"
+    assert upstream.port == 443
+    assert upstream.timeout_seconds == 0.75

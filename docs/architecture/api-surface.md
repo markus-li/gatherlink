@@ -52,7 +52,10 @@ Writable REST APIs are allowed in v0.9.1 or later, but only with an expiry guard
 - restarting the REST helper from the CLI resets the write window
 - read-only operations may continue after the write window expires
 - the API must report whether writes are enabled and when they expire
-- until concrete write endpoints are added, mutation requests must fail closed
+- the first write endpoint is `POST /v1/services/{name}/close`, which maps to
+  the existing service registry close behavior
+- unknown or expired mutation requests fail closed and emit structured
+  diagnostics
 
 The goal is to make local automation and future UI work possible without
 turning unauthenticated HTTP into a long-lived remote management surface.

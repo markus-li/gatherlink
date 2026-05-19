@@ -79,6 +79,11 @@ locally, and writes the planned command transcript without contacting VMs.
 `--execute` is required for SSH/SCP actions and refuses placeholder or committed
 example static keys.
 
+The generic VM harness writes `report.md` for humans and `report.json` for
+automation. The JSON report uses stable check statuses: `pass`, `fail`,
+`skipped`, `not_configured`, and `deferred`. Dry runs mark VM-contacting checks
+as `skipped` rather than pretending they passed.
+
 The Hyper-V runner is the currently proven concrete VM path. It runs from WSL,
 syncs source by Git, starts both managed services, sends traffic across three
 private VM paths, applies degradation/recovery, validates monitor counters and

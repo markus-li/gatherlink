@@ -175,3 +175,82 @@ def test_doctor_reports_multi_session_return_warning(monkeypatch, tmp_path) -> N
     config_check = next(check for check in payload["checks"] if check["name"] == "config.validate")
     assert config_check["ok"] is True
     assert any("multiple authenticated sessions" in warning for warning in config_check["details"]["warnings"])
+
+
+def test_doctor_validates_release_artifact_directory(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_check_rust_binding",
+        lambda: doctor_cli.DoctorCheck("rust.dataplane_binding", True, "stub binding ready"),
+    )
+    release_dir = tmp_path / "dist"
+    (release_dir / "python-wheel").mkdir(parents=True)
+    (release_dir / "rust-binaries").mkdir()
+    (release_dir / "wiki-user-docs").mkdir()
+    source = release_dir / "gatherlink-0.9.1-source.tar.gz"
+    wheel = release_dir / "python-wheel" / "gatherlink-0.9.1-py3-none-any.whl"
+    rust_binary = release_dir / "rust-binaries" / "gatherlink-time-helper"
+    wiki_readme = release_dir / "wiki-user-docs" / "README.md"
+    for artifact in [source, wheel, rust_binary, wiki_readme]:
+        artifact.write_text("artifact\n", encoding="utf-8")
+    (release_dir / "SHA256SUMS").write_text(
+        "\n".join(
+            [
+                f"0  {source.name}",
+                f"0  {wheel.name}",
+                f"0  {rust_binary.name}",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "doctor",
+            "--release-artifacts",
+            str(release_dir),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--service-registry",
+            str(tmp_path / "services"),
+            "--json",
+        ],
+    )
+
+    payload = json.loads(result.output)
+    assert result.exit_code == 0, result.output
+    artifact_check = next(check for check in payload["checks"] if check["name"] == "release.artifacts")
+    assert artifact_check["ok"] is True
+    assert artifact_check["details"]["rust_binaries"] == ["gatherlink-time-helper"]
+
+
+def test_doctor_fails_on_incomplete_release_artifact_directory(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_check_rust_binding",
+        lambda: doctor_cli.DoctorCheck("rust.dataplane_binding", True, "stub binding ready"),
+    )
+    release_dir = tmp_path / "dist"
+    release_dir.mkdir()
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "doctor",
+            "--release-artifacts",
+            str(release_dir),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--service-registry",
+            str(tmp_path / "services"),
+            "--json",
+        ],
+    )
+
+    payload = json.loads(result.output)
+    assert result.exit_code == 1
+    artifact_check = next(check for check in payload["checks"] if check["name"] == "release.artifacts")
+    assert artifact_check["ok"] is False
+    assert "missing Rust gatherlink-time-helper binary" in artifact_check["details"]["problems"]

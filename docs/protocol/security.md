@@ -692,8 +692,10 @@ Sessions should support WireGuard-like replacement:
 V1 keeps the public packet header compact and does not add a plaintext key-phase
 field. Rekey/rotation is represented by Python creating a replacement
 authenticated session with a new receiver index and then hot-reapplying compiled
-traffic-key facts to Rust. Exact intervals can be tuned later, but the
-implementation must assume keys are temporary session material.
+traffic-key facts to Rust. Python now owns the first rotation decision helper:
+it starts replacement before expiry or configured volume limits, rejects peers
+that report a different topology generation or identity, and reports whether
+traffic must fail closed. Rust still only receives compiled AEAD/replay facts.
 
 ## Implementation Boundary
 

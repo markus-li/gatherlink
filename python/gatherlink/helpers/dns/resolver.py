@@ -11,6 +11,7 @@ from __future__ import annotations
 import socket
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 import dns.exception
 import dns.flags
@@ -61,6 +62,7 @@ class DnsHelperResolver:
     cache: DnsResponseCache | None = None
     upstream_resolver: UpstreamResolver | None = None
     tunnel_upstream_resolver: UpstreamResolver | None = None
+    doh_upstream_resolver: UpstreamResolver | None = None
     diagnostics_bus: DiagnosticsBus | None = None
 
     def __post_init__(self) -> None:
@@ -71,6 +73,8 @@ class DnsHelperResolver:
             self.upstream_resolver = query_direct_upstream
         if self.tunnel_upstream_resolver is None:
             self.tunnel_upstream_resolver = query_tunnel_upstream
+        if self.doh_upstream_resolver is None:
+            self.doh_upstream_resolver = query_doh_upstream
 
     def resolve_wire(self, query_wire: bytes) -> DnsResolutionResult:
         """Resolve a raw DNS query packet using cache, policy, and upstream diagnostics."""
@@ -161,10 +165,9 @@ class DnsHelperResolver:
             return self.upstream_resolver(query, upstream)
         if upstream.kind == "tunnel":
             return self.tunnel_upstream_resolver(query, upstream)
-        # TODO(dns-helper): Route DoH queries through dnspython's DoH support
-        # only if DoH is explicitly promoted into v1.x scope. Keeping the kind
-        # visible now prevents policy/config churn without pretending it works.
-        raise NotImplementedError(f"DNS upstream kind is not implemented yet: {upstream.kind}")
+        if upstream.kind == "doh":
+            return self.doh_upstream_resolver(query, upstream)
+        raise NotImplementedError(f"DNS upstream kind is not implemented: {upstream.kind}")
 
     def _error_response(
         self,
@@ -240,4 +243,48 @@ def query_tunnel_upstream(query: dns.message.Message, upstream: DnsUpstream) -> 
         upstream.address,
         port=upstream.port,
         timeout=upstream.timeout_seconds,
+    )
+
+
+def query_doh_upstream(query: dns.message.Message, upstream: DnsUpstream) -> dns.message.Message:
+    """Send one DNS query to a DNS-over-HTTPS upstream using dnspython."""
+    endpoint = _doh_endpoint(upstream)
+    return dns.query.https(
+        query,
+        endpoint.host,
+        port=endpoint.port,
+        path=endpoint.path,
+        timeout=upstream.timeout_seconds,
+        post=True,
+    )
+
+
+@dataclass(frozen=True)
+class _DohEndpoint:
+    """Parsed DoH endpoint facts for dnspython."""
+
+    host: str
+    port: int
+    path: str
+
+
+def _doh_endpoint(upstream: DnsUpstream) -> _DohEndpoint:
+    """Return host, port, and path for a configured DoH upstream."""
+    if upstream.address.startswith(("https://", "http://")):
+        parsed = urlparse(upstream.address)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError("DoH upstream address must be an https URL")
+        # TODO(dns-doh): Keep the default HTTPS port behavior explicit here so
+        # operators can still override unusual DoH deployments without making
+        # the normal case accidentally use DNS-over-UDP port 53.
+        port = parsed.port or (upstream.port if upstream.port != 53 else 443)
+        return _DohEndpoint(
+            host=parsed.hostname,
+            port=port,
+            path=parsed.path or "/dns-query",
+        )
+    return _DohEndpoint(
+        host=upstream.address,
+        port=upstream.port if upstream.port != 53 else 443,
+        path="/dns-query",
     )

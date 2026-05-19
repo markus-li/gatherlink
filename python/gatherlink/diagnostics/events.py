@@ -32,6 +32,12 @@ DiagnosticEventKind = Literal[
 STABLE_EVENT_CODES: frozenset[str] = frozenset(
     {
         "config.reapplied",
+        "carrier.connect_failed",
+        "carrier.datagram_dropped",
+        "carrier.datagram_received",
+        "carrier.datagram_sent",
+        "carrier.ready",
+        "carrier.closed",
         "counter.snapshot",
         "crypto.auth_failed",
         "crypto.replay_drop",
@@ -48,10 +54,17 @@ STABLE_EVENT_CODES: frozenset[str] = frozenset(
         "helper.stream.opened",
         "helper.stream.unreachable",
         "helper.status_http.non_loopback_bind",
+        "helper.status_http.service_closed",
         "helper.status_http.started",
+        "helper.status_http.write_denied",
+        "helper.status_http.write_failed",
         "helper.lifecycle.start_failed",
         "helper.lifecycle.started",
         "packet.forwarded",
+        "rekey.expired",
+        "rekey.rejected",
+        "rekey.started",
+        "rekey.succeeded",
         "relay.auth_failed",
         "relay.expired_session",
         "relay.generation_stale",
@@ -288,6 +301,26 @@ class DiagnosticEvent(GatherlinkBaseModel):
             node=node,
             service=service,
             path=path,
+            peer=peer,
+            details=details or {},
+        )
+
+    @classmethod
+    def rekey_event(
+        cls,
+        *,
+        code: str,
+        message: str,
+        peer: str | None = None,
+        severity: DiagnosticSeverity = "info",
+        details: dict[str, Any] | None = None,
+    ) -> DiagnosticEvent:
+        """Build a Python-owned session lifecycle diagnostic."""
+        return cls(
+            code=code,
+            kind="runtime",
+            severity=severity,
+            message=message,
             peer=peer,
             details=details or {},
         )

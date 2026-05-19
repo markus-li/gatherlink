@@ -3,6 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from gatherlink.lab.acceptance import AcceptanceCheck, AcceptanceReport
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VM_TOOLS = REPO_ROOT / "tools" / "vm_acceptance"
 HYPERV_TOOLS = REPO_ROOT / "tools" / "hyperv"
@@ -11,18 +13,36 @@ HYPERV_TOOLS = REPO_ROOT / "tools" / "hyperv"
 def test_vm_acceptance_scripts_are_syntax_valid(tmp_path) -> None:
     script = VM_TOOLS / "run_acceptance.sh"
     validator = VM_TOOLS / "validate_jsonl.py"
+    report_writer = VM_TOOLS / "write_report_json.py"
 
     subprocess.run(["bash", "-n", str(script)], check=True)
-    subprocess.run(
-        [
-            "python3",
-            "-c",
-            ("import py_compile, sys; " "py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)"),
-            str(validator),
-            str(tmp_path / "validate_jsonl.pyc"),
+    for source in (validator, report_writer):
+        subprocess.run(
+            [
+                "python3",
+                "-c",
+                ("import py_compile, sys; " "py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)"),
+                str(source),
+                str(tmp_path / f"{source.name}.pyc"),
+            ],
+            check=True,
+        )
+
+
+def test_acceptance_report_schema_marks_failed_checks_not_ok() -> None:
+    report = AcceptanceReport(
+        mode="dry-run",
+        inventory="inventory.example.env",
+        output=".gatherlink/example",
+        checks=[
+            AcceptanceCheck(code="example.pass", status="pass", message="good"),
+            AcceptanceCheck(code="example.deferred", status="deferred", message="operator-owned"),
         ],
-        check=True,
     )
+    assert report.ok is True
+
+    report.checks.append(AcceptanceCheck(code="example.fail", status="fail", message="bad"))
+    assert report.ok is False
 
 
 def test_hyperv_acceptance_scripts_are_syntax_valid() -> None:
@@ -89,6 +109,10 @@ def test_vm_acceptance_dry_run_does_not_contact_vms(tmp_path) -> None:
     assert "mode: dry-run" in report
     assert "configs validated locally" in report
     assert "diagnostics JSONL are checked" in report
+    report_json = AcceptanceReport.model_validate_json((output / "report.json").read_text(encoding="utf-8"))
+    assert report_json.mode == "dry-run"
+    assert any(check.code == "vm.config.validated" and check.status == "pass" for check in report_json.checks)
+    assert any(check.code == "vm.remote.prepare" and check.status == "skipped" for check in report_json.checks)
     assert (output / "node-a.json").exists()
     assert (output / "node-b.json").exists()
 

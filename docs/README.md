@@ -25,7 +25,7 @@ and historical reports.
 | Where code lives | `docs/architecture/source-map.md` | `docs/architecture/architecture-contract.md` |
 | Future design notes | `docs/future/README.md` | `docs/reports/v0.9.1-roadmap.md`, `docs/reports/future-roadmap-pipeline.md` |
 | Releasing v0.9 | `docs/operations/v0.9-release-checklist.md` | `docs/operations/release-development-process.md`, `docs/reports/v0.9-roadmap.md`, `docs/labs/real-vm-acceptance.md` |
-| Release notes | `docs/releases/v0.9.0.md` | `docs/project-living-assessment.md`, `docs/operations/v0.9-release-checklist.md` |
+| Release notes | `docs/releases/v0.9.1.md` | `docs/releases/v0.9.0.md`, `docs/project-living-assessment.md`, `docs/operations/v0.9-release-checklist.md` |
 | Project status and next work | `docs/project-living-assessment.md` | `docs/reports/README.md`, `docs/reports/v0.9.1-roadmap.md`, `docs/operations/testing-strategy.md`, `docs/helpers/helper-priorities.md` |
 
 ## Canonical Docs
@@ -100,6 +100,8 @@ User documentation is for people running Gatherlink, not developing it.
 - `docs/operations/v0.9-troubleshooting-guide.md`: scenario-based v0.9 diagnosis
 - `docs/operations/v0.9-release-checklist.md`: release gates before tagging
   v0.9
+- `docs/operations/v0.9.1-release-artifacts.md`: local v0.9.1 artifact and
+  GitHub Wiki payload preparation
 - `docs/operations/release-development-process.md`: reusable three-pass
   implementation, verification, and boundary-review process for release work
 - `docs/operations/testing-strategy.md`: unit, integration, relay, DNS, helper, and golden-vector
@@ -108,6 +110,8 @@ User documentation is for people running Gatherlink, not developing it.
   GitHub Wiki publishing posture
 - `docs/labs/wsl-two-distro-lab.md`: repeatable two-distro WSL lab with three
   loopback carrier LANs, tc shaping, managed services, and acceptance checks
+- `docs/labs/lab-bundles.md`: operator-safe v0.9.1 lab bundle generation,
+  preflight, and manifest-scoped cleanup
 - `docs/labs/real-vm-acceptance.md`: v0.9 real Debian VM acceptance target and
   simple deploy-script posture
 - `docs/labs/hyperv-vm-lab.md`: host-specific Hyper-V Debian VM lab notes and

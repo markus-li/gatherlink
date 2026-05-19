@@ -8,6 +8,7 @@ from gatherlink.secrets.provisioning import (
     ProvisionedNode,
     ProvisionedService,
     TopologyBundleBody,
+    diff_topology_bundles,
     load_verified_topology_bundle,
     sign_topology_bundle,
 )
@@ -112,3 +113,44 @@ def test_topology_bundle_rejects_duplicate_services_and_unknown_owner() -> None:
                 ProvisionedService(name="wg", owner_node="node-a", service_id=256),
             ],
         )
+
+
+def test_topology_bundle_diff_explains_added_removed_and_revoked_facts() -> None:
+    issuer = NodeIdentity.generate()
+    issuer_id = IdentityPublicRecord.from_identity(issuer).node_id
+    node_a = ProvisionedNode(name="node-a", identity=IdentityPublicRecord.from_identity(NodeIdentity.generate()))
+    node_b = ProvisionedNode(name="node-b", identity=IdentityPublicRecord.from_identity(NodeIdentity.generate()))
+    current = TopologyBundleBody(
+        generation=3,
+        issuer_node_id=issuer_id,
+        nodes=[node_a],
+        services=[ProvisionedService(name="wireguard", owner_node="node-a", service_id=256)],
+    )
+    candidate = TopologyBundleBody(
+        generation=4,
+        issuer_node_id=issuer_id,
+        nodes=[node_b],
+        services=[ProvisionedService(name="dns", owner_node="node-b", service_id=257)],
+        revoked_node_ids=[node_a.identity.node_id],
+    )
+
+    diff = diff_topology_bundles(current, candidate)
+
+    assert diff.ok_to_install
+    assert diff.added_nodes == ["node-b"]
+    assert diff.removed_nodes == ["node-a"]
+    assert diff.added_services == ["dns"]
+    assert diff.removed_services == ["wireguard"]
+    assert diff.revoked_nodes == [node_a.identity.node_id]
+
+
+def test_topology_bundle_diff_rejects_non_forward_generation() -> None:
+    issuer = NodeIdentity.generate()
+    issuer_id = IdentityPublicRecord.from_identity(issuer).node_id
+    current = TopologyBundleBody(generation=3, issuer_node_id=issuer_id)
+    candidate = TopologyBundleBody(generation=3, issuer_node_id=issuer_id)
+
+    diff = diff_topology_bundles(current, candidate)
+
+    assert not diff.ok_to_install
+    assert diff.warnings == ["candidate_generation_not_newer"]

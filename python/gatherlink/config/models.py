@@ -16,6 +16,7 @@ from gatherlink.shared.models import FieldTransform, GatherlinkBaseModel
 
 NodeRole = Literal["client", "server"]
 SecurityMode = Literal["none", "static", "authenticated"]
+CarrierKind = Literal["udp", "quic-datagram", "http3-datagram"]
 ConfigFormat = Literal[
     "minimal-client",
     "minimal-server",
@@ -107,8 +108,10 @@ class PathConfig(GatherlinkBaseModel):
     # TODO(path-transport-discovery): These endpoints are explicit for the first
     # Rust-backed lab and manual deployments. Later carrier discovery can fill
     # them from validated interface/link facts without changing Rust policy.
+    carrier: CarrierKind = "udp"
     transport_bind: str | None = None
     transport_remote: str | None = None
+    carrier_max_datagram_size: int | None = Field(default=None, ge=256, le=65535)
     scheduler: PathSchedulerConfig = Field(default_factory=PathSchedulerConfig)
     relay: PathRelayHopConfig | None = None
 

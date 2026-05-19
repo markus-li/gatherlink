@@ -17,6 +17,7 @@ from gatherlink.secrets.provisioning import (
     ProvisionedNode,
     ProvisionedService,
     TopologyBundleBody,
+    diff_topology_bundles,
     load_verified_topology_bundle,
     sign_topology_bundle,
 )
@@ -132,6 +133,22 @@ def topology_verify(
         minimum_generation=minimum_generation,
     )
     typer.echo(json.dumps(body.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@app.command("topology-diff")
+def topology_diff(
+    current_bundle: Path = typer.Argument(..., help="Currently installed signed topology bundle JSON."),
+    candidate_bundle: Path = typer.Argument(..., help="Candidate signed topology bundle JSON."),
+    trust_root: Path = typer.Option(..., "--trust-root", help="Trusted public or private issuer identity JSON."),
+) -> None:
+    """Explain topology changes before installing a candidate bundle."""
+    trusted = _load_public_identity_record(trust_root)
+    current = load_verified_topology_bundle(SignedDocument.load(current_bundle), trusted_issuer=trusted)
+    candidate = load_verified_topology_bundle(SignedDocument.load(candidate_bundle), trusted_issuer=trusted)
+    diff = diff_topology_bundles(current, candidate)
+    typer.echo(json.dumps(diff.export_dict(), indent=2, sort_keys=True))
+    if not diff.ok_to_install:
+        raise typer.Exit(1)
 
 
 @app.command("handshake-init")

@@ -38,7 +38,8 @@ def test_status_http_payload_includes_hidden_services(tmp_path, monkeypatch) -> 
     payload = gather_status_payload(StatusHttpConfig("127.0.0.1", 8765), registry=registry)
 
     assert payload["api"]["label"] == "EXPERIMENTAL"
-    assert payload["api"]["writes_implemented"] is False
+    assert payload["api"]["writes_implemented"] is True
+    assert payload["api"]["write_endpoints"] == ["POST /v1/services/{name}/close"]
     assert payload["api"]["write_window_seconds"] == 3600
     assert payload["listen"] == {"host": "127.0.0.1", "port": 8765}
     assert payload["service_count"] == 2
@@ -84,7 +85,7 @@ def test_status_http_write_window_expires_without_stopping_read_apis(tmp_path) -
     payload = gather_status_payload(config, registry=ServiceRegistry(path=tmp_path / "missing-services"))
 
     assert payload["api"]["writes_enabled"] is False
-    assert payload["api"]["writes_implemented"] is False
+    assert payload["api"]["writes_implemented"] is True
     assert payload["services"] == []
 
 
@@ -114,7 +115,59 @@ def test_status_http_server_serves_json(tmp_path, monkeypatch) -> None:
     assert payload["listen"]["host"] == "127.0.0.1"
     assert payload["services"][0]["hidden"] is True
     assert v1_payload["api"]["label"] == "EXPERIMENTAL"
-    assert post_status == 405
+    assert post_status == 404
+
+
+def test_status_http_write_api_closes_registered_service(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(tmp_path / "services"))
+    registry = ServiceRegistry()
+    record = registry.register(ServiceRecord(name="core.client-a", kind="core", pid=None, log_file=tmp_path / "a.log"))
+    sink = MemorySink()
+    bus = DiagnosticsBus(sinks=[sink])
+    server = build_status_http_server(StatusHttpConfig("127.0.0.1", 0), registry=registry, diagnostics_bus=bus)
+    host, port = server.server_address[:2]
+    Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        request = Request(f"http://{host}:{port}/v1/services/{record.name}/close", method="POST")
+        with urlopen(request, timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    finally:
+        server.shutdown()
+        server.server_close()
+        bus.drain()
+
+    assert payload == {"action": "close", "ok": True, "service": "core.client-a", "state": "stopped"}
+    assert registry.resolve("core.client-a").status_label() == "stopped"
+    assert sink.events[0].code == "helper.status_http.service_closed"
+    assert sink.events[0].details["service"] == "core.client-a"
+
+
+def test_status_http_write_api_reports_unknown_service_without_leaking_secrets(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(tmp_path / "services"))
+    sink = MemorySink()
+    bus = DiagnosticsBus(sinks=[sink])
+    server = build_status_http_server(
+        StatusHttpConfig("127.0.0.1", 0),
+        registry=ServiceRegistry(),
+        diagnostics_bus=bus,
+    )
+    host, port = server.server_address[:2]
+    post_status = None
+    Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        request = Request(f"http://{host}:{port}/v1/services/does-not-exist/close", method="POST")
+        try:
+            urlopen(request, timeout=2)
+        except HTTPError as exc:
+            post_status = exc.code
+    finally:
+        server.shutdown()
+        server.server_close()
+        bus.drain()
+
+    assert post_status == 400
+    assert sink.events[0].code == "helper.status_http.write_failed"
+    assert "does-not-exist" in sink.events[0].details["error"]
 
 
 def test_status_http_post_fails_closed_after_write_window(tmp_path, monkeypatch) -> None:

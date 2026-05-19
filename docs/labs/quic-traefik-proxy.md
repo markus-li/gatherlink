@@ -123,3 +123,14 @@ its public entrypoint to the QUIC carrier port on the Gatherlink sink.
 - This lab does not authorize plaintext routing.
 - Cloudflare Spectrum-style TCP/UDP proxying can be tested later with the same
   acceptance shape when an account/environment is available.
+
+## Current Code State
+
+The v0.9.1 config model accepts `carrier: "quic-datagram"` and
+`carrier_max_datagram_size` on paths so examples and generated bundles can be
+validated before packet execution is wired in. The current Rust-backed runner
+still fails closed for non-UDP carriers with a readable bridge error instead of
+silently treating QUIC as UDP.
+
+The remaining implementation work is the actual QUIC DATAGRAM packet-time
+carrier and this Traefik UDP-forwarded acceptance proof.

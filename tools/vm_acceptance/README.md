@@ -45,6 +45,14 @@ Reports are written under `.gatherlink/vm-acceptance/` by default and are
 ignored by git. Do not commit inventories with private hostnames, usernames,
 keys, or generated secret material.
 
+Each run writes both human and machine-readable output:
+
+- `report.md` is the operator narrative.
+- `report.json` follows the Gatherlink acceptance schema with check statuses
+  `pass`, `fail`, `skipped`, `not_configured`, and `deferred`.
+- `checks.jsonl` is the raw check stream used to build `report.json`.
+- `commands.log` is the auditable command transcript.
+
 The committed example inventory contains deterministic authenticated session
 keys only so `--dry-run` can prove the rendered configs are valid. `--execute`
 refuses those example keys; replace them with generated session material before

@@ -70,6 +70,11 @@ def doctor(
         "--service-registry",
         help="Override the service registry directory used for registry checks.",
     ),
+    release_artifacts: Path | None = typer.Option(
+        None,
+        "--release-artifacts",
+        help="Validate a prepared release artifact directory.",
+    ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable doctor results."),
 ) -> None:
     """Run local Gatherlink v0.9 readiness checks."""
@@ -81,6 +86,8 @@ def doctor(
     ]
     checks.extend(_check_config(path) for path in config_paths or [])
     checks.extend(_check_diagnostics_jsonl(path) for path in diagnostics_jsonl or [])
+    if release_artifacts is not None:
+        checks.append(_check_release_artifacts(release_artifacts))
 
     payload = {"ok": all(check.ok for check in checks), "checks": [check.export_dict() for check in checks]}
     if json_output:
@@ -264,6 +271,79 @@ def _check_diagnostics_jsonl(path: Path) -> DoctorCheck:
         message=f"diagnostics JSONL valid: {path}" if not invalid_rows else f"diagnostics JSONL invalid: {path}",
         details={"path": str(path), "events": event_count, "invalid_rows": invalid_rows},
     )
+
+
+def _check_release_artifacts(path: Path) -> DoctorCheck:
+    """Validate that a prepared release artifact directory has the expected v0.9.1 shape."""
+    expected_dirs = {
+        "python-wheel": path / "python-wheel",
+        "rust-binaries": path / "rust-binaries",
+        "wiki-user-docs": path / "wiki-user-docs",
+    }
+    expected_files = {
+        "checksums": path / "SHA256SUMS",
+    }
+    missing_dirs = [name for name, dir_path in expected_dirs.items() if not dir_path.is_dir()]
+    missing_files = [name for name, file_path in expected_files.items() if not file_path.is_file()]
+    source_archives = sorted(path.glob("gatherlink-*-source.tar.gz"))
+    wheels = sorted((path / "python-wheel").glob("gatherlink-*.whl")) if (path / "python-wheel").is_dir() else []
+    rust_binaries = (
+        sorted(item.name for item in (path / "rust-binaries").iterdir() if item.is_file())
+        if (path / "rust-binaries").is_dir()
+        else []
+    )
+    wiki_docs = (
+        sorted(item.name for item in (path / "wiki-user-docs").iterdir() if item.is_file())
+        if (path / "wiki-user-docs").is_dir()
+        else []
+    )
+
+    problems: list[str] = []
+    problems.extend(f"missing directory: {name}" for name in missing_dirs)
+    problems.extend(f"missing file: {name}" for name in missing_files)
+    if not source_archives:
+        problems.append("missing source archive")
+    if not wheels:
+        problems.append("missing Python wheel")
+    if "gatherlink-time-helper" not in rust_binaries:
+        problems.append("missing Rust gatherlink-time-helper binary")
+    if "README.md" not in wiki_docs:
+        problems.append("missing Wiki README.md payload")
+    checksum_errors = _release_checksum_errors(path / "SHA256SUMS", source_archives, wheels, rust_binaries)
+    problems.extend(checksum_errors)
+
+    return DoctorCheck(
+        name="release.artifacts",
+        ok=not problems,
+        message=f"release artifacts valid: {path}" if not problems else f"release artifacts incomplete: {path}",
+        details={
+            "path": str(path),
+            "source_archives": [archive.name for archive in source_archives],
+            "wheels": [wheel.name for wheel in wheels],
+            "rust_binaries": rust_binaries,
+            "wiki_docs": wiki_docs,
+            "problems": problems,
+        },
+    )
+
+
+def _release_checksum_errors(
+    checksum_path: Path,
+    source_archives: list[Path],
+    wheels: list[Path],
+    rust_binaries: list[str],
+) -> list[str]:
+    """Return missing checksum rows for expected release artifacts."""
+    if not checksum_path.is_file():
+        return []
+    try:
+        checksum_text = checksum_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"cannot read checksum file: {type(exc).__name__}"]
+    expected_names = [archive.name for archive in source_archives]
+    expected_names.extend(wheel.name for wheel in wheels)
+    expected_names.extend(rust_binaries)
+    return [f"missing checksum row: {name}" for name in expected_names if name not in checksum_text]
 
 
 def _print_human(payload: dict[str, Any]) -> None:

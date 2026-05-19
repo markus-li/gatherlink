@@ -62,3 +62,11 @@ packet-format state.
 - This lab does not authorize plaintext routing.
 - CONNECT-UDP/MASQUE can be considered for v0.9.2 or later, but it is not the
   v0.9.1 HTTP/3 DATAGRAM carrier unless explicitly promoted.
+
+## Current Code State
+
+The v0.9.1 config model accepts `carrier: "http3-datagram"` and
+`carrier_max_datagram_size` on paths. This lets config, bundle, and diagnostic
+plumbing distinguish HTTP/3 DATAGRAM from UDP without changing Gatherlink packet
+headers. The current Rust-backed runner rejects non-UDP carriers fail-closed
+until a real HTTP/3 DATAGRAM packet-time carrier is added.

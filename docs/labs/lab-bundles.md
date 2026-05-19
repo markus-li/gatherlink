@@ -1,0 +1,29 @@
+# Operator-Safe Lab Bundles
+
+Lab bundles are v0.9.1 setup artifacts for repeatable multi-node proofs. They
+generate configs, a manifest, monitor commands, probe commands, explicit Debian
+setup commands, and scoped cleanup commands. Bundle generation does not install
+packages, create interfaces, edit routes, start VMs, or mutate host networking.
+
+The first bundle topology is the three-node Hyper-V shape used for one sink with
+two source nodes and later routing/relay experiments:
+
+```bash
+gatherlink lab bundle hyperv-three-node --out .gatherlink/lab-bundles/three-node
+gatherlink lab preflight .gatherlink/lab-bundles/three-node/manifest.json
+gatherlink lab cleanup .gatherlink/lab-bundles/three-node/manifest.json
+```
+
+`preflight` is read-only. It validates generated Gatherlink configs, checks that
+the manifest declares carrier paths, and reports explicit host setup as
+`not_configured` rather than silently doing it. WireGuard interface lifecycle is
+reported as deferred/operator-owned because Gatherlink should plan and diagnose
+the UDP transport, not quietly own routes, firewall rules, or interface policy.
+
+`cleanup` consumes only resources listed in the manifest. It prints scoped
+commands such as `gatherlink services close ...` or `sudo ip link del ...`; it
+does not fall back to broad process or interface matching.
+
+Generated bundle directories may contain local addresses, temporary keys,
+diagnostic paths, and host-specific notes. Keep them under ignored paths such as
+`.gatherlink/`.

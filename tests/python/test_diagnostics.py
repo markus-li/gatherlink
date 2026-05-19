@@ -78,6 +78,20 @@ def test_drop_event_factory_exports_local_silent_drop_fact() -> None:
     assert event.details == {"receiver_index": "unknown"}
 
 
+def test_rekey_event_factory_exports_stable_runtime_fact() -> None:
+    event = DiagnosticEvent.rekey_event(
+        code="rekey.started",
+        message="session rekey started",
+        peer="node-b",
+        details={"current_receiver_index": 10, "next_receiver_index": 11},
+    )
+
+    assert event.stable_code
+    assert event.kind == "runtime"
+    assert event.peer == "node-b"
+    assert event.details["next_receiver_index"] == 11
+
+
 def test_diagnostics_bus_drops_oldest_without_blocking() -> None:
     sink = MemorySink()
     bus = DiagnosticsBus(max_queue_size=2, sinks=[sink])

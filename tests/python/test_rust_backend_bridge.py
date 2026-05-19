@@ -209,6 +209,29 @@ def test_runtime_path_relay_wrap_config_reaches_rust_binding_dto() -> None:
     assert dtos.paths[0].relay_send_key == relay_key
 
 
+@pytest.mark.parametrize("carrier", ["quic-datagram", "http3-datagram"])
+def test_non_udp_carrier_fails_closed_before_rust_udp_dto(carrier: str) -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        paths=[
+            PathConfig(
+                name="path-a",
+                interface="gl-a",
+                carrier=carrier,
+                transport_bind="127.0.0.1:56001",
+                transport_remote="127.0.0.1:56002",
+            )
+        ],
+        services=[ServiceConfig(name="udp-main", listen="127.0.0.1:55180", target="127.0.0.1:51820")],
+    )
+
+    with pytest.raises(RustRuntimeBridgeError, match="supports only udp"):
+        build_rust_runtime_dtos(expand_config(config), bindings=FakeBindings)
+
+
 def test_static_security_config_compiles_to_rust_binding_dto_and_inner_mtu() -> None:
     send_key = b64encode(bytes([0x11]) * 32).decode("ascii")
     receive_key = b64encode(bytes([0x22]) * 32).decode("ascii")

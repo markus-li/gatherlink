@@ -73,6 +73,27 @@ class TopologyBundleBody(GatherlinkBaseModel):
         return self.valid_until is None or now <= self.valid_until
 
 
+class TopologyBundleDiff(GatherlinkBaseModel):
+    """Operator-safe topology change summary before installing a signed bundle."""
+
+    current_generation: int
+    candidate_generation: int
+    generation_delta: int
+    added_nodes: list[str] = Field(default_factory=list)
+    removed_nodes: list[str] = Field(default_factory=list)
+    revoked_nodes: list[str] = Field(default_factory=list)
+    added_services: list[str] = Field(default_factory=list)
+    removed_services: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+    @property
+    def ok_to_install(self) -> bool:
+        """Return whether the candidate moves topology generation forward."""
+        return self.candidate_generation > self.current_generation and not any(
+            warning.startswith("candidate_generation_not_newer") for warning in self.warnings
+        )
+
+
 def sign_topology_bundle(identity: NodeIdentity, body: TopologyBundleBody) -> SignedDocument:
     """Sign a topology bundle after binding the issuer to the signing identity."""
     if body.issuer_node_id != IdentityPublicRecord.from_identity(identity).node_id:
@@ -103,3 +124,27 @@ def load_verified_topology_bundle(
     if not body.is_valid_at(now or datetime.now(UTC)):
         raise ValueError("topology bundle is outside its validity window")
     return body
+
+
+def diff_topology_bundles(current: TopologyBundleBody, candidate: TopologyBundleBody) -> TopologyBundleDiff:
+    """Return an operator-safe diff between two verified topology bundles."""
+    current_nodes = {node.name: node for node in current.nodes}
+    candidate_nodes = {node.name: node for node in candidate.nodes}
+    current_services = {service.name: service for service in current.services}
+    candidate_services = {service.name: service for service in candidate.services}
+    warnings: list[str] = []
+    if candidate.generation <= current.generation:
+        warnings.append("candidate_generation_not_newer")
+    if candidate.issuer_node_id != current.issuer_node_id:
+        warnings.append("issuer_changed")
+    return TopologyBundleDiff(
+        current_generation=current.generation,
+        candidate_generation=candidate.generation,
+        generation_delta=candidate.generation - current.generation,
+        added_nodes=sorted(set(candidate_nodes) - set(current_nodes)),
+        removed_nodes=sorted(set(current_nodes) - set(candidate_nodes)),
+        revoked_nodes=sorted(set(candidate.revoked_node_ids) - set(current.revoked_node_ids)),
+        added_services=sorted(set(candidate_services) - set(current_services)),
+        removed_services=sorted(set(current_services) - set(candidate_services)),
+        warnings=warnings,
+    )

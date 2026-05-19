@@ -9,6 +9,12 @@ from pathlib import Path
 
 import typer
 
+from gatherlink.lab.bundles import (
+    generate_lab_bundle,
+    is_lab_bundle_manifest,
+    plan_lab_bundle_cleanup,
+    preflight_lab_bundle,
+)
 from gatherlink.lab.helper_smoke import run_all_helper_smokes
 from gatherlink.lab.reports import write_three_path_scheduler_report
 from gatherlink.lab.runtime import (
@@ -62,6 +68,34 @@ def helpers_smoke() -> None:
         status = "ok" if result.ok else "failed"
         typer.echo(f"{result.helper}: {status} {result.detail}")
     if not all(result.ok for result in results):
+        raise typer.Exit(1)
+
+
+@app.command("bundle")
+def bundle(
+    topology: str = typer.Argument(..., help="Bundle topology to generate, for example hyperv-three-node."),
+    out: Path = typer.Option(..., "--out", help="Output directory for manifest, configs, and commands."),
+) -> None:
+    """Generate an operator-safe lab bundle without mutating host state."""
+    try:
+        result = generate_lab_bundle(topology, out)  # type: ignore[arg-type]
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"lab bundle: wrote manifest={result.manifest_path}")
+    typer.echo(f"lab bundle: wrote commands={result.command_path}")
+    for config_path in result.config_paths:
+        typer.echo(f"lab bundle: wrote config={config_path}")
+
+
+@app.command("preflight")
+def preflight(manifest: Path) -> None:
+    """Run read-only checks against a generated lab bundle manifest."""
+    report = preflight_lab_bundle(manifest)
+    for finding in report.findings:
+        node = f" node={finding.node}" if finding.node else ""
+        typer.echo(f"lab preflight: {finding.status} code={finding.code}{node} {finding.message}")
+    if not report.ok:
         raise typer.Exit(1)
 
 
@@ -335,8 +369,21 @@ def down(path: Path) -> None:
 
 
 @app.command("cleanup")
-def cleanup(path: Path) -> None:
-    """Stop the lab service and remove lab-owned virtual interfaces."""
+def cleanup(
+    path: Path, execute: bool = typer.Option(False, "--execute", help="Execute manifest cleanup commands.")
+) -> None:
+    """Stop a lab scenario or render scoped cleanup for a bundle manifest."""
+    if is_lab_bundle_manifest(path):
+        cleanup_plan = plan_lab_bundle_cleanup(path, execute=execute)
+        for warning in cleanup_plan.warnings:
+            typer.echo(f"lab cleanup: warning {warning}")
+        for command in cleanup_plan.commands:
+            typer.echo(f"lab cleanup: command {command}")
+        if execute:
+            typer.echo("lab cleanup: execute mode is intentionally not implemented for bundle manifests yet", err=True)
+            raise typer.Exit(1)
+        return
+
     scenario = load_lab_scenario_file(path)
     service_status = stop_lab_service(scenario)
     typer.echo(f"lab service: stopped pid_file={service_status.pid_file}")

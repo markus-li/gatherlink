@@ -36,6 +36,7 @@ from gatherlink.security.sessions import (
     derive_static_transport_security,
     generate_receiver_index,
     plan_authenticated_static_session,
+    plan_session_rotation,
 )
 
 
@@ -177,6 +178,80 @@ def test_authenticated_session_plan_binds_topology_and_rekey_limits() -> None:
     assert initiator_plan.security.receive_key == responder_plan.security.send_key
     assert initiator_plan.export_public_summary()["has_compiled_security"] is True
     assert initiator_plan.needs_rekey(now=now + timedelta(seconds=121))
+
+
+def test_session_rotation_starts_before_expiry_and_overlaps_receive_windows() -> None:
+    initiator = NodeIdentity.generate()
+    responder = NodeIdentity.generate()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    topology = TopologyBundleBody(
+        generation=9,
+        issuer_node_id=IdentityPublicRecord.from_identity(initiator).node_id,
+        created_at=now,
+        valid_from=now,
+        nodes=[
+            ProvisionedNode(name="initiator", identity=IdentityPublicRecord.from_identity(initiator)),
+            ProvisionedNode(name="responder", identity=IdentityPublicRecord.from_identity(responder)),
+        ],
+    )
+    plan = plan_authenticated_static_session(
+        initiator,
+        IdentityPublicRecord.from_identity(responder),
+        topology,
+        role="initiator",
+        receiver_index=99,
+        now=now,
+        lifetime_seconds=120,
+    )
+
+    decision = plan_session_rotation(
+        plan,
+        now=now + timedelta(seconds=95),
+        observed_topology_generation=9,
+        observed_peer_node_id=IdentityPublicRecord.from_identity(responder).node_id,
+        rekey_margin_seconds=30,
+        overlap_seconds=10,
+        next_receiver_index=100,
+    )
+
+    assert decision.should_rekey
+    assert not decision.fail_closed
+    assert decision.next_receiver_index == 100
+    assert decision.overlap_until == now + timedelta(seconds=105)
+    assert decision.export_public_summary()["fail_closed"] is False
+
+
+def test_session_rotation_fails_closed_for_expiry_or_peer_disagreement() -> None:
+    initiator = NodeIdentity.generate()
+    responder = NodeIdentity.generate()
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    topology = TopologyBundleBody(
+        generation=9,
+        issuer_node_id=IdentityPublicRecord.from_identity(initiator).node_id,
+        created_at=now,
+        valid_from=now,
+        nodes=[
+            ProvisionedNode(name="initiator", identity=IdentityPublicRecord.from_identity(initiator)),
+            ProvisionedNode(name="responder", identity=IdentityPublicRecord.from_identity(responder)),
+        ],
+    )
+    plan = plan_authenticated_static_session(
+        initiator,
+        IdentityPublicRecord.from_identity(responder),
+        topology,
+        role="initiator",
+        receiver_index=99,
+        now=now,
+        lifetime_seconds=120,
+    )
+
+    generation_mismatch = plan_session_rotation(plan, now=now, observed_topology_generation=10)
+    expired = plan_session_rotation(plan, now=now + timedelta(seconds=121))
+
+    assert generation_mismatch.fail_closed
+    assert generation_mismatch.action == "reject"
+    assert expired.fail_closed
+    assert expired.action == "expired"
 
 
 def test_authenticated_receiver_index_defaults_are_opaque_and_replay_state_resets() -> None:

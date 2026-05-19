@@ -92,6 +92,13 @@ Suggested initial codes include:
 - `socks.exit_unreachable`
 - `helper.status_http.started`
 - `helper.status_http.non_loopback_bind`
+- `helper.status_http.service_closed`
+- `helper.status_http.write_denied`
+- `helper.status_http.write_failed`
+- `rekey.started`
+- `rekey.succeeded`
+- `rekey.rejected`
+- `rekey.expired`
 
 Helper warnings use the same event bus as dataplane warnings. This keeps
 operator views, JSONL logs, and future metrics consistent.

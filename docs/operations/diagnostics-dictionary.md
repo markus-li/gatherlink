@@ -78,6 +78,9 @@ observability issue, not a packet-path failure by themselves.
 | `helper.time.set_failed` | time helper could not set system time | permissions, NTP conflict |
 | `helper.status_http.started` | status HTTP helper started | local bind and write window |
 | `helper.status_http.non_loopback_bind` | status helper bound outside loopback | explicit danger flag and exposure |
+| `helper.status_http.service_closed` | experimental write API closed a registered service | service name and write-window operator action |
+| `helper.status_http.write_denied` | experimental write API refused a request | expired write window or denied local action |
+| `helper.status_http.write_failed` | experimental write API failed safely | bad service name, systemd-owned service, or registry error |
 
 Helpers remain Python-owned. Helper diagnostics explain helper behavior without
 turning helpers into core protocol features.
@@ -90,8 +93,8 @@ turning helpers into core protocol features.
 | `dns.upstream_failed` | configured upstream failed | upstream address, timeout, transport |
 | `dns.dnssec_bogus` | DNSSEC policy rejected answer | upstream AD bit or validation policy |
 
-Direct DNS upstreams run now. Gatherlink-tunnel DNS upstream execution remains a
-v0.9 follow-up until implemented and VM-proven.
+Direct, Gatherlink-tunnel, and DNS-over-HTTPS upstreams run now. DNS diagnostics
+stay helper-owned and do not add DNS semantics to the core dataplane.
 
 ## Reading JSONL
 

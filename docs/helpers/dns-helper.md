@@ -11,9 +11,8 @@ First scope:
 
 - local resolver endpoint
 - cache and serve-stale behavior
-- upstream policy that can use direct or Gatherlink-tunnel choices for v0.9
-- DoH policy shape may exist, but DoH execution is deferred unless explicitly
-  promoted later
+- upstream policy that can use direct, Gatherlink-tunnel, or DNS-over-HTTPS
+  choices for v0.9.1
 - IDNA-aware name handling
 - DNSSEC support
 - diagnostics for upstream choice, cache state, and validation failures
@@ -35,8 +34,8 @@ Implemented first slice:
 - direct upstreams execute now
 - Gatherlink tunnel upstream execution is implemented in the helper and must be
   included in VM acceptance before a v0.9 tag
-- DoH is represented in policy and reports as not implemented until its
-  transport is wired
+- DoH upstream execution is implemented through dnspython's HTTPS transport;
+  it is optional helper behavior and does not change the core transport
 - DNSSEC policy is explicit: `off`, `allow_unsigned`, or `require_ad`; the
   first implementation treats upstream `AD` as validation evidence and exposes
   failures in diagnostics rather than silently degrading
@@ -45,9 +44,8 @@ Library decision:
 
 - use `dnspython` as the first DNS helper dependency
 - prefer base `dnspython` for initial resolver/packet/cache work
-- include `dnspython[dnssec,idna]` when implementing the DNS helper, because
+- include `dnspython[dnssec,doh,idna]` when implementing the DNS helper, because
   DNSSEC support should be part of the helper and IDNA matters
-- add `dnspython[doh]` only when implementing DNS-over-HTTPS
 - do not hand-roll DNS packet parsing
 
 Viability notes:
@@ -81,7 +79,6 @@ IDNA posture:
 
 Not-yet scope:
 
-- DNS-over-HTTPS unless explicitly promoted after v0.9
 - enterprise DNS policy engine
 - replacing existing DNS servers
 - making core transport depend on DNS helper availability

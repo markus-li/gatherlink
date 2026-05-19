@@ -40,10 +40,10 @@ class DnsResolverPolicy:
     """
     DNS helper policy compiled for the local resolver endpoint.
 
-    Direct and tunnel upstreams execute in v1. Tunnel means the DNS helper sends
-    a normal DNS UDP query to a configured local Gatherlink service endpoint.
-    DoH remains represented for policy compatibility and fails closed until it
-    is explicitly promoted.
+    Direct, tunnel, and DoH upstreams execute in v0.9.1. Tunnel means the DNS
+    helper sends a normal DNS UDP query to a configured local Gatherlink service
+    endpoint. DoH means the helper uses dnspython's DNS-over-HTTPS transport
+    directly from Python; Rust remains unaware of DNS semantics.
     """
 
     strategy: str = "race_first_valid"

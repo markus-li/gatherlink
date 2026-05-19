@@ -98,6 +98,39 @@ def test_lab_plan_cli_prints_not_implemented_steps() -> None:
     assert any(step["status"] == "not_implemented" for step in payload["steps"])
 
 
+def test_lab_bundle_hyperv_three_node_generates_manifest_configs_and_commands(tmp_path: Path) -> None:
+    output = tmp_path / "bundle"
+
+    result = CliRunner().invoke(app, ["lab", "bundle", "hyperv-three-node", "--out", str(output)])
+
+    assert result.exit_code == 0
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["kind"] == "gatherlink.lab.bundle.manifest"
+    assert manifest["topology"] == "hyperv-three-node"
+    assert manifest["monitor_groups"]["wg-demo"] == ["vm.shared-sink", "remote:source-a", "remote:source-c"]
+    assert len(manifest["paths"]) == 6
+    assert (output / "configs" / "sink-b.json").exists()
+    assert (output / "commands.md").exists()
+
+    preflight = CliRunner().invoke(app, ["lab", "preflight", str(output / "manifest.json")])
+
+    assert preflight.exit_code == 0
+    assert "code=bundle.config_valid node=sink-b" in preflight.output
+    assert "code=bundle.debian_commands" in preflight.output
+
+
+def test_lab_bundle_cleanup_uses_manifest_resources_only(tmp_path: Path) -> None:
+    output = tmp_path / "bundle"
+    CliRunner().invoke(app, ["lab", "bundle", "hyperv-three-node", "--out", str(output)])
+
+    result = CliRunner().invoke(app, ["lab", "cleanup", str(output / "manifest.json")])
+
+    assert result.exit_code == 0
+    assert "gatherlink services close vm.shared-sink" in result.output
+    assert "sudo ip link del wg-gl-a" in result.output
+    assert "while read" not in result.output
+
+
 def test_lab_shared_sink_smoke_cli_reports_two_sources(monkeypatch) -> None:
     from gatherlink.cli import lab as lab_cli
     from gatherlink.lab.runtime import SharedSinkSmokeResult

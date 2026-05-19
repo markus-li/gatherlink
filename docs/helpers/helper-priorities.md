@@ -58,8 +58,8 @@ First scope:
 
 - local resolver endpoint
 - cache and serve-stale behavior
-- upstream policy that can use direct and Gatherlink-tunnel choices for v0.9
-- DoH policy shape only; DoH execution remains later unless promoted
+- upstream policy that can use direct, Gatherlink-tunnel, and DoH choices for
+  v0.9.1
 - diagnostics for upstream choice, cache state, and validation failures
 
 Not-yet scope:

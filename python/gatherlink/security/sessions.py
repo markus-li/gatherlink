@@ -22,6 +22,8 @@ AUTHENTICATED_SESSION_TRANSCRIPT_DOMAIN = b"GATHERLINK_AUTH_SESSION_CONTEXT_V1"
 DEFAULT_SESSION_LIFETIME_SECONDS = 120
 DEFAULT_REKEY_AFTER_PACKETS = 2**48
 DEFAULT_REKEY_AFTER_BYTES = 1 << 50
+DEFAULT_REKEY_MARGIN_SECONDS = 30
+DEFAULT_REKEY_OVERLAP_SECONDS = 10
 MIN_RECEIVER_INDEX = 1
 MAX_RECEIVER_INDEX = 2**32 - 1
 
@@ -107,6 +109,38 @@ class AuthenticatedSessionPlan:
         }
 
 
+@dataclass(frozen=True)
+class SessionRotationDecision:
+    """Python-owned decision about whether an authenticated session needs rotation."""
+
+    action: Literal["keep", "rekey", "reject", "expired"]
+    reason: str
+    current_receiver_index: int
+    next_receiver_index: int | None = None
+    overlap_until: datetime | None = None
+
+    @property
+    def should_rekey(self) -> bool:
+        """Return whether the caller should start a replacement handshake now."""
+        return self.action == "rekey"
+
+    @property
+    def fail_closed(self) -> bool:
+        """Return whether traffic must stop until a valid session is available."""
+        return self.action in {"reject", "expired"}
+
+    def export_public_summary(self) -> dict[str, int | str | bool | None]:
+        """Return operator-safe rotation facts without keys."""
+        return {
+            "action": self.action,
+            "reason": self.reason,
+            "current_receiver_index": self.current_receiver_index,
+            "next_receiver_index": self.next_receiver_index,
+            "overlap_until": self.overlap_until.isoformat() if self.overlap_until else None,
+            "fail_closed": self.fail_closed,
+        }
+
+
 def derive_directional_session_keys(shared_secret: bytes, transcript_hash: bytes) -> DirectionalSessionKeys:
     """Derive two 32-byte traffic keys from an authenticated handshake secret."""
     if len(shared_secret) != 32:
@@ -126,6 +160,69 @@ def derive_directional_session_keys(shared_secret: bytes, transcript_hash: bytes
 def generate_receiver_index() -> int:
     """Return an opaque non-zero receiver index for an authenticated receive session."""
     return randbelow(MAX_RECEIVER_INDEX) + MIN_RECEIVER_INDEX
+
+
+def plan_session_rotation(
+    current: AuthenticatedSessionPlan,
+    *,
+    now: datetime,
+    packets: int = 0,
+    bytes_transferred: int = 0,
+    observed_topology_generation: int | None = None,
+    observed_peer_node_id: str | None = None,
+    rekey_margin_seconds: int = DEFAULT_REKEY_MARGIN_SECONDS,
+    overlap_seconds: int = DEFAULT_REKEY_OVERLAP_SECONDS,
+    next_receiver_index: int | None = None,
+) -> SessionRotationDecision:
+    """
+    Decide whether a live authenticated session should rotate.
+
+    Python owns this policy because it depends on topology, identity, timing,
+    and operator diagnostics. Rust only receives the resulting compact receive
+    windows, receiver indexes, and AEAD keys after a new session exists.
+    """
+    if observed_topology_generation is not None and observed_topology_generation != current.topology_generation:
+        return SessionRotationDecision(
+            action="reject",
+            reason="peer topology generation disagrees with local session",
+            current_receiver_index=current.receiver_index,
+        )
+    if observed_peer_node_id is not None and observed_peer_node_id != current.peer_node_id:
+        return SessionRotationDecision(
+            action="reject",
+            reason="peer identity disagrees with local session",
+            current_receiver_index=current.receiver_index,
+        )
+    if now >= current.expires_at:
+        return SessionRotationDecision(
+            action="expired",
+            reason="session expired before replacement completed",
+            current_receiver_index=current.receiver_index,
+        )
+    if rekey_margin_seconds < 0:
+        raise ValueError("rekey margin must be zero or greater")
+    if overlap_seconds < 0:
+        raise ValueError("overlap seconds must be zero or greater")
+
+    rekey_at = current.expires_at - timedelta(seconds=rekey_margin_seconds)
+    volume_rekey = packets >= current.rekey_after_packets or bytes_transferred >= current.rekey_after_bytes
+    if now >= rekey_at or volume_rekey:
+        replacement_index = next_receiver_index if next_receiver_index is not None else generate_receiver_index()
+        if replacement_index == current.receiver_index:
+            replacement_index = _next_receiver_index(replacement_index)
+        return SessionRotationDecision(
+            action="rekey",
+            reason="session is within rekey margin" if now >= rekey_at else "session volume limit reached",
+            current_receiver_index=current.receiver_index,
+            next_receiver_index=replacement_index,
+            overlap_until=now + timedelta(seconds=overlap_seconds),
+        )
+
+    return SessionRotationDecision(
+        action="keep",
+        reason="session remains within time and volume limits",
+        current_receiver_index=current.receiver_index,
+    )
 
 
 def derive_static_transport_security(
@@ -185,6 +282,11 @@ def derive_static_transport_security(
         send_key=send_key,
         receive_key=receive_key,
     )
+
+
+def _next_receiver_index(value: int) -> int:
+    """Return a different valid receiver index without exposing ordering as policy."""
+    return MIN_RECEIVER_INDEX if value >= MAX_RECEIVER_INDEX else value + 1
 
 
 def plan_authenticated_static_session(

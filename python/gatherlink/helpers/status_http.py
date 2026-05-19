@@ -9,6 +9,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.persistence import redact_secrets
@@ -84,7 +85,8 @@ def gather_status_payload(config: StatusHttpConfig, *, registry: ServiceRegistry
             "read_only_after": config.write_expires_at.isoformat(),
             "write_window_seconds": config.write_window_seconds,
             "writes_enabled": config.writes_enabled,
-            "writes_implemented": False,
+            "writes_implemented": True,
+            "write_endpoints": ["POST /v1/services/{name}/close"],
         },
         "listen": {"host": config.listen_host, "port": config.listen_port},
         "service_count": len(services),
@@ -126,7 +128,7 @@ def render_status_text(payload: dict[str, Any]) -> str:
 def run_status_http_server(config: StatusHttpConfig, *, diagnostics_bus: DiagnosticsBus | None = None) -> None:
     """Run the status HTTP helper in the foreground."""
     publish_status_http_start(config, diagnostics_bus=diagnostics_bus)
-    server = build_status_http_server(config)
+    server = build_status_http_server(config, diagnostics_bus=diagnostics_bus)
     try:
         server.serve_forever()
     finally:
@@ -165,12 +167,18 @@ def publish_status_http_start(config: StatusHttpConfig, *, diagnostics_bus: Diag
         )
 
 
-def build_status_http_server(config: StatusHttpConfig) -> ThreadingHTTPServer:
+def build_status_http_server(
+    config: StatusHttpConfig,
+    *,
+    registry: ServiceRegistry | None = None,
+    diagnostics_bus: DiagnosticsBus | None = None,
+) -> ThreadingHTTPServer:
     """Build the status HTTP server without starting its serving loop."""
+    service_registry = registry or ServiceRegistry()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
-            payload = gather_status_payload(config)
+            payload = gather_status_payload(config, registry=service_registry)
             if self.path in {"/", "/text"}:
                 _write_response(self, "text/plain; charset=utf-8", render_status_text(payload).encode("utf-8"))
                 return
@@ -181,13 +189,58 @@ def build_status_http_server(config: StatusHttpConfig) -> ThreadingHTTPServer:
             self.send_error(HTTPStatus.NOT_FOUND, "unknown status endpoint")
 
         def do_POST(self) -> None:
-            # TODO(status-http-write-api): Wire selected CLI-equivalent write APIs only after the
-            # v1 service lifecycle surface is stable. Until then the helper
-            # enforces the write window and refuses mutation.
             if not config.writes_enabled:
+                _publish_status_http_write_event(
+                    diagnostics_bus,
+                    code="helper.status_http.write_denied",
+                    severity="warning",
+                    message="experimental status HTTP write window expired",
+                    path=self.path,
+                )
                 self.send_error(HTTPStatus.FORBIDDEN, "experimental write window expired")
                 return
-            self.send_error(HTTPStatus.METHOD_NOT_ALLOWED, "write APIs are not implemented")
+            parsed = urlparse(self.path)
+            prefix = "/v1/services/"
+            suffix = "/close"
+            if parsed.path.startswith(prefix) and parsed.path.endswith(suffix):
+                service_name = unquote(parsed.path[len(prefix) : -len(suffix)])
+                self._close_service(service_name)
+                return
+            self.send_error(HTTPStatus.NOT_FOUND, "unknown experimental write endpoint")
+
+        def _close_service(self, service_name: str) -> None:
+            try:
+                service = service_registry.close(service_name)
+            except ValueError as exc:
+                _publish_status_http_write_event(
+                    diagnostics_bus,
+                    code="helper.status_http.write_failed",
+                    severity="warning",
+                    message="experimental status HTTP service close failed",
+                    path=self.path,
+                    service=service_name,
+                    error=str(exc),
+                )
+                self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                return
+            body = json.dumps(
+                {
+                    "ok": True,
+                    "action": "close",
+                    "service": service.name,
+                    "state": "stopped",
+                },
+                indent=2,
+                sort_keys=True,
+            ).encode("utf-8")
+            _publish_status_http_write_event(
+                diagnostics_bus,
+                code="helper.status_http.service_closed",
+                message="experimental status HTTP closed a registered service",
+                path=self.path,
+                service=service.name,
+            )
+            _write_response(self, "application/json; charset=utf-8", body)
 
         def log_message(self, _format: str, *_args: object) -> None:
             # The helper is often used in test labs; avoid writing stdlib access
@@ -195,6 +248,28 @@ def build_status_http_server(config: StatusHttpConfig) -> ThreadingHTTPServer:
             return
 
     return ThreadingHTTPServer((config.listen_host, config.listen_port), Handler)
+
+
+def _publish_status_http_write_event(
+    diagnostics_bus: DiagnosticsBus | None,
+    *,
+    code: str,
+    message: str,
+    severity: str = "info",
+    **details: object,
+) -> None:
+    """Publish structured write API facts without making HTTP depend on logging text."""
+    if diagnostics_bus is None:
+        return
+    diagnostics_bus.publish(
+        DiagnosticEvent.helper_event(
+            code=code,
+            helper="status-http",
+            severity=severity,
+            message=message,
+            details=details,
+        )
+    )
 
 
 def _write_response(handler: BaseHTTPRequestHandler, content_type: str, body: bytes) -> None:

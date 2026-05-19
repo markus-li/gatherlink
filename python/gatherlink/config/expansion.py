@@ -55,10 +55,12 @@ def _expand_paths(
             RuntimePathConfig(
                 name=path.name,
                 interface=path.interface,
+                carrier=path.carrier,
                 source_ip=path.source_ip,
                 gateway=path.gateway,
                 transport_bind=path.transport_bind,
                 transport_remote=path.transport_remote,
+                carrier_max_datagram_size=path.carrier_max_datagram_size,
                 scheduler=scheduler,
                 relay=(
                     RuntimePathRelayHopConfig(

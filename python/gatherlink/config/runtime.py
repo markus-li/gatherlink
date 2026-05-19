@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import Field, field_serializer
 
 from gatherlink.config.models import (
+    CarrierKind,
     DnsUpstreamKind,
     NodeRole,
     PathSchedulerState,
@@ -79,10 +80,12 @@ class RuntimePathConfig(GatherlinkBaseModel):
 
     name: str
     interface: str
+    carrier: CarrierKind = "udp"
     source_ip: str | None = None
     gateway: str | None = None
     transport_bind: str | None = None
     transport_remote: str | None = None
+    carrier_max_datagram_size: int | None = None
     scheduler: RuntimePathSchedulerConfig
     relay: RuntimePathRelayHopConfig | None = None
 

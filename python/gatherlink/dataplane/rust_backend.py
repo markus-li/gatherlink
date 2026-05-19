@@ -96,6 +96,10 @@ def _service_dto(bindings: ModuleType | Any, service: RuntimeServiceConfig) -> A
 
 def _path_dto(bindings: ModuleType | Any, path: Any) -> Any:
     """Build one Rust path DTO from compiled scheduler state."""
+    if getattr(path, "carrier", "udp") != "udp":
+        raise RustRuntimeBridgeError(
+            f"carrier {path.carrier!r} is configured but this Rust runner currently supports only udp paths"
+        )
     scheduler: RuntimePathSchedulerConfig = path.scheduler
     return bindings.PathConfig(
         _bounded_u16(scheduler.path_id, field="path.scheduler.path_id"),

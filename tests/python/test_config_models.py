@@ -250,9 +250,26 @@ def test_path_scheduler_hints_expand_into_runtime_scheduler() -> None:
     assert runtime.paths[0].scheduler.state == "drain"
     assert runtime.paths[0].scheduler.weight == 3
     assert runtime.paths[0].scheduler.mtu == 1300
+    assert runtime.paths[0].carrier == "udp"
     assert runtime.paths[0].transport_bind == "127.0.0.1:56001"
     assert runtime.paths[0].transport_remote == "127.0.0.1:56002"
     assert runtime.scheduler.paths[0] == runtime.paths[0].scheduler
+
+
+def test_path_carrier_config_expands_for_v091_alternative_carriers() -> None:
+    from gatherlink.config import expand_config
+    from gatherlink.config.validation import validate_config_dict
+
+    data = load_config_dict(EXAMPLES / "minimal-client.json")
+    data["paths"][0]["carrier"] = "quic-datagram"
+    data["paths"][0]["carrier_max_datagram_size"] = 1180
+    data["paths"][0]["transport_bind"] = "127.0.0.1:56001"
+    data["paths"][0]["transport_remote"] = "127.0.0.1:56002"
+
+    runtime = expand_config(validate_config_dict(data))
+
+    assert runtime.paths[0].carrier == "quic-datagram"
+    assert runtime.paths[0].carrier_max_datagram_size == 1180
 
 
 def test_server_config_can_preserve_explicit_path_transport() -> None:

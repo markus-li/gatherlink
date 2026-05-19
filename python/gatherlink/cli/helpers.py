@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlparse
 
 import typer
 
@@ -39,7 +40,7 @@ def dns_serve(
     doh_upstream: list[str] = typer.Option(
         None,
         "--doh-upstream",
-        help="Deferred DoH upstream shape as [name=]host:port[,timeout=seconds]; fails closed until implemented.",
+        help="DNS-over-HTTPS upstream as [name=]https://host/dns-query or [name=]host[:port][,timeout=seconds].",
     ),
     dnssec_mode: str = typer.Option(
         "allow_unsigned",
@@ -407,7 +408,10 @@ def _parse_dns_upstream(value: str, *, kind: str, index: int) -> DnsUpstream:
             option_name, separator, option_value = option.partition("=")
             if separator and option_name == "timeout":
                 timeout_seconds = float(option_value)
-    host, port = _parse_host_port(endpoint)
+    if kind == "doh":
+        host, port = _parse_doh_cli_endpoint(endpoint)
+    else:
+        host, port = _parse_host_port(endpoint)
     return DnsUpstream(
         name=name,
         address=host,
@@ -415,3 +419,15 @@ def _parse_dns_upstream(value: str, *, kind: str, index: int) -> DnsUpstream:
         kind=cast(DnsUpstreamKind, kind),
         timeout_seconds=timeout_seconds,
     )
+
+
+def _parse_doh_cli_endpoint(endpoint: str) -> tuple[str, int]:
+    """Parse DoH CLI endpoints while preserving HTTPS URL paths for the resolver."""
+    if endpoint.startswith(("https://", "http://")):
+        parsed = urlparse(endpoint)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise typer.BadParameter("DoH upstream URL must use https://host[/path]")
+        return endpoint, parsed.port or 443
+    if ":" in endpoint:
+        return _parse_host_port(endpoint)
+    return endpoint, 443
