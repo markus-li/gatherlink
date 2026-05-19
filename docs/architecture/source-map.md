@@ -102,7 +102,7 @@ Review carefully if you see:
 - CLI commands hand-parsing diagnostics prose
 - platform-specific calls scattered outside `python/gatherlink/platform`
 - plaintext routing labels
-- `route_id`
+- redundant routing fields instead of authenticated session/control context
 - placeholder packages for deferred helpers
 - carrier code changing Gatherlink packet semantics
 

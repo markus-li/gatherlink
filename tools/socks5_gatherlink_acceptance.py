@@ -282,7 +282,9 @@ def _write_configs(out_dir: Path, ports: AcceptancePorts) -> tuple[Path, Path]:
     return path_a, path_b
 
 
-def _start_process(out_dir: Path, name: str, command: list[str], *, env: dict[str, str] | None = None) -> subprocess.Popen[str]:
+def _start_process(
+    out_dir: Path, name: str, command: list[str], *, env: dict[str, str] | None = None
+) -> subprocess.Popen[str]:
     log = (out_dir / f"{name}.log").open("w", encoding="utf-8")
     resolved = _resolve_command(command)
     return subprocess.Popen(

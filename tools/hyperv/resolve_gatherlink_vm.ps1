@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("gatherlink-vm-a", "gatherlink-vm-b")]
+    [ValidateSet("gatherlink-vm-a", "gatherlink-vm-b", "gatherlink-vm-c")]
     [string] $Name,
     [int] $PingTimeoutSeconds = 1
 )
@@ -10,6 +10,7 @@ $ErrorActionPreference = "Stop"
 $VmMacs = @{
     "gatherlink-vm-a" = "00-15-5d-91-00-01"
     "gatherlink-vm-b" = "00-15-5d-92-00-01"
+    "gatherlink-vm-c" = "00-15-5d-93-00-01"
 }
 
 function Get-DefaultSwitchPrefix {

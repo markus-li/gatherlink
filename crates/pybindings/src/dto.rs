@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use gatherlink_dataplane::engine::{ForwardOutcome, ReapplyOutcome, RemoteDeliverOutcome, ReservedServiceEvent};
 use gatherlink_dataplane::runtime_config::{
     CorePathConfig, PathSchedulerPrimitives, PathSchedulerState, SchedulerConfig, SchedulerMode,
-    TransportSecurityConfig,
+    TransportSecurityConfig, TransportSecuritySessionConfig,
 };
 use gatherlink_dataplane::udp_service::{ServiceReturnMode, ServiceSchedulerConfig, UdpServiceConfig};
 use pyo3::prelude::*;
@@ -120,6 +120,7 @@ fn parse_service_return_mode(mode: &str) -> PyResult<ServiceReturnMode> {
     match mode {
         "fixed" => Ok(ServiceReturnMode::Fixed),
         "learned-single-source" => Ok(ServiceReturnMode::LearnedSingleSource),
+        "peer-scoped-source" => Ok(ServiceReturnMode::PeerScopedSource),
         other => Err(pyo3::exceptions::PyValueError::new_err(format!(
             "unknown service return mode: {other}"
         ))),
@@ -130,6 +131,7 @@ fn format_service_return_mode(mode: ServiceReturnMode) -> &'static str {
     match mode {
         ServiceReturnMode::Fixed => "fixed",
         ServiceReturnMode::LearnedSingleSource => "learned-single-source",
+        ServiceReturnMode::PeerScopedSource => "peer-scoped-source",
     }
 }
 
@@ -160,6 +162,8 @@ impl PyPathConfig {
         max_in_flight_bytes = 0,
         transport_bind = None,
         transport_remote = None,
+        relay_receiver_index = None,
+        relay_send_key = None,
     ))]
     pub fn new(
         path_id: u16,
@@ -177,6 +181,8 @@ impl PyPathConfig {
         max_in_flight_bytes: u32,
         transport_bind: Option<String>,
         transport_remote: Option<String>,
+        relay_receiver_index: Option<u32>,
+        relay_send_key: Option<Vec<u8>>,
     ) -> PyResult<Self> {
         let state = if busy {
             PathSchedulerState::Busy
@@ -194,14 +200,30 @@ impl PyPathConfig {
         );
         let mut inner = CorePathConfig::new_with_scheduler_primitives(path_id, mtu, enabled, state, weight, primitives)
             .map_err(udp_error_to_py)?;
-        if let (Some(bind), Some(remote)) = (transport_bind, transport_remote) {
+        if let Some(bind) = transport_bind {
             let bind_addr = bind
                 .parse::<SocketAddr>()
                 .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-            let remote_addr = remote
-                .parse::<SocketAddr>()
-                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-            inner = inner.with_transport(bind_addr, remote_addr);
+            if let Some(remote) = transport_remote {
+                let remote_addr = remote
+                    .parse::<SocketAddr>()
+                    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+                inner = inner.with_transport(bind_addr, remote_addr);
+            } else {
+                inner = inner.with_transport_bind(bind_addr);
+            }
+        }
+        if relay_receiver_index.is_some() || relay_send_key.is_some() {
+            let receiver_index = relay_receiver_index.ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("relay_receiver_index is required with relay_send_key")
+            })?;
+            let key =
+                relay_send_key.ok_or_else(|| pyo3::exceptions::PyValueError::new_err("relay_send_key is required"))?;
+            let key: [u8; 32] = key
+                .as_slice()
+                .try_into()
+                .map_err(|_| pyo3::exceptions::PyValueError::new_err("relay_send_key must contain 32 raw bytes"))?;
+            inner = inner.with_relay_send(receiver_index, key);
         }
         Ok(Self { inner })
     }
@@ -351,6 +373,61 @@ impl PySchedulerConfig {
     }
 }
 
+/// Python DTO for one static secure transport session.
+#[pyclass(name = "TransportSecuritySessionConfig")]
+#[derive(Clone)]
+pub struct PyTransportSecuritySessionConfig {
+    inner: TransportSecuritySessionConfig,
+}
+
+#[pymethods]
+impl PyTransportSecuritySessionConfig {
+    /// Create one Python-compiled static transport session.
+    #[new]
+    #[pyo3(signature = (
+        local_receiver_index,
+        remote_receiver_index,
+        send_key,
+        receive_key,
+        service_ids = None,
+    ))]
+    pub fn new(
+        local_receiver_index: u32,
+        remote_receiver_index: u32,
+        send_key: &[u8],
+        receive_key: &[u8],
+        service_ids: Option<Vec<u16>>,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            inner: TransportSecuritySessionConfig::new(
+                local_receiver_index,
+                remote_receiver_index,
+                key_bytes(send_key, "send_key")?,
+                key_bytes(receive_key, "receive_key")?,
+                service_ids.unwrap_or_default(),
+            ),
+        })
+    }
+
+    pub fn local_receiver_index(&self) -> u32 {
+        self.inner.local_receiver_index()
+    }
+
+    pub fn remote_receiver_index(&self) -> u32 {
+        self.inner.remote_receiver_index()
+    }
+
+    pub fn service_ids(&self) -> Vec<u16> {
+        self.inner.service_ids().to_vec()
+    }
+}
+
+impl PyTransportSecuritySessionConfig {
+    pub(crate) fn inner(&self) -> TransportSecuritySessionConfig {
+        self.inner.clone()
+    }
+}
+
 /// Python DTO for compiled transport-security state.
 #[pyclass(name = "TransportSecurityConfig")]
 #[derive(Clone)]
@@ -392,10 +469,20 @@ impl PyTransportSecurityConfig {
         })
     }
 
+    /// Multiple static sessions sharing the same sink carrier sockets.
+    #[staticmethod]
+    pub fn static_sessions(sessions: Vec<PyTransportSecuritySessionConfig>) -> PyResult<Self> {
+        Ok(Self {
+            inner: TransportSecurityConfig::StaticSessions(
+                sessions.into_iter().map(|session| session.inner()).collect(),
+            ),
+        })
+    }
+
     pub fn mode(&self) -> String {
         match self.inner {
             TransportSecurityConfig::None => "none".to_owned(),
-            TransportSecurityConfig::Static { .. } => "static".to_owned(),
+            TransportSecurityConfig::Static { .. } | TransportSecurityConfig::StaticSessions(_) => "static".to_owned(),
         }
     }
 }
@@ -527,6 +614,10 @@ impl PyReservedServiceEvent {
 
     pub fn frame_bytes(&self) -> usize {
         self.inner.frame_bytes
+    }
+
+    pub fn peer_scope(&self) -> Option<u32> {
+        self.inner.peer_scope
     }
 }
 

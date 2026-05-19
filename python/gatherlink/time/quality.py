@@ -12,7 +12,7 @@ from gatherlink.shared.logging import get_logger
 
 logger = get_logger(__name__)
 
-# File-specific TODO:
+# TODO(time-quality):
 # - Combine system NTP, direct NTP, tunnel NTP, peer exchange, and GPS quality signals.
 # - Maintain internal time confidence and peer-relative offset estimates from Gatherlink control metadata.
 # - Keep sink-authoritative internal sync separate from privileged system clock corrections.

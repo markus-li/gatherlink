@@ -71,7 +71,7 @@ class StateAuditReport:
 
 def audit_persistent_state(paths: GatherlinkStatePaths, *, strict_hints: bool = False) -> StateAuditReport:
     """
-    Audit known v1 state locations without exposing secret values.
+    Audit known state locations without exposing secret values.
 
     Authority files such as private identities, trust roots, signed bundles,
     and sealed secrets produce errors when invalid. Non-authoritative hints and

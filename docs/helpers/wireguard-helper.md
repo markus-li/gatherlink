@@ -20,6 +20,10 @@ Implemented first slice:
 - the WireGuard peer `Endpoint` should point at the local Gatherlink service
   listen endpoint; Gatherlink then forwards that UDP service to the configured
   WireGuard listen endpoint on the far side
+- server-side WireGuard services that accept more than one authenticated
+  Gatherlink peer should use `return_mode: "peer-scoped-source"` so WireGuard
+  sees a distinct UDP source endpoint for each peer and replies map back to the
+  correct authenticated session
 - key helpers delegate to the official `wg` tool for `genkey` and `pubkey`
 - planning diagnostics report whether `wg` and `wg-quick` are available without
   invoking privileged interface operations
@@ -32,12 +36,17 @@ Implemented first slice:
   two-Debian-VM lab by rendering the WireGuard plan, sending UDP payloads to the
   planned local Gatherlink endpoint, and verifying they exit at the peer-side
   WireGuard UDP target port
+- `tools/hyperv/run_relay_wireguard_vm_acceptance.sh` proves the same boundary
+  through a three-VM untrusted relay topology with real temporary WireGuard
+  interfaces. The runner uses WireGuard's own `wg` tool and lab sudo for the
+  interface setup, then curls an HTTP helper over WireGuard while Gatherlink
+  carries the UDP endpoint packets through B -> C -> A relay-hop transport.
 
 Library posture:
 
 - prefer WireGuard's own tooling, such as `wg`, `wg-quick`, platform network
   managers, or appliance APIs
-- do not add a Python WireGuard protocol library for MVP
+- do not add a Python WireGuard protocol library for v0.9
 - Gatherlink should generate/coordinate config, not reimplement WireGuard
 
 Not-yet scope:

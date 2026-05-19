@@ -436,8 +436,12 @@ def _ensure_path(config: LabScenarioConfig, path: LabPathConfig, *, runner: Comm
 
     sudo_ip(["netns", "add", client_ns], runner=runner, check=False)
     sudo_ip(["netns", "add", server_ns], runner=runner, check=False)
-    client_link_exists = sudo_ip(["-n", client_ns, "link", "show", client_if], runner=runner, check=False).returncode == 0
-    server_link_exists = sudo_ip(["-n", server_ns, "link", "show", server_if], runner=runner, check=False).returncode == 0
+    client_link_exists = (
+        sudo_ip(["-n", client_ns, "link", "show", client_if], runner=runner, check=False).returncode == 0
+    )
+    server_link_exists = (
+        sudo_ip(["-n", server_ns, "link", "show", server_if], runner=runner, check=False).returncode == 0
+    )
     status = "reused" if client_link_exists and server_link_exists else "created"
 
     if status == "created":

@@ -18,6 +18,7 @@ from threading import Event
 
 from gatherlink.control import ControlCadenceState
 from gatherlink.control import metadata as _control_metadata
+from gatherlink.control import remote_status as _remote_status
 from gatherlink.control import reserved as _reserved_control
 from gatherlink.control.announcements import announce_control_metadata
 from gatherlink.control.policy import apply_control_policy_to_dataplane
@@ -83,7 +84,6 @@ _PATH_MTU_RECHECK_INTERVAL_SECONDS = 60.0
 _LAB_HIDDEN_SINK_IPC_ENV = "GATHERLINK_LAB_HIDDEN_SINK_IPC"
 _LAB_REMOTE_STATUS_ENV = "GATHERLINK_LAB_REMOTE_STATUS"
 _LAB_REMOTE_STATUS_PROXY_ENV = "GATHERLINK_LAB_REMOTE_STATUS_PROXY"
-_REMOTE_STATUS_REQUEST_INTERVAL_SECONDS = 2.0
 
 LabCleanupResult = _netns.LabCleanupResult
 PathSetupResult = _netns.PathSetupResult
@@ -151,6 +151,18 @@ class RustTransportSmokeResult:
     forwarded_packets: int
     delivered_packets: int
     client_listen: str
+    remote_target: str
+
+
+@dataclass(frozen=True)
+class SharedSinkSmokeResult:
+    """Result from a local shared-sink carrier-port smoke."""
+
+    source_count: int
+    packets: int
+    bytes: int
+    paths: int
+    sink_transport: str
     remote_target: str
 
 
@@ -233,6 +245,173 @@ def run_rust_transport_smoke(
     )
 
 
+def run_shared_sink_transport_smoke(
+    config: LabScenarioConfig,
+    *,
+    count: int = 3,
+    payload: str = "gatherlink-shared-sink",
+) -> SharedSinkSmokeResult:
+    """Run two source peers into one sink carrier port using production Rust transport."""
+    from gatherlink.config.expansion import expand_config
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, SecurityConfig, ServiceConfig
+    from gatherlink.dataplane.rust_backend import bind_core_dataplane
+
+    path_names = [path.name for path in config.paths] or ["path-a"]
+    family = config.paths[0].family if config.paths else "ipv4"
+    loopback_host = "::1" if family == "ipv6" else "127.0.0.1"
+    socket_family = socket.AF_INET6 if family == "ipv6" else socket.AF_INET
+    source_a_paths = [_reserve_udp_endpoint(loopback_host) for _path in path_names]
+    source_c_paths = [_reserve_udp_endpoint(loopback_host) for _path in path_names]
+    sink_paths = [_reserve_udp_endpoint(loopback_host) for _path in path_names]
+    remote_target = socket.socket(socket_family, socket.SOCK_DGRAM)
+    remote_target.bind((loopback_host, 0))
+    remote_target.settimeout(2.0)
+    remote_target_text = _socket_addr_text(remote_target.getsockname())
+    source_a_target = socket.socket(socket_family, socket.SOCK_DGRAM)
+    source_c_target = socket.socket(socket_family, socket.SOCK_DGRAM)
+    source_a_target.bind((loopback_host, 0))
+    source_c_target.bind((loopback_host, 0))
+    source_a_target.settimeout(2.0)
+    source_c_target.settimeout(2.0)
+
+    key_a_to_sink = _lab_shared_sink_key(config, "source-a-to-sink")
+    key_sink_to_a = _lab_shared_sink_key(config, "sink-to-source-a")
+    key_c_to_sink = _lab_shared_sink_key(config, "source-c-to-sink")
+    key_sink_to_c = _lab_shared_sink_key(config, "sink-to-source-c")
+    source_a_service = ServiceConfig(
+        name="udp-main",
+        listen=_socket_addr_text((loopback_host, 0)),
+        target=_socket_addr_text(source_a_target.getsockname()),
+    )
+    source_c_service = ServiceConfig(
+        name="udp-main",
+        listen=_socket_addr_text((loopback_host, 0)),
+        target=_socket_addr_text(source_c_target.getsockname()),
+    )
+    sink_service = ServiceConfig(
+        name="udp-main",
+        listen=_socket_addr_text((loopback_host, 0)),
+        target=remote_target_text,
+        return_mode="peer-scoped-source",
+    )
+
+    source_a_config = GatherlinkConfig(
+        schema_version=1,
+        node=f"{config.name}-source-a",
+        role="client",
+        peer=f"{config.name}-sink",
+        paths=[
+            PathConfig(name=name, interface="lo", transport_bind=source, transport_remote=sink)
+            for name, source, sink in zip(path_names, source_a_paths, sink_paths)
+        ],
+        security=SecurityConfig(
+            mode="static",
+            local_receiver_index=101,
+            remote_receiver_index=201,
+            send_key=key_a_to_sink,
+            receive_key=key_sink_to_a,
+        ),
+        services=[source_a_service],
+    )
+    source_c_config = GatherlinkConfig(
+        schema_version=1,
+        node=f"{config.name}-source-c",
+        role="client",
+        peer=f"{config.name}-sink",
+        paths=[
+            PathConfig(name=name, interface="lo", transport_bind=source, transport_remote=sink)
+            for name, source, sink in zip(path_names, source_c_paths, sink_paths)
+        ],
+        security=SecurityConfig(
+            mode="static",
+            local_receiver_index=102,
+            remote_receiver_index=202,
+            send_key=key_c_to_sink,
+            receive_key=key_sink_to_c,
+        ),
+        services=[source_c_service],
+    )
+    sink_config = GatherlinkConfig(
+        schema_version=1,
+        node=f"{config.name}-sink",
+        role="server",
+        paths=[
+            PathConfig(name=name, interface="lo", transport_bind=sink) for name, sink in zip(path_names, sink_paths)
+        ],
+        security=SecurityConfig(
+            mode="static",
+            sessions=[
+                {
+                    "name": "source-a",
+                    "local_receiver_index": 201,
+                    "remote_receiver_index": 101,
+                    "send_key": key_sink_to_a,
+                    "receive_key": key_a_to_sink,
+                    "services": ["udp-main"],
+                },
+                {
+                    "name": "source-c",
+                    "local_receiver_index": 202,
+                    "remote_receiver_index": 102,
+                    "send_key": key_sink_to_c,
+                    "receive_key": key_c_to_sink,
+                    "services": ["udp-main"],
+                },
+            ],
+        ),
+        services=[sink_service],
+    )
+    source_a = bind_core_dataplane(expand_config(source_a_config))
+    source_c = bind_core_dataplane(expand_config(source_c_config))
+    sink = bind_core_dataplane(expand_config(sink_config))
+    app_sender = socket.socket(socket_family, socket.SOCK_DGRAM)
+    received_bytes = 0
+    received_payloads: set[bytes] = set()
+    for index in range(count):
+        for label, dataplane, listen, reply_target in [
+            ("a", source_a, source_a.service_local_addr("udp-main"), source_a_target),
+            ("c", source_c, source_c.service_local_addr("udp-main"), source_c_target),
+        ]:
+            packet = f"{payload}-{label}-{index}".encode()
+            app_sender.sendto(packet, _parse_socket_addr(listen))
+            dataplane.forward_available_for_service("udp-main", 8)
+            _drain_rust_path_frames(sink)
+            received, peer_source = remote_target.recvfrom(65535)
+            received_bytes += len(received)
+            received_payloads.add(received)
+            if received != packet:
+                raise RuntimeError(f"shared sink payload mismatch: expected={packet!r} received={received!r}")
+            reply = f"{payload}-reply-{label}-{index}".encode()
+            remote_target.sendto(reply, peer_source)
+            sink.forward_available_for_service_nonblocking("udp-main", 8)
+            _drain_rust_path_frames(dataplane)
+            returned, _returned_source = reply_target.recvfrom(65535)
+            received_bytes += len(returned)
+            if returned != reply:
+                raise RuntimeError(f"shared sink reply mismatch: expected={reply!r} received={returned!r}")
+
+    source_count = 2
+    expected_packets = count * source_count
+    if len(received_payloads) != expected_packets:
+        raise RuntimeError(
+            f"shared sink received {len(received_payloads)} unique payloads; expected {expected_packets}"
+        )
+    return SharedSinkSmokeResult(
+        source_count=source_count,
+        packets=expected_packets,
+        bytes=received_bytes,
+        paths=len(path_names),
+        sink_transport=sink_paths[0],
+        remote_target=remote_target_text,
+    )
+
+
+def _lab_shared_sink_key(config: LabScenarioConfig, label: str) -> str:
+    """Derive deterministic lab-only static keys for shared-sink smokes."""
+    digest = sha256(f"gatherlink shared sink static key v1:{config.name}:{label}".encode()).digest()
+    return b64encode(digest).decode("ascii")
+
+
 def _drain_rust_path_frames(dataplane, *, attempts: int = 20) -> int:
     """Drain path frames from a Rust dataplane during a local smoke test."""
     delivered_packets = 0
@@ -294,10 +473,7 @@ class _LabControlState:
     service_disables: dict[int, str]
     path_capacity: dict[str, dict[str, int | str | None]]
     path_mtu: dict[str, dict[str, int | str | None]]
-    remote_status_enabled: bool = False
-    remote_status_next_request_at: float = 0.0
-    remote_status_next_request_id: int = 1
-    remote_status_cache: dict[str, dict[str, object]] = field(default_factory=dict)
+    remote_status: _remote_status.RemoteStatusState = field(default_factory=_remote_status.RemoteStatusState)
     applied_disabled_services: set[str] = field(default_factory=set)
     next_mtu_check_at: float = 0.0
 
@@ -429,8 +605,9 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
             runtime_config,
             logger=lambda message: print(f"lab service: {message}", flush=True),
         ),
-        remote_status_enabled=role == "client" and os.environ.get(_LAB_REMOTE_STATUS_ENV) == "1",
     )
+    if role == "client" and os.environ.get(_LAB_REMOTE_STATUS_ENV) == "1":
+        control_state.remote_status.request(ttl_seconds=_remote_status.REMOTE_STATUS_REQUEST_TTL_SECONDS)
     app_sink_socket = _open_app_sink_socket(config) if role == "server" else None
     qdisc_side = "local" if role == "client" else "remote"
     qdisc_baseline = _lab_qdisc_stats(config, side=qdisc_side)
@@ -629,28 +806,10 @@ def _drain_reserved_service_events(
 
 
 def _tick_remote_status_request(dataplane, control_state: _LabControlState, *, role: str) -> bool:
-    """Request a remote status snapshot over reserved service id 8 when the lab asked for it."""
-    if role != "client" or not control_state.remote_status_enabled:
+    """Request a remote status snapshot through the production remote-status helper."""
+    if role != "client":
         return False
-    now = time.monotonic()
-    if now < control_state.remote_status_next_request_at:
-        return False
-    request_id = control_state.remote_status_next_request_id
-    control_state.remote_status_next_request_id += 1
-    control_state.remote_status_next_request_at = now + _REMOTE_STATUS_REQUEST_INTERVAL_SECONDS
-    payload = _remote_status_payload(
-        {
-            "type": "status_request",
-            "request_id": request_id,
-            "created_at": datetime.now(UTC).isoformat(),
-        }
-    )
-    frame_count = dataplane.transmit_service_payload(_SERVICE_ID_REMOTE_STATUS, payload)
-    print(
-        f"lab {role} remote-status: requested sink status request={request_id} frames={frame_count}",
-        flush=True,
-    )
-    return True
+    return _remote_status.send_request_if_due(dataplane, control_state.remote_status)
 
 
 def _handle_lab_remote_status_event(
@@ -661,56 +820,16 @@ def _handle_lab_remote_status_event(
     role: str,
     status_provider,
 ) -> bool:
-    """Handle lab-only remote IPC/status payloads carried by the production reserved-service path."""
-    try:
-        message = json.loads(event.payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        print(f"lab {role} remote-status: invalid payload on path={event.path_id}: {exc}", flush=True)
-        return False
-    message_type = str(message.get("type") or "")
-    if message_type == "status_request":
-        if role != "server":
-            print(f"lab {role} remote-status: dropping request on non-sink role", flush=True)
-            return False
-        request_id = int(message.get("request_id") or 0)
-        response = {
-            "type": "status_response",
-            "request_id": request_id,
-            "created_at": datetime.now(UTC).isoformat(),
-            "status": status_provider(),
-        }
-        frame_count = dataplane.transmit_service_payload(_SERVICE_ID_REMOTE_STATUS, _remote_status_payload(response))
-        print(
-            f"lab {role} remote-status: replied request={request_id} frames={frame_count}",
-            flush=True,
-        )
-        return True
-    if message_type == "status_response":
-        if role != "client":
-            print(f"lab {role} remote-status: dropping response on non-source role", flush=True)
-            return False
-        status = message.get("status")
-        if not isinstance(status, dict):
-            print(f"lab {role} remote-status: response missing status object", flush=True)
-            return False
-        control_state.remote_status_cache["sink"] = {
-            "received_at": datetime.now(UTC).isoformat(),
-            "request_id": int(message.get("request_id") or 0),
-            "source_path_id": event.path_id,
-            "status": status,
-        }
-        print(
-            "lab source remote-status: cached sink status " f"request={message.get('request_id')} path={event.path_id}",
-            flush=True,
-        )
-        return True
-    print(f"lab {role} remote-status: unknown message type {message_type!r}; dropping", flush=True)
-    return False
-
-
-def _remote_status_payload(message: dict[str, object]) -> bytes:
-    """Encode lab remote-status IPC messages as JSON bytes inside reserved service id 8."""
-    return json.dumps(message, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    """Handle remote IPC/status payloads with the production decoder path."""
+    return _remote_status.handle_event(
+        event,
+        dataplane=dataplane,
+        state=control_state.remote_status,
+        peer_name="sink",
+        status_provider=status_provider,
+        local_can_respond=role == "server",
+        logger=lambda message: print(f"lab {role} remote-status: {message}", flush=True),
+    )
 
 
 def _start_remote_status_proxy(config: LabScenarioConfig, control_state: _LabControlState) -> ServiceIpcServer | None:
@@ -738,7 +857,7 @@ def _start_remote_status_proxy(config: LabScenarioConfig, control_state: _LabCon
     )
 
     def status() -> dict[str, object]:
-        cached = control_state.remote_status_cache.get("sink")
+        cached = control_state.remote_status.cache.get("sink")
         if cached and isinstance(cached.get("status"), dict):
             status_payload = dict(cached["status"])
             status_payload["remote_proxy"] = {
@@ -900,7 +1019,7 @@ def _rust_lab_status_payload(
         "missed_packets": _total_missed_packets(path_stats),
         "path_stats": path_stats,
         "control_metadata": control_metadata,
-        "remote_status": control_state.remote_status_cache,
+        "remote_status": control_state.remote_status.cache,
         "service_errors": dict(disabled_services) if isinstance(disabled_services, dict) else {},
         "control_cadence": control_cadence.status(),
         "started_at": started_at.isoformat(),

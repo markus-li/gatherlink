@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use gatherlink_protocol::control::GlobalSequenceTracker;
+use gatherlink_protocol::control::{GlobalSequenceTracker, SequenceObservation};
 use gatherlink_protocol::ids::ServiceId;
 
 use crate::engine::ForwardOutcome;
@@ -84,7 +84,7 @@ pub struct MetricsSnapshot {
 pub struct DataplaneMetrics {
     services: BTreeMap<String, CounterSnapshot>,
     paths: BTreeMap<u16, CounterSnapshot>,
-    receive_sequences: BTreeMap<ServiceId, GlobalSequenceTracker>,
+    receive_sequences: BTreeMap<Option<u32>, GlobalSequenceTracker>,
     control_metadata: ControlMetadataSnapshot,
     security_drops: SecurityDropSnapshot,
 }
@@ -124,39 +124,56 @@ impl DataplaneMetrics {
     ///
     /// This uses the protocol's global sequence tracker so normal traffic, not
     /// test payloads, drives missing and reorder counters.
-    pub fn record_receive(&mut self, service_id: ServiceId, path_id: u16, sequence: u64, payload_len: usize) {
-        let observation = self.receive_sequences.entry(service_id).or_default().observe(sequence);
-
+    pub fn record_receive(
+        &mut self,
+        _service_id: ServiceId,
+        path_id: u16,
+        sequence: u64,
+        payload_len: usize,
+        peer_scope: Option<u32>,
+    ) -> SequenceObservation {
+        let observation = self.observe_sequence(sequence, peer_scope);
         let path = self.paths.entry(path_id).or_default();
         path.packets += 1;
         path.bytes += payload_len as u64;
         path.rx_packets += 1;
         path.rx_bytes += payload_len as u64;
-        path.missed_packets += observation.missing_packets;
         if observation.out_of_order {
             path.reordered_packets += 1;
             path.packets_needing_reorder += 1;
         } else {
+            // A forward sequence gap is not loss yet. In multipath receive, the
+            // skipped sequence may still arrive on another path. Python should
+            // treat this as reorder pressure until a later timeout/expiry
+            // mechanism promotes it to confirmed loss.
             path.packets_needing_reorder += observation.missing_packets;
         }
+        observation
     }
 
     /// Record one received Gatherlink data sequence and the local service it was emitted to.
     pub fn record_receive_for_service(
         &mut self,
         service_name: &str,
-        service_id: ServiceId,
-        path_id: u16,
-        sequence: u64,
+        _service_id: ServiceId,
+        _path_id: u16,
+        _sequence: u64,
         payload_len: usize,
+        observation: SequenceObservation,
     ) {
-        self.record_receive(service_id, path_id, sequence, payload_len);
-
         let service = self.services.entry(service_name.to_owned()).or_default();
         service.packets += 1;
         service.bytes += payload_len as u64;
         service.rx_packets += 1;
         service.rx_bytes += payload_len as u64;
+        if observation.out_of_order {
+            service.reordered_packets += 1;
+            service.packets_needing_reorder += 1;
+        } else {
+            // Keep service-level loss conservative for the same reason as path
+            // loss: a sequence gap is only a reorder candidate until expiry.
+            service.packets_needing_reorder += observation.missing_packets;
+        }
     }
 
     /// Record a duplicate user-service frame that was not emitted locally.
@@ -202,7 +219,14 @@ impl DataplaneMetrics {
     }
 
     /// Record one received reserved-service frame without decoding its payload.
-    pub fn record_reserved_received(&mut self, path_id: u16, frame_bytes: usize) {
+    pub fn record_reserved_received(
+        &mut self,
+        path_id: u16,
+        frame_bytes: usize,
+        sequence: u64,
+        peer_scope: Option<u32>,
+    ) {
+        let _observation = self.observe_sequence(sequence, peer_scope);
         self.control_metadata.received.frames += 1;
         self.control_metadata.received.bytes += frame_bytes as u64;
         let path = self.control_metadata.path_control.entry(path_id).or_default();
@@ -241,5 +265,9 @@ impl DataplaneMetrics {
             control_metadata: self.control_metadata.clone(),
             security_drops: self.security_drops,
         }
+    }
+
+    fn observe_sequence(&mut self, sequence: u64, peer_scope: Option<u32>) -> SequenceObservation {
+        self.receive_sequences.entry(peer_scope).or_default().observe(sequence)
     }
 }

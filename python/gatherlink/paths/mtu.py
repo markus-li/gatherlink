@@ -93,7 +93,9 @@ def detect_runtime_path_mtu(
 ) -> dict[str, dict[str, int | str | None]]:
     """Passively detect each runtime path's local interface MTU for control metadata."""
     observations: dict[str, dict[str, int | str | None]] = {}
-    frame_header_len = V2_BASE_HEADER_LEN if getattr(runtime_config.security, "mode", "none") == "static" else V1_BASE_HEADER_LEN
+    frame_header_len = (
+        V2_BASE_HEADER_LEN if getattr(runtime_config.security, "mode", "none") == "static" else V1_BASE_HEADER_LEN
+    )
     for path in runtime_config.paths:
         observation = observe_path_mtu(path.interface, path.scheduler.mtu, frame_header_len=frame_header_len)
         observations[path.name] = observation.export_dict()

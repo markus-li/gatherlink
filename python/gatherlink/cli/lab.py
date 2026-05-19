@@ -25,6 +25,7 @@ from gatherlink.lab.runtime import (
     read_sink_service_status,
     request_lab_service_disable,
     run_rust_transport_smoke,
+    run_shared_sink_transport_smoke,
     run_udp_forwarder,
     run_udp_sink,
     run_udp_sink_service,
@@ -302,6 +303,26 @@ def rust_smoke(
         f"packets={result.packets} bytes={result.bytes} paths={result.paths} "
         f"forwarded={result.forwarded_packets} delivered={result.delivered_packets} "
         f"client_listen={result.client_listen} remote_target={result.remote_target}"
+    )
+
+
+@app.command("shared-sink-smoke")
+def shared_sink_smoke(
+    path: Path,
+    count: int = typer.Option(3, help="Number of UDP payloads to send from each source peer."),
+    payload: str = typer.Option("gatherlink-shared-sink", help="Payload prefix to send."),
+) -> None:
+    """Verify two authenticated source peers can share one sink carrier port."""
+    scenario = load_lab_scenario_file(path)
+    try:
+        result = run_shared_sink_transport_smoke(scenario, count=count, payload=payload)
+    except RuntimeError as exc:
+        typer.echo(f"lab shared sink smoke: failed {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(
+        "lab shared sink smoke: ok "
+        f"sources={result.source_count} packets={result.packets} bytes={result.bytes} "
+        f"paths={result.paths} sink_transport={result.sink_transport} remote_target={result.remote_target}"
     )
 
 

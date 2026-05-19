@@ -16,8 +16,10 @@ from gatherlink.config.runtime import (
     RuntimeDnsHelperConfig,
     RuntimeDnsUpstreamConfig,
     RuntimePathConfig,
+    RuntimePathRelayHopConfig,
     RuntimePathSchedulerConfig,
     RuntimeSecurityConfig,
+    RuntimeSecuritySessionConfig,
     RuntimeServiceConfig,
     RuntimeSocks5HelperConfig,
     RuntimeTcpForwardHelperConfig,
@@ -37,7 +39,7 @@ def _expand_paths(
     security: RuntimeSecurityConfig,
 ) -> list[RuntimePathConfig]:
     """Copy declared physical paths into the runtime contract."""
-    # TODO: Replace this direct copy with discovered interface facts once the
+    # TODO(path-interface-discovery): Replace this direct copy with discovered interface facts once the
     # physical path validator knows how to inspect Debian network state. Keeping
     # the function now makes that later enrichment a local change.
     expanded: list[RuntimePathConfig] = []
@@ -58,15 +60,39 @@ def _expand_paths(
                 transport_bind=path.transport_bind,
                 transport_remote=path.transport_remote,
                 scheduler=scheduler,
+                relay=(
+                    RuntimePathRelayHopConfig(
+                        relay_receiver_index=path.relay.relay_receiver_index,
+                        send_key=b64decode(path.relay.send_key, validate=True),
+                    )
+                    if path.relay is not None
+                    else None
+                ),
             )
         )
     return expanded
 
 
-def _expand_security(config: GatherlinkConfig) -> RuntimeSecurityConfig:
+def _expand_security(config: GatherlinkConfig, service_ids_by_name: dict[str, int]) -> RuntimeSecurityConfig:
     """Compile user-facing security config into runtime key bytes."""
     if config.security.mode == "none":
         return RuntimeSecurityConfig(mode="none", source_mode="none")
+    if config.security.sessions:
+        return RuntimeSecurityConfig(
+            mode="static",
+            source_mode=config.security.mode,
+            sessions=[
+                RuntimeSecuritySessionConfig(
+                    name=session.name,
+                    local_receiver_index=session.local_receiver_index,
+                    remote_receiver_index=session.remote_receiver_index,
+                    send_key=b64decode(session.send_key, validate=True),
+                    receive_key=b64decode(session.receive_key, validate=True),
+                    service_ids=[service_ids_by_name[name] for name in session.services],
+                )
+                for session in config.security.sessions
+            ],
+        )
     if config.security.send_key is None or config.security.receive_key is None:
         raise ValueError(f"security.mode={config.security.mode} requires send_key and receive_key")
     runtime_mode = "static" if config.security.mode == "authenticated" else config.security.mode
@@ -81,9 +107,8 @@ def _expand_security(config: GatherlinkConfig) -> RuntimeSecurityConfig:
     )
 
 
-def _expand_services(config: GatherlinkConfig) -> list[RuntimeServiceConfig]:
+def _expand_services(config: GatherlinkConfig, service_ids: list[int]) -> list[RuntimeServiceConfig]:
     """Copy services into runtime objects with the protocol made explicit."""
-    service_ids = _allocate_service_ids(config.services)
     return [
         RuntimeServiceConfig(
             service_id=service_ids[index],
@@ -129,10 +154,7 @@ def _allocate_service_ids(services: list[ServiceConfig]) -> list[int]:
 def _expand_helpers(
     config: GatherlinkConfig,
 ) -> list[
-    RuntimeWireGuardHelperConfig
-    | RuntimeDnsHelperConfig
-    | RuntimeSocks5HelperConfig
-    | RuntimeTcpForwardHelperConfig
+    RuntimeWireGuardHelperConfig | RuntimeDnsHelperConfig | RuntimeSocks5HelperConfig | RuntimeTcpForwardHelperConfig
 ]:
     """Expand optional helper blocks into ordered runtime helper records."""
     services = _service_by_name(config.services)
@@ -207,7 +229,9 @@ def _expand_helpers(
 def expand_config(config: GatherlinkConfig) -> RuntimeConfig:
     """Return the explicit runtime config for a validated user config."""
     scheduler = compile_scheduler(config)
-    security = _expand_security(config)
+    service_ids = _allocate_service_ids(config.services)
+    service_ids_by_name = {service.name: service_ids[index] for index, service in enumerate(config.services)}
+    security = _expand_security(config, service_ids_by_name)
     return RuntimeConfig(
         schema_version=config.schema_version,
         node=config.node,
@@ -215,7 +239,7 @@ def expand_config(config: GatherlinkConfig) -> RuntimeConfig:
         peer=config.peer,
         security=security,
         paths=_expand_paths(config, scheduler.paths, security),
-        services=_expand_services(config),
+        services=_expand_services(config, service_ids),
         scheduler=scheduler,
         helpers=_expand_helpers(config),
         metadata={

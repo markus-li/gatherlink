@@ -24,7 +24,7 @@ class StatusHttpConfig:
     """
     Configuration for the experimental local status HTTP helper.
 
-    TODO: Keep this helper intentionally conservative. It is useful for local
+    TODO(status-http-helper): Keep this helper intentionally conservative. It is useful for local
     automation and future UI work, but it must not become a long-lived remote
     management surface.
     """
@@ -181,7 +181,7 @@ def build_status_http_server(config: StatusHttpConfig) -> ThreadingHTTPServer:
             self.send_error(HTTPStatus.NOT_FOUND, "unknown status endpoint")
 
         def do_POST(self) -> None:
-            # TODO: Wire selected CLI-equivalent write APIs only after the
+            # TODO(status-http-write-api): Wire selected CLI-equivalent write APIs only after the
             # v1 service lifecycle surface is stable. Until then the helper
             # enforces the write window and refuses mutation.
             if not config.writes_enabled:

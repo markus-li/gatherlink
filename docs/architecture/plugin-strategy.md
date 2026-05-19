@@ -6,7 +6,7 @@ Gatherlink should be extensible without letting plugins contaminate core design.
 
 ## Initial stance
 
-Do not implement a complex plugin ABI in MVP. Use normal Python modules/classes
+Do not implement a complex plugin ABI yet. Use normal Python modules/classes
 first.
 
 ## Extension areas

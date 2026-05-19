@@ -32,10 +32,6 @@ def named_rust_control_metadata(control_metadata: object, runtime_config: Any) -
     if isinstance(service_endpoint_assertions, dict):
         output["service_endpoint_assertions"] = dict(service_endpoint_assertions)
         output["service_endpoint_assertion_count"] = len(output["service_endpoint_assertions"])
-        control_metadata_helpers.verify_service_endpoint_assertions(
-            output,
-            {service.service_id: service.target for service in runtime_config.services},
-        )
     service_disables = control_metadata.get("service_disables")
     if isinstance(service_disables, dict):
         output["service_disables"] = dict(service_disables)

@@ -105,7 +105,7 @@ end-to-end data envelope.
 
 Plaintext routing labels are not supported for secure transport. An untrusted
 relay must not need plaintext `service_id`, `path_id`, endpoint address, tenant
-name, policy name, or `route_id` to forward data. Routing uses outer
+name, policy name, or routing label to forward data. Routing uses outer
 routing/relay-hop headers plus authenticated relay session state.
 
 Relay forwarding uses hop-level authentication:
@@ -222,7 +222,7 @@ or local plaintext context:
 - `header_len`: fixed compact base header plus fragment-present bit
 - `flags`: compact `kind_flags` only
 - `session_id`: `receiver_index` maps to authenticated session state
-- `route_id`: removed completely; do not synthesize it for compatibility views
+- routing label: not present; do not synthesize one for compatibility views
 - `payload_len`: derived from authenticated plaintext length
 
 Compatibility adapters may synthesize the older draft `FrameHeader` after
@@ -296,9 +296,9 @@ isolation.
 
 ## Fragmentation
 
-The protocol may reserve fields/flags for future internal fragmentation, but MVP
-does not need fragmentation. Initially skip paths that cannot carry a packet,
-drop only when no eligible path exists, and emit MTU diagnostics.
+The current implementation supports explicit fragmentation metadata for paths
+that cannot carry a packet whole. Keep future fragmentation extensions
+compatible with the compact v1/v2 header rules, and keep MTU diagnostics local.
 
 ## Receiver metrics
 

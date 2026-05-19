@@ -136,6 +136,22 @@ pub fn decrypt_packet_without_replay(key: &[u8; 32], packet: &[u8]) -> Result<De
     })
 }
 
+/// Read the clear receiver index without authenticating the packet.
+///
+/// This is only a demux hint. Callers must still authenticate the packet with
+/// the session key selected by this index before trusting any bytes.
+pub fn clear_receiver_index(packet: &[u8]) -> Result<u32, CryptoError> {
+    if packet.len() < ENCRYPTED_DATA_HEADER_LEN + AEAD_TAG_LEN {
+        return Err(CryptoError::SilentDrop);
+    }
+    if packet[0] != PACKET_TYPE_ENCRYPTED_DATA_V1 {
+        return Err(CryptoError::SilentDrop);
+    }
+    Ok(u32::from_be_bytes(
+        packet[1..5].try_into().map_err(|_| CryptoError::SilentDrop)?,
+    ))
+}
+
 fn associated_data(header: &[u8]) -> Vec<u8> {
     let mut ad = Vec::with_capacity(AEAD_DOMAIN.len() + header.len());
     ad.extend_from_slice(AEAD_DOMAIN);

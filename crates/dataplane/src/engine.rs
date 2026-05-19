@@ -9,6 +9,7 @@ use std::fmt;
 use std::net::SocketAddr;
 
 use gatherlink_crypto::errors::CryptoError;
+use gatherlink_protocol::control::SequenceObservation;
 use gatherlink_protocol::errors::ProtocolError;
 use gatherlink_protocol::frame::{Frame, FrameKind, V1_HEADER_LEN};
 use gatherlink_protocol::ids::{is_reserved_service_id, ServiceId};
@@ -31,13 +32,14 @@ pub struct CoreDataplane {
     path_transports: PathTransportSet,
     transport_security: TransportSecurity,
     scheduler: CompiledScheduler,
-    next_sequence: u64,
+    next_sequences: HashMap<Option<u32>, u64>,
     next_datagram_id: u32,
     metrics: DataplaneMetrics,
     remote_fragments: FragmentReassembly,
     remote_dedupe: DedupeWindow,
     reserved_events: Vec<ReservedServiceEvent>,
     learned_sources: HashMap<ServiceId, SocketAddr>,
+    learned_path_remotes: HashMap<(u32, u16), SocketAddr>,
     disabled_services: HashMap<ServiceId, String>,
     service_schedulers: HashMap<ServiceId, ServiceSchedulerConfig>,
 }
@@ -64,13 +66,14 @@ impl CoreDataplane {
             path_transports: PathTransportSet::bind(config.paths())?,
             transport_security: TransportSecurity::from_config(config.security()),
             scheduler: CompiledScheduler::compile(config.scheduler().mode(), config.paths()),
-            next_sequence: 1,
+            next_sequences: HashMap::new(),
             next_datagram_id: 1,
             metrics: DataplaneMetrics::new(config.paths()),
             remote_fragments: FragmentReassembly::default(),
             remote_dedupe: DedupeWindow::default(),
             reserved_events: Vec::new(),
             learned_sources: HashMap::new(),
+            learned_path_remotes: HashMap::new(),
             disabled_services: HashMap::new(),
             service_schedulers,
         })
@@ -85,6 +88,8 @@ impl CoreDataplane {
     pub fn reapply_config(&mut self, config: CoreRuntimeConfig) -> Result<ReapplyOutcome, DataplaneError> {
         let mut outcome = ReapplyOutcome::default();
         let mut services = Vec::with_capacity(config.services().len());
+        let retained_path_ids: HashSet<u16> = config.paths().iter().map(|path| path.path_id()).collect();
+        let retained_peer_scopes: HashSet<u32> = config.security().local_receiver_indexes().into_iter().collect();
 
         for desired in config.services().iter().cloned() {
             if let Some(current) = self.service(desired.name()) {
@@ -130,8 +135,11 @@ impl CoreDataplane {
                 .any(|service| service.config().service_id() == *service_id)
         });
         self.paths = config.paths().to_vec();
-        self.path_transports = PathTransportSet::bind(config.paths())?;
+        self.path_transports = self.path_transports.rebind_preserving(config.paths())?;
         self.transport_security = TransportSecurity::from_config(config.security());
+        self.learned_path_remotes.retain(|(peer_scope, path_id), _remote| {
+            retained_peer_scopes.contains(peer_scope) && retained_path_ids.contains(path_id)
+        });
         self.scheduler = CompiledScheduler::compile(config.scheduler().mode(), config.paths());
         self.metrics.reconcile_paths(config.paths());
         Ok(outcome)
@@ -223,7 +231,8 @@ impl CoreDataplane {
         sequence: u64,
         payload_len: usize,
     ) {
-        self.metrics.record_receive(service_id, path_id, sequence, payload_len);
+        self.metrics
+            .record_receive(service_id, path_id, sequence, payload_len, None);
     }
 
     /// Record a received reserved-service payload without interpreting it.
@@ -234,14 +243,17 @@ impl CoreDataplane {
         sequence: u64,
         payload: Vec<u8>,
         frame_bytes: usize,
+        peer_scope: Option<u32>,
     ) {
-        self.metrics.record_reserved_received(path_id, frame_bytes);
+        self.metrics
+            .record_reserved_received(path_id, frame_bytes, sequence, peer_scope);
         self.reserved_events.push(ReservedServiceEvent {
             service_id,
             path_id,
             sequence,
             payload,
             frame_bytes,
+            peer_scope,
         });
     }
 
@@ -284,7 +296,56 @@ impl CoreDataplane {
                     mtu: frame_plan.path.mtu(),
                 });
             }
-            if self.try_send_path_frame(frame_plan.path.path_id(), &frame_plan.frame, encoded.len(), false)? {
+            if self.try_send_path_frame(frame_plan.path.path_id(), &frame_plan.frame, None, encoded.len(), false)? {
+                self.metrics
+                    .record_reserved_sent(frame_plan.path.path_id(), encoded.len());
+                plans.push(ControlTransmitPlan {
+                    path_id: frame_plan.path.path_id(),
+                    sequence: frame_plan.datagrams[0].sequence,
+                    frame_len: encoded.len(),
+                    payload_len: frame_plan.datagrams.iter().map(|datagram| datagram.payload.len()).sum(),
+                });
+            }
+        }
+        Ok(plans)
+    }
+
+    /// Send one Python-composed service payload back to an authenticated peer scope.
+    pub fn transmit_service_payload_to_peer(
+        &mut self,
+        service_id: ServiceId,
+        payload: Vec<u8>,
+        peer_scope: u32,
+    ) -> Result<Vec<ControlTransmitPlan>, DataplaneError> {
+        let source = "127.0.0.1:0"
+            .parse()
+            .expect("injected service source placeholder must parse");
+        let planned = self.plan_datagrams(
+            service_id,
+            vec![ReceivedDatagram {
+                payload,
+                source,
+                peer_scope: Some(peer_scope),
+            }],
+        )?;
+        let frames = self.coalesce_planned_frames(service_id, planned)?;
+        let mut plans = Vec::with_capacity(frames.len());
+        for frame_plan in frames {
+            let encoded = frame_plan.frame.encode()?;
+            if encoded.len() > frame_plan.path.mtu() {
+                return Err(DataplaneError::FrameExceedsPathMtu {
+                    path_id: frame_plan.path.path_id(),
+                    frame_len: encoded.len(),
+                    mtu: frame_plan.path.mtu(),
+                });
+            }
+            if self.try_send_path_frame(
+                frame_plan.path.path_id(),
+                &frame_plan.frame,
+                Some(peer_scope),
+                encoded.len(),
+                false,
+            )? {
                 self.metrics
                     .record_reserved_sent(frame_plan.path.path_id(), encoded.len());
                 plans.push(ControlTransmitPlan {
@@ -312,8 +373,7 @@ impl CoreDataplane {
             return Err(DataplaneError::NoPathAvailable);
         }
 
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
+        let sequence = self.next_sequence_for(None);
         let mut plans = Vec::with_capacity(path_indices.len());
         for path_index in path_indices {
             let path = &self.paths[path_index];
@@ -328,7 +388,7 @@ impl CoreDataplane {
                     mtu,
                 });
             }
-            if self.try_send_path_frame(path_id, &frame, encoded.len(), false)? {
+            if self.try_send_path_frame(path_id, &frame, None, encoded.len(), false)? {
                 self.metrics.record_reserved_sent(path_id, encoded.len());
                 plans.push(ControlTransmitPlan {
                     path_id,
@@ -407,8 +467,8 @@ impl CoreDataplane {
         let frames = self.path_transports.receive_available(max_frames)?;
         let mut outcomes = Vec::new();
         for received in frames {
-            let decoded = match self.transport_security.unprotect_packet(&received.bytes) {
-                Ok(frame) => frame,
+            let unprotected = match self.transport_security.unprotect_packet_with_session(&received.bytes) {
+                Ok(unprotected) => unprotected,
                 Err(CryptoError::SilentDrop) => {
                     self.metrics
                         .record_security_drop(received.path_id, received.bytes.len());
@@ -416,6 +476,12 @@ impl CoreDataplane {
                 }
                 Err(error) => return Err(DataplaneError::Crypto(error)),
             };
+            let peer_scope = unprotected.local_receiver_index;
+            if let Some(local_receiver_index) = peer_scope {
+                self.learned_path_remotes
+                    .insert((local_receiver_index, received.path_id), received.source);
+            }
+            let decoded = unprotected.frame;
             let frame_bytes_len = received.bytes.len();
             match decoded.kind {
                 FrameKind::Data => {
@@ -427,19 +493,23 @@ impl CoreDataplane {
                                 decoded.sequence,
                                 payload,
                                 frame_bytes_len,
+                                peer_scope,
                             );
                         } else {
-                            if self.observe_user_payload_first_seen(
+                            if let Some(observation) = self.observe_user_payload_first_seen(
                                 decoded.service_id,
                                 decoded.path_id,
                                 decoded.sequence,
                                 payload.len(),
+                                peer_scope,
                             ) {
                                 outcomes.push(self.emit_remote_payload(
                                     decoded.service_id,
                                     decoded.path_id,
                                     decoded.sequence,
                                     &payload,
+                                    peer_scope,
+                                    observation,
                                 )?);
                             }
                         }
@@ -455,18 +525,22 @@ impl CoreDataplane {
                                 sequence,
                                 payload.clone(),
                                 frame_bytes_len,
+                                peer_scope,
                             );
-                        } else if self.observe_user_payload_first_seen(
+                        } else if let Some(observation) = self.observe_user_payload_first_seen(
                             decoded.service_id,
                             decoded.path_id,
                             sequence,
                             payload.len(),
+                            peer_scope,
                         ) {
                             outcomes.push(self.emit_remote_payload(
                                 decoded.service_id,
                                 decoded.path_id,
                                 sequence,
                                 payload,
+                                peer_scope,
+                                observation,
                             )?);
                         }
                     }
@@ -478,6 +552,7 @@ impl CoreDataplane {
                         decoded.sequence,
                         decoded.payload,
                         frame_bytes_len,
+                        peer_scope,
                     );
                 }
             }
@@ -491,9 +566,15 @@ impl CoreDataplane {
         path_id: u16,
         sequence: u64,
         payload_len: usize,
-    ) -> bool {
-        match self.remote_dedupe.observe(service_id, sequence) {
-            DedupeObservation::FirstSeen => true,
+        peer_scope: Option<u32>,
+    ) -> Option<SequenceObservation> {
+        match self.remote_dedupe.observe_in_scope(service_id, peer_scope, sequence) {
+            DedupeObservation::FirstSeen => {
+                let observation = self
+                    .metrics
+                    .record_receive(service_id, path_id, sequence, payload_len, peer_scope);
+                Some(observation)
+            }
             DedupeObservation::Duplicate => {
                 let service_name = self
                     .services
@@ -508,7 +589,7 @@ impl CoreDataplane {
                     payload_len,
                     expected,
                 );
-                false
+                None
             }
         }
     }
@@ -533,6 +614,7 @@ impl CoreDataplane {
         datagrams.push(ReceivedDatagram {
             payload: buffer[..length].to_vec(),
             source,
+            peer_scope: None,
         });
 
         for _ in 1..max_datagrams {
@@ -543,6 +625,7 @@ impl CoreDataplane {
             datagrams.push(ReceivedDatagram {
                 payload: buffer[..length].to_vec(),
                 source,
+                peer_scope: None,
             });
         }
 
@@ -557,12 +640,23 @@ impl CoreDataplane {
         let mut datagrams = Vec::with_capacity(max_datagrams);
         for _ in 0..max_datagrams {
             let mut buffer = vec![0_u8; u16::MAX as usize];
+            if let Some((peer_scope, length, source)) =
+                self.services[service_index].try_recv_peer_scoped(&mut buffer)?
+            {
+                datagrams.push(ReceivedDatagram {
+                    payload: buffer[..length].to_vec(),
+                    source,
+                    peer_scope: Some(peer_scope),
+                });
+                continue;
+            }
             let Some((length, source)) = self.services[service_index].try_recv_from(&mut buffer)? else {
                 break;
             };
             datagrams.push(ReceivedDatagram {
                 payload: buffer[..length].to_vec(),
                 source,
+                peer_scope: None,
             });
         }
         Ok(datagrams)
@@ -674,12 +768,23 @@ impl CoreDataplane {
                 });
             }
             let expected_fanout = plan.datagrams.iter().any(|datagram| datagram.expected_fanout);
-            if self.try_send_path_frame(plan.path.path_id(), &plan.frame, encoded.len(), expected_fanout)? {
+            let peer_scope = plan.datagrams.iter().find_map(|datagram| datagram.peer_scope);
+            if self.try_send_path_frame(
+                plan.path.path_id(),
+                &plan.frame,
+                peer_scope,
+                encoded.len(),
+                expected_fanout,
+            )? {
                 for datagram in &plan.datagrams {
+                    let target = self
+                        .send_target_for_path(plan.path.path_id(), datagram.peer_scope)
+                        .or_else(|| plan.path.transport_remote())
+                        .ok_or(DataplaneError::NoPathAvailable)?;
                     let outcome = ForwardOutcome {
                         service: service_name.to_owned(),
                         source: datagram.source,
-                        target: plan.path.transport_remote().ok_or(DataplaneError::NoPathAvailable)?,
+                        target,
                         payload_len: datagram.payload.len(),
                         sequence: datagram.sequence,
                         path_id: plan.path.path_id(),
@@ -703,14 +808,22 @@ impl CoreDataplane {
         &mut self,
         path_id: u16,
         frame: &Frame,
+        peer_scope: Option<u32>,
         frame_len: usize,
         expected_fanout: bool,
     ) -> Result<bool, DataplaneError> {
         let packet = self
             .transport_security
-            .protect_frame(frame)
+            .protect_frame_for_service_or_session(frame.service_id, peer_scope, frame)
             .map_err(DataplaneError::Crypto)?;
-        match self.path_transports.send_frame(path_id, &packet) {
+        let session_key = peer_scope.or_else(|| self.transport_security.session_key_for_service(frame.service_id));
+        let learned_remote = session_key.and_then(|key| self.learned_path_remotes.get(&(key, path_id)).copied());
+        let sent = if let Some(remote) = learned_remote {
+            self.path_transports.send_frame_to(path_id, &packet, remote)
+        } else {
+            self.path_transports.send_frame(path_id, &packet)
+        };
+        match sent {
             Ok(_sent) => Ok(true),
             Err(UdpServiceError::SendFailed(_error)) => {
                 self.metrics.record_send_failed(path_id, frame_len, expected_fanout);
@@ -720,12 +833,18 @@ impl CoreDataplane {
         }
     }
 
+    fn send_target_for_path(&self, path_id: u16, peer_scope: Option<u32>) -> Option<SocketAddr> {
+        peer_scope.and_then(|scope| self.learned_path_remotes.get(&(scope, path_id)).copied())
+    }
+
     fn emit_remote_payload(
         &mut self,
         service_id: ServiceId,
         path_id: u16,
         sequence: u64,
         payload: &[u8],
+        peer_scope: Option<u32>,
+        observation: SequenceObservation,
     ) -> Result<RemoteDeliverOutcome, DataplaneError> {
         let service_index = self
             .services
@@ -733,19 +852,28 @@ impl CoreDataplane {
             .position(|service| service.config().service_id() == service_id)
             .ok_or(DataplaneError::UnknownServiceId(service_id))?;
         self.ensure_service_enabled(service_id)?;
-        let service = &self.services[service_index];
-        let service_name = service.config().name().to_owned();
-        let target = match service.config().return_mode() {
-            ServiceReturnMode::Fixed => service.config().target(),
+        let service_name = self.services[service_index].config().name().to_owned();
+        let return_mode = self.services[service_index].config().return_mode();
+        let target = match return_mode {
+            ServiceReturnMode::Fixed | ServiceReturnMode::PeerScopedSource => {
+                self.services[service_index].config().target()
+            }
             ServiceReturnMode::LearnedSingleSource => self
                 .learned_sources
                 .get(&service_id)
                 .copied()
-                .unwrap_or_else(|| service.config().target()),
+                .unwrap_or_else(|| self.services[service_index].config().target()),
         };
-        let emitted = service.emit_to(payload, target)?;
+        let emitted = match (return_mode, peer_scope) {
+            (ServiceReturnMode::PeerScopedSource, Some(peer_scope)) => {
+                self.services[service_index]
+                    .emit_to_from_peer_source(peer_scope, payload, target)?
+                    .0
+            }
+            _ => self.services[service_index].emit_to(payload, target)?,
+        };
         self.metrics
-            .record_receive_for_service(&service_name, service_id, path_id, sequence, emitted);
+            .record_receive_for_service(&service_name, service_id, path_id, sequence, emitted, observation);
         Ok(RemoteDeliverOutcome {
             service: service_name,
             target,
@@ -762,9 +890,12 @@ impl CoreDataplane {
     ) -> Result<Vec<PlannedDatagram>, DataplaneError> {
         let mut planned = Vec::with_capacity(datagrams.len());
         for datagram in datagrams {
-            let sequence = self.next_sequence;
-            self.next_sequence += 1;
-            let paths = self.select_service_paths(service_id, datagram.payload.len())?;
+            let sequence = self.next_sequence_for(datagram.peer_scope);
+            let paths = if let Some(peer_scope) = datagram.peer_scope {
+                self.select_peer_scoped_paths(peer_scope, datagram.payload.len())?
+            } else {
+                self.select_service_paths(service_id, datagram.payload.len())?
+            };
             let expected_fanout = paths.len() > 1;
             let fragment = if paths
                 .first()
@@ -780,6 +911,7 @@ impl CoreDataplane {
                 planned.push(PlannedDatagram {
                     payload: datagram.payload.clone(),
                     source: datagram.source,
+                    peer_scope: datagram.peer_scope,
                     sequence,
                     service_id,
                     path,
@@ -791,6 +923,13 @@ impl CoreDataplane {
         Ok(planned)
     }
 
+    fn next_sequence_for(&mut self, peer_scope: Option<u32>) -> u64 {
+        let sequence = self.next_sequences.entry(peer_scope).or_insert(1);
+        let current = *sequence;
+        *sequence = current.wrapping_add(1).max(1);
+        current
+    }
+
     fn plan_injected_datagram(
         &mut self,
         service_id: ServiceId,
@@ -799,7 +938,14 @@ impl CoreDataplane {
         let source = "127.0.0.1:0"
             .parse()
             .expect("injected service source placeholder must parse");
-        self.plan_datagrams(service_id, vec![ReceivedDatagram { payload, source }])
+        self.plan_datagrams(
+            service_id,
+            vec![ReceivedDatagram {
+                payload,
+                source,
+                peer_scope: None,
+            }],
+        )
     }
 
     fn select_path(&mut self, payload_len: usize) -> Result<&CorePathConfig, DataplaneError> {
@@ -837,6 +983,33 @@ impl CoreDataplane {
             .collect())
     }
 
+    fn select_peer_scoped_paths(
+        &mut self,
+        peer_scope: u32,
+        payload_len: usize,
+    ) -> Result<Vec<CorePathConfig>, DataplaneError> {
+        let eligible: Vec<CorePathConfig> = self
+            .paths
+            .iter()
+            .filter(|path| self.learned_path_remotes.contains_key(&(peer_scope, path.path_id())))
+            .cloned()
+            .collect();
+        if eligible.is_empty() {
+            return Err(DataplaneError::NoPathAvailable);
+        }
+        let selected = eligible
+            .into_iter()
+            .find(|path| path.accepts_whole_packet() && payload_len <= path.max_data_payload())
+            .or_else(|| {
+                self.paths
+                    .iter()
+                    .find(|path| self.learned_path_remotes.contains_key(&(peer_scope, path.path_id())))
+                    .cloned()
+            })
+            .ok_or(DataplaneError::NoPathAvailable)?;
+        Ok(vec![selected])
+    }
+
     fn coalesce_planned_frames(
         &self,
         service_id: ServiceId,
@@ -858,7 +1031,10 @@ impl CoreDataplane {
             let mut next = cursor + 1;
             while next < planned.len() {
                 let candidate = &planned[next];
-                if candidate.fragment.is_some() || candidate.path.path_id() != current.path.path_id() {
+                if candidate.fragment.is_some()
+                    || candidate.path.path_id() != current.path.path_id()
+                    || candidate.peer_scope != current.peer_scope
+                {
                     break;
                 }
                 let candidate_len = 2 + candidate.payload.len();
@@ -907,12 +1083,14 @@ impl CoreDataplane {
 struct ReceivedDatagram {
     payload: Vec<u8>,
     source: SocketAddr,
+    peer_scope: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct PlannedDatagram {
     pub(crate) payload: Vec<u8>,
     pub(crate) source: SocketAddr,
+    pub(crate) peer_scope: Option<u32>,
     pub(crate) sequence: u64,
     pub(crate) service_id: ServiceId,
     pub(crate) path: CorePathConfig,
@@ -970,6 +1148,7 @@ pub struct ReservedServiceEvent {
     pub sequence: u64,
     pub payload: Vec<u8>,
     pub frame_bytes: usize,
+    pub peer_scope: Option<u32>,
 }
 
 /// Planned duplicate control frame for one path.

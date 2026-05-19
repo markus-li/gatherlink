@@ -139,6 +139,7 @@ fn python_facing_status_exposes_received_control_metadata() {
         41,
         &control,
         control.len() + gatherlink_protocol::frame::V1_HEADER_LEN,
+        None,
     );
 
     Python::with_gil(|py| {
@@ -148,6 +149,7 @@ fn python_facing_status_exposes_received_control_metadata() {
         assert_eq!(events[0].path_id(), 3);
         assert_eq!(events[0].sequence(), 41);
         assert_eq!(events[0].payload(), control);
+        assert_eq!(events[0].peer_scope(), None);
 
         let status = dataplane.status_snapshot(py).unwrap();
         let root = status.bind(py).downcast::<PyDict>().unwrap();
@@ -279,8 +281,20 @@ fn python_facing_dataplane_accepts_explicit_paths() {
     .unwrap();
     assert_eq!(service.priority(), 200);
     assert_eq!(service.return_mode(), "learned-single-source");
+    let peer_scoped = PyUdpServiceConfig::new(
+        "udp-peer-scoped".to_owned(),
+        target.local_addr().unwrap().to_string(),
+        Some("127.0.0.1:0".to_owned()),
+        200,
+        "peer-scoped-source",
+        0,
+        1,
+        0,
+    )
+    .unwrap();
+    assert_eq!(peer_scoped.return_mode(), "peer-scoped-source");
     let path = PyPathConfig::new(
-        3, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+        3, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None, None, None,
     )
     .unwrap();
     assert_eq!(path.tx_capacity_bps(), None);
@@ -316,6 +330,8 @@ fn python_facing_path_config_accepts_scheduler_primitives() {
         524_288,
         Some("127.0.0.1:10000".to_owned()),
         Some("127.0.0.1:10001".to_owned()),
+        None,
+        None,
     )
     .unwrap();
 
@@ -348,11 +364,11 @@ fn python_facing_dataplane_accepts_scheduler_config() {
     .unwrap();
     let paths = vec![
         PyPathConfig::new(
-            5, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+            5, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None, None, None,
         )
         .unwrap(),
         PyPathConfig::new(
-            6, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+            6, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None, None, None,
         )
         .unwrap(),
     ];
@@ -387,7 +403,7 @@ fn python_facing_scheduler_reapply_preserves_bound_service_socket() {
     )
     .unwrap();
     let paths = vec![PyPathConfig::new(
-        5, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None,
+        5, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None, None, None,
     )
     .unwrap()];
     let scheduler = PySchedulerConfig::new("round_robin").unwrap();
@@ -408,6 +424,8 @@ fn python_facing_scheduler_reapply_preserves_bound_service_socket() {
         2_000,
         0,
         0,
+        None,
+        None,
         None,
         None,
     )

@@ -57,8 +57,7 @@ class PathCapacityDetector:
         self._path_names = path_names
         self._direction = direction
         self._estimates = {
-            path_name: _filled_estimate(initial_estimates.get(path_name, {}), direction)
-            for path_name in path_names
+            path_name: _filled_estimate(initial_estimates.get(path_name, {}), direction) for path_name in path_names
         }
         self._dirty = set(path_names)
         self._last_sample_at = time.monotonic()
@@ -112,7 +111,9 @@ class PathCapacityDetector:
                 continue
 
             observed_bps = max(int((delta_bytes * 8) / elapsed), 1)
-            sample_bps = sample_rate_bps if sample_rate_bps is not None and sample_rate_bps > current_bps else observed_bps
+            sample_bps = (
+                sample_rate_bps if sample_rate_bps is not None and sample_rate_bps > current_bps else observed_bps
+            )
             candidate_bps = self._sustained_candidate(
                 path_name, current_bps, sample_bps, delta_bytes, elapsed, delta_drops
             )

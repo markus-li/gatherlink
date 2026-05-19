@@ -41,8 +41,7 @@ def recompile_runtime_from_status(
     )
     compiled_scheduler = compiled_scheduler.model_copy(update={"paths": scheduler_paths})
     runtime_paths = [
-        path.model_copy(update={"scheduler": scheduler_paths[index]})
-        for index, path in enumerate(runtime_config.paths)
+        path.model_copy(update={"scheduler": scheduler_paths[index]}) for index, path in enumerate(runtime_config.paths)
     ]
     return runtime_config.model_copy(
         update={

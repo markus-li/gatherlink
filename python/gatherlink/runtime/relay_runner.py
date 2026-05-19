@@ -55,6 +55,7 @@ class RelayRuntimeConfig(GatherlinkBaseModel):
     listen: str
     executor: RelayExecutorConfig
     keys: RelayHopKeys
+    exit_to_inner_packet: bool = False
     poll_sleep_seconds: float = Field(default=RELAY_IDLE_SLEEP_SECONDS, ge=0.0, le=1.0)
 
     @classmethod
@@ -84,6 +85,7 @@ class RelayRunnerState:
     next_hop: str
     direction: str
     stop_event: Event
+    exit_to_inner_packet: bool = False
     running: bool = False
     iterations: int = 0
     forwarded_packets: int = 0
@@ -101,6 +103,7 @@ class RelayRunnerState:
             "listen": self.listen,
             "next_hop": self.next_hop,
             "direction": self.direction,
+            "exit_to_inner_packet": self.exit_to_inner_packet,
             "iterations": self.iterations,
             "forwarded_packets": self.forwarded_packets,
             "dropped_packets": self.dropped_packets,
@@ -120,6 +123,17 @@ RelayForwarderFactory = Callable[[RelayRuntimeConfig], Any]
 def bind_relay_hop_forwarder(config: RelayRuntimeConfig) -> Any:
     """Bind the narrow Rust relay-hop executor from compiled Python facts."""
     bindings = _load_bindings()
+    if config.exit_to_inner_packet:
+        return bindings.RelayHopExitForwarder.bind(
+            config.listen,
+            config.executor.next_hop_address,
+            config.executor.relay_receiver_index,
+            config.keys.decoded_receive_key(),
+            config.executor.expires_at_unix_us,
+            config.executor.max_packet_size,
+            config.executor.max_packets,
+            config.executor.max_bytes,
+        )
     return bindings.RelayHopForwarder.bind(
         config.listen,
         config.executor.next_hop_address,
@@ -156,6 +170,7 @@ def run_relay_service(
         listen=config.listen,
         next_hop=config.executor.next_hop_address,
         direction=config.executor.direction,
+        exit_to_inner_packet=config.exit_to_inner_packet,
         stop_event=stop_event,
     )
     state.running = True
@@ -171,6 +186,7 @@ def run_relay_service(
                     "relay_receiver_index": config.executor.relay_receiver_index,
                     "next_hop_receiver_index": config.executor.next_hop_receiver_index,
                     "direction": config.executor.direction,
+                    "exit_to_inner_packet": config.exit_to_inner_packet,
                 },
             )
         )

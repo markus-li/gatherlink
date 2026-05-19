@@ -18,8 +18,8 @@ bootstrap/DNS tests, and long-running soak tests.
 
 Suggested default development verification:
 
-- Rust/protocol/dataplane changes: `cargo test`, plus relevant path/lab config
-  smoke tests
+- Rust/protocol/dataplane changes: `cargo test --workspace`, plus relevant
+  path/lab config smoke tests
 - Python/config/helper changes: `.venv/bin/pytest -q`, plus helper-specific CLI
   or lab configs
 - operator/diagnostics changes: `.venv/bin/pytest -q` plus
@@ -30,6 +30,27 @@ Suggested default development verification:
   lab/config run, and invalid-packet silent-drop checks
 - docs that affect implementation guidance: update or add tests in the code
   chat when that guidance is implemented
+
+Durable docs should not record volatile test totals. Write down the command,
+the scope, and whether it passed; leave exact counts to the test runner output
+or release artifact for that specific run.
+
+Implementation TODOs may stay in docs and active code when they are searchable
+and tied to a clear feature area, roadmap, audit follow-up, or release gate.
+Remove them when resolved. Prefer this over hiding pending work in vague prose.
+
+## Lab Contract
+
+Labs test production behavior under controlled conditions. They may create
+namespaces, veth pairs, shaped links, VM topologies, deterministic keys,
+faults, clocks, traffic generators, and short-cadence probes. They must not
+implement protocol, runtime, helper, discovery, status, routing, crypto, or
+control-plane features that the production runner cannot also execute.
+
+If a lab needs a feature, the feature belongs in the normal production-owned
+module first. The lab may then enable it, accelerate it, seed it with
+deterministic inputs, or assert on its output. A lab-only copy of the behavior
+is a release blocker because it proves the test harness rather than Gatherlink.
 
 ## Rust tests
 
@@ -105,3 +126,25 @@ plumbing rather than security behavior, as documented in
 `docs/protocol/plaintext-security-mode.md`. That mode must warn loudly in Python
 terminal output and logs. Secure demos should use authenticated Noise-generated
 config material or the explicit encrypted lab/manual configs.
+
+The local shared-sink smoke is:
+
+```bash
+gatherlink lab shared-sink-smoke configs/lab/local-dual-path-encrypted.json --count 5
+```
+
+It proves two authenticated source peers can use the same sink UDP carrier port
+per path and that sink-side replies return through peer-scoped app source
+sockets to the correct authenticated source. The command uses static lab keys
+only to make receiver-index/session demux deterministic; production trust still
+comes from authenticated sessions.
+
+The operator-facing shared-sink config example is:
+
+```bash
+gatherlink config validate configs/examples/shared-sink-server.json
+gatherlink doctor --config configs/examples/shared-sink-server.json
+```
+
+For a negative check, change that service to `return_mode: "fixed"` and confirm
+`doctor` reports the ambiguous multi-session service warning.

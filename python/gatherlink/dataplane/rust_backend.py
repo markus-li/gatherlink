@@ -113,6 +113,12 @@ def _path_dto(bindings: ModuleType | Any, path: Any) -> Any:
         _bounded_u32(scheduler.max_in_flight_bytes, field="path.scheduler.max_in_flight_bytes"),
         path.transport_bind,
         path.transport_remote,
+        (
+            _bounded_u32(path.relay.relay_receiver_index, field="path.relay.relay_receiver_index")
+            if path.relay is not None
+            else None
+        ),
+        path.relay.send_key if path.relay is not None else None,
     )
 
 
@@ -121,6 +127,22 @@ def _security_dto(bindings: ModuleType | Any, security: Any) -> Any:
     if security.mode == "none":
         return bindings.TransportSecurityConfig.none()
     if security.mode == "static":
+        if getattr(security, "sessions", None):
+            if not hasattr(bindings, "TransportSecuritySessionConfig") or not hasattr(
+                bindings.TransportSecurityConfig, "static_sessions"
+            ):
+                raise RustRuntimeBridgeError("Rust bindings do not support multi-session static transport security")
+            sessions = [
+                bindings.TransportSecuritySessionConfig(
+                    _bounded_u32(session.local_receiver_index, field="security.sessions[].local_receiver_index"),
+                    _bounded_u32(session.remote_receiver_index, field="security.sessions[].remote_receiver_index"),
+                    session.send_key,
+                    session.receive_key,
+                    [_bounded_user_service_id(service_id) for service_id in session.service_ids],
+                )
+                for session in security.sessions
+            ]
+            return bindings.TransportSecurityConfig.static_sessions(sessions)
         if security.send_key is None or security.receive_key is None:
             raise RustRuntimeBridgeError("security.mode=static requires compiled send_key and receive_key")
         local_receiver_index = getattr(security, "local_receiver_index", security.receiver_index)

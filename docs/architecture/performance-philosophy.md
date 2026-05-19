@@ -40,5 +40,5 @@ allocation, per-packet string formatting, and per-packet Python callbacks.
 
 ## Kernel future
 
-Kernel/XDP is not v1. If ever needed, it should be an optional acceleration
+Kernel/XDP is not v0.9. If ever needed, it should be an optional acceleration
 backend behind the same dataplane boundary.

@@ -1,9 +1,11 @@
 param(
     [Parameter(Mandatory = $true)]
     [string] $PublicKeyPath,
+    [ValidateSet("gatherlink-vm-a", "gatherlink-vm-b", "gatherlink-vm-c")]
+    [string[]] $Name = @("gatherlink-vm-a", "gatherlink-vm-b", "gatherlink-vm-c"),
     [string] $VmRoot = "D:\hyper-v\gatherlink",
     [string] $ImageDirectory = "D:\media\debian",
-    [string] $WslDistro = "gatherlink-dev"
+[string] $WslDistro = "gatherlink-dev"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,8 +33,19 @@ $VmSpecs = @(
         PathA = "10.91.1.12/24"
         PathB = "10.91.2.12/24"
         PathC = "10.91.3.12/24"
+    },
+    @{
+        Name = "gatherlink-vm-c"
+        InstanceId = "gatherlink-vm-c"
+        Hostname = "gatherlink-vm-c"
+        MacBase = "00155D9300"
+        PathA = "10.91.1.13/24"
+        PathB = "10.91.2.13/24"
+        PathC = "10.91.3.13/24"
     }
 )
+
+$SelectedVmSpecs = $VmSpecs | Where-Object { $Name -contains $_.Name }
 
 function Convert-ToWslPath {
     param([string] $Path)
@@ -102,7 +115,7 @@ if (Test-Path -LiteralPath $CloudImagePath) {
     }
 }
 
-foreach ($spec in $VmSpecs) {
+foreach ($spec in $SelectedVmSpecs) {
     $vmName = $spec.Name
     $vm = Get-VM -Name $vmName -ErrorAction SilentlyContinue
     if (-not $vm) {
@@ -148,6 +161,8 @@ $authorizedKeysYaml
 ssh_pwauth: false
 package_update: true
 packages:
+  - build-essential
+  - cargo
   - curl
   - git
   - iproute2
@@ -156,6 +171,7 @@ packages:
   - openssh-server
   - python3
   - python3-venv
+  - rustc
   - rsync
   - sudo
   - tcpdump
@@ -237,6 +253,7 @@ ethernets:
     Write-Host "prepared $vmName with Debian cloud image and NoCloud seed"
 }
 
-Get-VM -Name gatherlink-vm-a,gatherlink-vm-b |
+$SelectedVmSpecs.Name |
+    ForEach-Object { Get-VM -Name $_ } |
     Select-Object Name, State, Generation, ProcessorCount, MemoryStartup, Path |
     Format-Table -AutoSize

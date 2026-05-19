@@ -111,3 +111,48 @@ def test_runtime_plan_does_not_warn_for_authenticated_security_source() -> None:
     assert runtime_config.security.mode == "static"
     assert runtime_config.security.source_mode == "authenticated"
     assert not any("security.mode=static is lab/manual" in warning for warning in plan.warnings)
+
+
+def test_runtime_plan_warns_when_multi_session_service_return_is_ambiguous() -> None:
+    key = "ERERERERERERERERERERERERERERERERERERERERERE="
+    runtime_config = expand_config(
+        GatherlinkConfig(
+            schema_version=1,
+            role="server",
+            services=[{"name": "udp-main", "target": "127.0.0.1:51820", "return_mode": "fixed"}],
+            security={
+                "mode": "static",
+                "sessions": [
+                    {
+                        "name": "source-a",
+                        "local_receiver_index": 201,
+                        "remote_receiver_index": 101,
+                        "send_key": key,
+                        "receive_key": key,
+                        "services": ["udp-main"],
+                    },
+                    {
+                        "name": "source-b",
+                        "local_receiver_index": 202,
+                        "remote_receiver_index": 102,
+                        "send_key": key,
+                        "receive_key": key,
+                        "services": ["udp-main"],
+                    },
+                ],
+            },
+        )
+    )
+
+    plan = plan_runtime_start(runtime_config)
+
+    assert any("multiple authenticated sessions" in warning for warning in plan.warnings)
+
+
+def test_runtime_plan_accepts_peer_scoped_multi_session_service() -> None:
+    runtime_config = expand_config(validate_config_file(EXAMPLES / "shared-sink-server.json"))
+    plan = plan_runtime_start(runtime_config)
+
+    assert not any("multiple authenticated sessions" in warning for warning in plan.warnings)
+    service_step = next(step for step in plan.steps if step.component == "core-service:udp-main")
+    assert service_step.details["return_mode"] == "peer-scoped-source"

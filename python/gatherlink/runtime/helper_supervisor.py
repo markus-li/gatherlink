@@ -57,9 +57,11 @@ def build_helper_launch_plans(
             HelperLaunchPlan(
                 name=base_name,
                 kind=f"helper:{helper.kind}",
-                command=[*command, "--diagnostics-jsonl", str(diagnostics_jsonl)]
-                if _supports_diagnostics(helper)
-                else command,
+                command=(
+                    [*command, "--diagnostics-jsonl", str(diagnostics_jsonl)]
+                    if _supports_diagnostics(helper)
+                    else command
+                ),
                 log_file=service_dir / "service.log",
                 diagnostics_jsonl=diagnostics_jsonl if _supports_diagnostics(helper) else None,
                 metadata=_helper_metadata(runtime_config, helper),
@@ -69,7 +71,7 @@ def build_helper_launch_plans(
 
 
 def _helper_command(helper: RuntimeHelperConfig) -> list[str] | None:
-    """Return the CLI command for helpers that are startable in v1."""
+    """Return the CLI command for helpers that are startable in v0.9."""
     base = [sys.executable, "-m", "gatherlink.cli.main", "helpers"]
     if isinstance(helper, RuntimeDnsHelperConfig):
         command = [*base, "dns-serve", "--listen", helper.listen]
@@ -129,5 +131,9 @@ def _helper_metadata(runtime_config: RuntimeConfig, helper: RuntimeHelperConfig)
 
 def _format_upstream(upstream: RuntimeDnsUpstreamConfig) -> str:
     """Return the helper CLI upstream argument without losing IPv6 delimiters."""
-    host = f"[{upstream.address}]" if ":" in upstream.address and not upstream.address.startswith("[") else upstream.address
+    host = (
+        f"[{upstream.address}]"
+        if ":" in upstream.address and not upstream.address.startswith("[")
+        else upstream.address
+    )
     return f"{upstream.name}={host}:{upstream.port},timeout={upstream.timeout_seconds:g}"

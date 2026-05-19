@@ -9,8 +9,8 @@ Relays are allowed to forward only packets that authenticate under a relay-hop
 session they were configured to accept.
 
 Routing through untrusted peers is represented by the outer routing/relay-hop
-header plus authenticated relay session state. `route_id` is explicitly removed
-and must not be used as a packet, runtime DTO, or compatibility routing field.
+header plus authenticated relay session state. Endpoint routing labels must not
+be packet, runtime DTO, or compatibility routing fields.
 
 ## Relay session provisioning
 
@@ -43,7 +43,7 @@ next-hop identity before any compact runtime DTO is produced. Rust should only
 execute the resulting relay-hop packet checks and counters; it must not infer
 relay authorization from plaintext labels.
 
-The current v1 implementation has the first half of that split:
+The current implementation has the first half of that split:
 
 - Python `RelaySessionAuthorization` validates signed-topology relay policy and
   exports socket-ready `RelayExecutorConfig` records with receiver index, expiry,
@@ -63,6 +63,11 @@ The current v1 implementation has the first half of that split:
   and authorization; Rust only polls the relay socket, drops invalid packets
   without a network response, reseals valid opaque bytes, and sends to the
   compiled next-hop address.
+- Rust also has a final-hop exit primitive for an already authorized relay-hop
+  session. It authenticates and unwraps only the relay-hop envelope, then emits
+  the still-opaque endpoint-encrypted Gatherlink packet bytes to the local
+  endpoint core socket. The endpoint core remains the only layer that can
+  decrypt endpoint service/control context.
 - The executor config deliberately omits endpoint `service_id`, endpoint
   `path_id`, route labels, and payload meaning.
 

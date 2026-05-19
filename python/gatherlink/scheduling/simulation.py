@@ -125,10 +125,7 @@ def run_scheduler_matrix(
     policies: tuple[SchedulerPolicy, ...] = POLICIES_TO_COMPARE,
 ) -> dict[str, list[SchedulerDecision]]:
     """Return deterministic scheduler decisions for every scenario and policy."""
-    return {
-        scenario.name: [choose_path(policy, scenario) for policy in policies]
-        for scenario in scenarios
-    }
+    return {scenario.name: [choose_path(policy, scenario) for policy in policies] for scenario in scenarios}
 
 
 def choose_path(policy: SchedulerPolicy, scenario: SchedulerScenario) -> SchedulerDecision:
@@ -153,7 +150,9 @@ def choose_path(policy: SchedulerPolicy, scenario: SchedulerScenario) -> Schedul
         selected = max(enabled_paths, key=lambda path: (path.tx_capacity_bps, -path.latency_us, -path.loss_ppm))
         return SchedulerDecision(policy, rust_mode, selected.name, "highest TX capacity")
     if rust_mode == "least_queue":
-        selected = min(enabled_paths, key=lambda path: (path.queue_depth_packets, path.queue_depth_bytes, path.latency_us))
+        selected = min(
+            enabled_paths, key=lambda path: (path.queue_depth_packets, path.queue_depth_bytes, path.latency_us)
+        )
         return SchedulerDecision(policy, rust_mode, selected.name, "lowest queue pressure")
     if rust_mode == "earliest_completion_first":
         selected = min(enabled_paths, key=_completion_score(scenario.payload_len))

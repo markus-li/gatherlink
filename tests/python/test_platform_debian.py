@@ -103,7 +103,9 @@ def test_debian_backend_treats_missing_systemctl_as_inactive() -> None:
 
 
 def test_debian_backend_reads_ntp_synchronization_state() -> None:
-    assert DebianCompatibilityBackend(runner=RecordingRunner(stdout="yes\n")).ntp_synchronization_state() == "synchronized"
+    assert (
+        DebianCompatibilityBackend(runner=RecordingRunner(stdout="yes\n")).ntp_synchronization_state() == "synchronized"
+    )
     assert (
         DebianCompatibilityBackend(runner=RecordingRunner(stdout="no\n")).ntp_synchronization_state()
         == "unsynchronized"

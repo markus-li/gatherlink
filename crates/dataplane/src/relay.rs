@@ -203,6 +203,33 @@ impl RelaySessionExecutor {
         }
     }
 
+    /// Authenticate one outer hop envelope and return the opaque endpoint packet without rewrapping it.
+    ///
+    /// This is the final-hop exit primitive: the relay/exit process may remove
+    /// only the hop envelope it is authorized to see, then hand the still
+    /// endpoint-encrypted packet to the local endpoint core. It still does not
+    /// inspect endpoint service ids, path ids, payloads, or control meaning.
+    pub fn unwrap_authenticated_hop_packet(
+        &mut self,
+        packet: &[u8],
+        now_unix_us: u64,
+    ) -> Result<Vec<u8>, RelayDropReason> {
+        let decrypted = {
+            let Some(hop_keys) = self.hop_keys.as_mut() else {
+                self.counters.dropped_packets = self.counters.dropped_packets.saturating_add(1);
+                return Err(RelayDropReason::HopCryptoUnavailable);
+            };
+            hop_keys.decrypt_packet(packet).map_err(|_error| {
+                self.counters.dropped_packets = self.counters.dropped_packets.saturating_add(1);
+                RelayDropReason::HopAuthFailed
+            })?
+        };
+        match self.authorize_packet(decrypted.receiver_index, decrypted.plaintext.len(), now_unix_us) {
+            RelayPacketDecision::Forward => Ok(decrypted.plaintext),
+            RelayPacketDecision::Drop(reason) => Err(reason),
+        }
+    }
+
     /// Return current counters without exposing mutable state.
     #[must_use]
     pub fn counters(&self) -> RelaySessionCounters {
@@ -321,6 +348,81 @@ impl RelayHopForwarder {
 
     /// Return current relay executor counters.
     #[must_use]
+    pub fn counters(&self) -> RelaySessionCounters {
+        self.executor.counters()
+    }
+}
+
+/// One final-hop relay exit that unwraps an outer hop envelope and emits the opaque endpoint packet.
+#[derive(Debug)]
+pub struct RelayHopExitForwarder {
+    socket: UdpSocket,
+    next_hop: SocketAddr,
+    executor: RelaySessionExecutor,
+}
+
+impl RelayHopExitForwarder {
+    /// Bind a relay exit receive socket and endpoint-core next-hop endpoint.
+    pub fn bind(
+        listen: SocketAddr,
+        next_hop: SocketAddr,
+        executor: RelaySessionExecutor,
+    ) -> Result<Self, RelayForwardError> {
+        let socket = UdpSocket::bind(listen).map_err(RelayForwardError::BindFailed)?;
+        socket
+            .set_nonblocking(true)
+            .map_err(RelayForwardError::ConfigureSocketFailed)?;
+        Ok(Self {
+            socket,
+            next_hop,
+            executor,
+        })
+    }
+
+    /// Return the actual bound relay-exit socket address.
+    pub fn local_addr(&self) -> Result<SocketAddr, RelayForwardError> {
+        self.socket.local_addr().map_err(RelayForwardError::ReceiveFailed)
+    }
+
+    /// Poll one relay-hop packet, unwrap it, and forward the inner endpoint packet.
+    pub fn try_forward_one(&mut self, now_unix_us: u64) -> Result<RelayForwardOutcome, RelayForwardError> {
+        let mut buffer = vec![0_u8; u16::MAX as usize];
+        let (length, source) = match self.socket.recv_from(&mut buffer) {
+            Ok(received) => received,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                return Ok(RelayForwardOutcome::NoPacket);
+            }
+            Err(error) => return Err(RelayForwardError::ReceiveFailed(error)),
+        };
+        let packet = &buffer[..length];
+        let inner = match self.executor.unwrap_authenticated_hop_packet(packet, now_unix_us) {
+            Ok(inner) => inner,
+            Err(reason) => {
+                return Ok(RelayForwardOutcome::Dropped {
+                    source,
+                    reason,
+                    received_bytes: length,
+                });
+            }
+        };
+        let emitted_bytes = self
+            .socket
+            .send_to(&inner, self.next_hop)
+            .map_err(RelayForwardError::SendFailed)?;
+        self.executor.record_emitted(emitted_bytes);
+        Ok(RelayForwardOutcome::Forwarded {
+            source,
+            received_bytes: length,
+            emitted_bytes,
+        })
+    }
+
+    /// Return current relay executor counters.
     pub fn counters(&self) -> RelaySessionCounters {
         self.executor.counters()
     }

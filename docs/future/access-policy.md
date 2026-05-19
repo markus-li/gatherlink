@@ -1,15 +1,15 @@
-# Access Policy Helper
+# Access Policy
 
 ## Purpose
 
-The access policy helper defines service-level constraints for Gatherlink helpers
-and overlay paths.
+Access policy defines service-level constraints for Gatherlink helpers and
+future overlay paths.
 
 It protects exit/transit behavior without becoming a firewall.
 
-This helper is reusable. It can be consumed by WireGuard helpers, overlay routing,
-IPsec NAT-T templates, SOCKS/TCP helpers, relay/exit helpers, and future topology
-generation.
+This model is reusable. It can be consumed by WireGuard helpers, overlay
+routing, IPsec NAT-T templates, SOCKS/TCP helpers, relay/exit helpers, and
+future topology generation.
 
 ## Scope
 

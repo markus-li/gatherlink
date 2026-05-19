@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This lab proves the HTTP/3 DATAGRAM carrier variant for v1.1.
+This lab proves the HTTP/3 DATAGRAM carrier variant for v0.9.1.
 
 HTTP/3 DATAGRAM is an additive carrier alongside direct QUIC DATAGRAM. It still
 transports the exact same Gatherlink UDP-format carrier packet:
@@ -60,5 +60,5 @@ packet-format state.
 
 - This lab does not introduce a new Gatherlink packet model.
 - This lab does not authorize plaintext routing.
-- CONNECT-UDP/MASQUE can be considered for v1.2 or later, but it is not the
-  v1.1 HTTP/3 DATAGRAM carrier unless explicitly promoted.
+- CONNECT-UDP/MASQUE can be considered for v0.9.2 or later, but it is not the
+  v0.9.1 HTTP/3 DATAGRAM carrier unless explicitly promoted.

@@ -1,6 +1,6 @@
 # Real VM Acceptance Harness
 
-This directory contains the v1 real-VM acceptance harness. It is deliberately
+This directory contains the v0.9 real-VM acceptance harness. It is deliberately
 plain Bash plus SSH so every action is auditable before it touches a VM.
 
 Default mode is a dry run:
@@ -25,7 +25,7 @@ tools/vm_acceptance/run_acceptance.sh \
   --execute
 ```
 
-The harness performs the v1 operator path:
+The harness performs the v0.9 operator path:
 
 1. Render node A and node B configs from templates.
 2. Validate configs through `gatherlink config validate`.

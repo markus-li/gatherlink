@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet("gatherlink-vm-a", "gatherlink-vm-b")]
+    [ValidateSet("gatherlink-vm-a", "gatherlink-vm-b", "gatherlink-vm-c")]
     [string] $Name,
     [Parameter(Mandatory = $true)]
     [ValidateSet("path-a", "path-b", "path-c")]

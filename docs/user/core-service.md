@@ -45,6 +45,10 @@ gatherlink services status core.node-a
 gatherlink services monitor core.node-a core.node-b --once
 ```
 
+Remote services may appear as learned read-only entries after discovery metadata
+arrives. Monitoring a remote service asks the peer for temporary read-only
+status; if the request expires, the remote row should show stale or unknown.
+
 ## Stop
 
 ```bash

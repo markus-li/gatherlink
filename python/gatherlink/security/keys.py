@@ -79,4 +79,3 @@ def x25519_shared_secret(private_key: bytes, peer_public_key: bytes) -> bytes:
     private = X25519PrivateKey.from_private_bytes(private_key)
     public = X25519PublicKey.from_public_bytes(peer_public_key)
     return private.exchange(public)
-

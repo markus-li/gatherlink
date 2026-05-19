@@ -113,7 +113,7 @@ fn telemetry_records_received_data_and_control_facts() {
     .unwrap();
 
     dataplane.observe_received_data_frame(256, 7, 1, 1200);
-    dataplane.observe_received_reserved_service_payload(1, 7, 99, control.clone(), 128);
+    dataplane.observe_received_reserved_service_payload(1, 7, 99, control.clone(), 128, None);
 
     let metrics = dataplane.metrics_snapshot();
     assert_eq!(metrics.paths[&7].rx_packets, 1);
@@ -128,6 +128,49 @@ fn telemetry_records_received_data_and_control_facts() {
     assert_eq!(events[0].path_id, 7);
     assert_eq!(events[0].sequence, 99);
     assert_eq!(events[0].payload, control);
+}
+
+#[test]
+fn telemetry_counts_reserved_sequences_before_user_gap_detection() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config =
+        CoreRuntimeConfig::single_udp_service("udp-main", "127.0.0.1:0".parse().unwrap(), target.local_addr().unwrap())
+            .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+
+    dataplane.observe_received_data_frame(256, 7, 1, 100);
+    dataplane.observe_received_reserved_service_payload(1, 7, 2, b"control".to_vec(), 64, None);
+    dataplane.observe_received_reserved_service_payload(8, 7, 3, b"remote-status".to_vec(), 64, None);
+    dataplane.observe_received_data_frame(256, 7, 4, 100);
+
+    let metrics = dataplane.metrics_snapshot();
+    let path = metrics.paths.get(&7).unwrap();
+    assert_eq!(path.rx_packets, 2);
+    assert_eq!(path.missed_packets, 0);
+    assert_eq!(path.packets_needing_reorder, 0);
+    assert_eq!(dataplane.drain_reserved_service_events().len(), 2);
+}
+
+#[test]
+fn telemetry_does_not_count_reorder_candidates_as_confirmed_missed_packets() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config =
+        CoreRuntimeConfig::single_udp_service("udp-main", "127.0.0.1:0".parse().unwrap(), target.local_addr().unwrap())
+            .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+
+    dataplane.observe_received_data_frame(256, 7, 1, 100);
+    dataplane.observe_received_data_frame(256, 7, 4, 100);
+    dataplane.observe_received_data_frame(256, 8, 2, 100);
+    dataplane.observe_received_data_frame(256, 8, 3, 100);
+
+    let metrics = dataplane.metrics_snapshot();
+    let path_gap = metrics.paths.get(&7).unwrap();
+    let path_late = metrics.paths.get(&8).unwrap();
+    assert_eq!(path_gap.missed_packets, 0);
+    assert_eq!(path_gap.packets_needing_reorder, 2);
+    assert_eq!(path_late.missed_packets, 0);
+    assert_eq!(path_late.reordered_packets, 2);
 }
 
 #[test]

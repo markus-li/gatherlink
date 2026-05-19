@@ -7,12 +7,14 @@ use gatherlink_crypto::envelope::{
     decrypt_packet_without_replay, ENCRYPTED_DATA_HEADER_LEN, PACKET_TYPE_ENCRYPTED_DATA_V1,
 };
 use gatherlink_dataplane::engine::{CoreDataplane, RemoteDeliverOutcome};
+use gatherlink_dataplane::relay::{RelayHopExitForwarder, RelayHopForwarder, RelaySessionConfig, RelaySessionExecutor};
 use gatherlink_dataplane::runtime_config::{
-    CorePathConfig, CoreRuntimeConfig, SchedulerConfig, TransportSecurityConfig,
+    CorePathConfig, CoreRuntimeConfig, SchedulerConfig, TransportSecurityConfig, TransportSecuritySessionConfig,
 };
-use gatherlink_dataplane::udp_service::UdpServiceConfig;
+use gatherlink_dataplane::udp_service::{ServiceReturnMode, UdpServiceConfig};
 use gatherlink_protocol::control::{ControlMessage, ControlPayload, PathMetadata};
 use gatherlink_protocol::frame::{Frame, FrameKind};
+use gatherlink_protocol::ids::SERVICE_ID_REMOTE_STATUS;
 
 static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(0);
 
@@ -85,10 +87,25 @@ fn service(name: &str, target: SocketAddr) -> UdpServiceConfig {
     UdpServiceConfig::new(name, Some("127.0.0.1:0".parse().unwrap()), target).unwrap()
 }
 
+fn service_with_listen_return_mode(
+    name: &str,
+    listen: SocketAddr,
+    target: SocketAddr,
+    return_mode: ServiceReturnMode,
+) -> UdpServiceConfig {
+    UdpServiceConfig::new_with_return_mode(name, Some(listen), target, 100, return_mode).unwrap()
+}
+
 fn path(path_id: u16, bind: SocketAddr, remote: SocketAddr) -> CorePathConfig {
     CorePathConfig::new(path_id, 1200, false)
         .unwrap()
         .with_transport(bind, remote)
+}
+
+fn path_bind_only(path_id: u16, bind: SocketAddr) -> CorePathConfig {
+    CorePathConfig::new(path_id, 1200, false)
+        .unwrap()
+        .with_transport_bind(bind)
 }
 
 fn secure_config(
@@ -108,6 +125,20 @@ fn secure_config(
             send_key,
             receive_key,
         },
+    )
+    .unwrap()
+}
+
+fn secure_multi_config(
+    services: Vec<UdpServiceConfig>,
+    paths: Vec<CorePathConfig>,
+    sessions: Vec<TransportSecuritySessionConfig>,
+) -> CoreRuntimeConfig {
+    CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        services,
+        paths,
+        SchedulerConfig::default(),
+        TransportSecurityConfig::StaticSessions(sessions),
     )
     .unwrap()
 }
@@ -174,6 +205,142 @@ fn encrypted_path_transport_sends_aead_packet_not_plain_frame() {
     assert_eq!(frame.service_id, 256);
     assert_eq!(frame.path_id, 42);
     assert_eq!(frame.payload, b"secret-payload");
+}
+
+#[test]
+fn relay_wrapped_path_transport_sends_outer_hop_envelope() {
+    let path_bind = reserve_loopback_addr();
+    let relay_socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    relay_socket.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let endpoint_send_key = [0x33_u8; 32];
+    let relay_send_key = [0x55_u8; 32];
+    let config = secure_config(
+        vec![service("udp-main", target.local_addr().unwrap())],
+        vec![path(42, path_bind, relay_socket.local_addr().unwrap()).with_relay_send(99, relay_send_key)],
+        1234,
+        endpoint_send_key,
+        [0x44_u8; 32],
+    );
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let app_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+
+    app_sender.send_to(b"relayed-secret-payload", service_addr).unwrap();
+    dataplane.forward_one_for_service("udp-main").unwrap();
+
+    let mut buffer = [0_u8; 1500];
+    let (length, _source) = recv_with_retry(&relay_socket, &mut buffer);
+    let hop_packet = &buffer[..length];
+    let hop_decrypted = decrypt_packet_without_replay(&relay_send_key, hop_packet).unwrap();
+    let endpoint_decrypted = decrypt_packet_without_replay(&endpoint_send_key, &hop_decrypted.plaintext).unwrap();
+    let frame = Frame::decode_v2(&endpoint_decrypted.plaintext).unwrap();
+
+    assert_eq!(hop_decrypted.receiver_index, 99);
+    assert_eq!(endpoint_decrypted.receiver_index, 1234);
+    assert_eq!(frame.service_id, 256);
+    assert_eq!(frame.payload, b"relayed-secret-payload");
+}
+
+#[test]
+fn relay_chain_carries_endpoint_packet_through_untrusted_middle_peer() {
+    let b_path_bind = reserve_loopback_addr();
+    let c_relay_listen = reserve_loopback_addr();
+    let a_exit_listen = reserve_loopback_addr();
+    let a_path_bind = reserve_loopback_addr();
+    let a_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    a_target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+
+    let endpoint_b_to_a = [0x21_u8; 32];
+    let endpoint_a_to_b = [0x22_u8; 32];
+    let hop_b_to_c = [0x31_u8; 32];
+    let hop_c_to_a = [0x32_u8; 32];
+
+    let b_config = CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        vec![service("wireguard-main", "127.0.0.1:51821".parse().unwrap())],
+        vec![path(7, b_path_bind, c_relay_listen).with_relay_send(701, hop_b_to_c)],
+        SchedulerConfig::default(),
+        TransportSecurityConfig::Static {
+            local_receiver_index: 101,
+            remote_receiver_index: 201,
+            send_key: endpoint_b_to_a,
+            receive_key: endpoint_a_to_b,
+        },
+    )
+    .unwrap();
+    let a_config = CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        vec![service("wireguard-main", a_target.local_addr().unwrap())],
+        vec![path_bind_only(7, a_path_bind)],
+        SchedulerConfig::default(),
+        TransportSecurityConfig::Static {
+            local_receiver_index: 201,
+            remote_receiver_index: 101,
+            send_key: endpoint_a_to_b,
+            receive_key: endpoint_b_to_a,
+        },
+    )
+    .unwrap();
+    let mut b_core = CoreDataplane::bind(b_config).unwrap();
+    let mut a_core = CoreDataplane::bind(a_config).unwrap();
+    let mut c_relay = RelayHopForwarder::bind(
+        c_relay_listen,
+        a_exit_listen,
+        RelaySessionExecutor::new_with_hop_keys(
+            RelaySessionConfig {
+                relay_receiver_index: 701,
+                expires_at_unix_us: 2_000,
+                max_packet_size: Some(1_200),
+                max_packets: None,
+                max_bytes: None,
+            },
+            801,
+            hop_c_to_a,
+            hop_b_to_c,
+        ),
+    )
+    .unwrap();
+    let mut a_exit = RelayHopExitForwarder::bind(
+        a_exit_listen,
+        a_path_bind,
+        RelaySessionExecutor::new_with_hop_keys(
+            RelaySessionConfig {
+                relay_receiver_index: 801,
+                expires_at_unix_us: 2_000,
+                max_packet_size: Some(1_200),
+                max_packets: None,
+                max_bytes: None,
+            },
+            801,
+            [0_u8; 32],
+            hop_c_to_a,
+        ),
+    )
+    .unwrap();
+    let app_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = b_core.service("wireguard-main").unwrap().local_addr().unwrap();
+
+    app_sender
+        .send_to(b"endpoint-payload-through-relay", service_addr)
+        .unwrap();
+    b_core.forward_one_for_service("wireguard-main").unwrap();
+    assert!(matches!(
+        c_relay.try_forward_one(1_000).unwrap(),
+        gatherlink_dataplane::relay::RelayForwardOutcome::Forwarded { .. }
+    ));
+    assert!(matches!(
+        a_exit.try_forward_one(1_000).unwrap(),
+        gatherlink_dataplane::relay::RelayForwardOutcome::Forwarded { .. }
+    ));
+    let delivered = receive_paths_with_retry(&mut a_core, 8);
+    let mut buffer = [0_u8; 128];
+    let (length, _source) = recv_with_retry(&a_target, &mut buffer);
+
+    assert_eq!(&buffer[..length], b"endpoint-payload-through-relay");
+    assert_eq!(delivered.len(), 1);
+    assert_eq!(delivered[0].service, "wireguard-main");
+    assert_eq!(delivered[0].path_id, 7);
+    assert_eq!(c_relay.counters().forwarded_packets, 1);
+    assert_eq!(a_exit.counters().forwarded_packets, 1);
 }
 
 #[test]
@@ -291,6 +458,295 @@ fn encrypted_path_transport_carries_aead_packet_and_receiver_decrypts_frame() {
         Frame::decode_v2(&decrypted.plaintext).unwrap().payload,
         b"not-authenticated"
     );
+}
+
+#[test]
+fn shared_sink_path_port_accepts_two_authenticated_source_sessions() {
+    let source_a_path_addr = reserve_loopback_addr();
+    let source_c_path_addr = reserve_loopback_addr();
+    let sink_path_addr = reserve_loopback_addr();
+    let sink_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    sink_target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let a_to_sink = [0x10_u8; 32];
+    let sink_to_a = [0x11_u8; 32];
+    let c_to_sink = [0x20_u8; 32];
+    let sink_to_c = [0x21_u8; 32];
+
+    let source_a_config = CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        vec![service("udp-main", sink_target.local_addr().unwrap())],
+        vec![path(7, source_a_path_addr, sink_path_addr)],
+        SchedulerConfig::default(),
+        TransportSecurityConfig::Static {
+            local_receiver_index: 101,
+            remote_receiver_index: 201,
+            send_key: a_to_sink,
+            receive_key: sink_to_a,
+        },
+    )
+    .unwrap();
+    let source_c_config = CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        vec![service("udp-main", sink_target.local_addr().unwrap())],
+        vec![path(7, source_c_path_addr, sink_path_addr)],
+        SchedulerConfig::default(),
+        TransportSecurityConfig::Static {
+            local_receiver_index: 102,
+            remote_receiver_index: 202,
+            send_key: c_to_sink,
+            receive_key: sink_to_c,
+        },
+    )
+    .unwrap();
+    let sink_config = secure_multi_config(
+        vec![service("udp-main", sink_target.local_addr().unwrap())],
+        vec![path_bind_only(7, sink_path_addr)],
+        vec![
+            TransportSecuritySessionConfig::new(201, 101, sink_to_a, a_to_sink, vec![256]),
+            TransportSecuritySessionConfig::new(202, 102, sink_to_c, c_to_sink, vec![256]),
+        ],
+    );
+    let mut source_a = CoreDataplane::bind(source_a_config).unwrap();
+    let mut source_c = CoreDataplane::bind(source_c_config).unwrap();
+    let mut sink = CoreDataplane::bind(sink_config.clone()).unwrap();
+    let app_a = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let app_c = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_a = source_a.service("udp-main").unwrap().local_addr().unwrap();
+    let service_c = source_c.service("udp-main").unwrap().local_addr().unwrap();
+
+    app_a.send_to(b"hello-from-a", service_a).unwrap();
+    app_c.send_to(b"hello-from-c", service_c).unwrap();
+    source_a.forward_one_for_service("udp-main").unwrap();
+    source_c.forward_one_for_service("udp-main").unwrap();
+
+    let mut delivered = Vec::new();
+    for _ in 0..20 {
+        delivered.extend(sink.receive_available_from_paths(8).unwrap());
+        if delivered.len() >= 2 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut received_payloads = Vec::new();
+    for _ in 0..2 {
+        let mut buffer = [0_u8; 128];
+        let (length, _source) = recv_with_retry(&sink_target, &mut buffer);
+        received_payloads.push(buffer[..length].to_vec());
+    }
+    received_payloads.sort();
+    assert_eq!(
+        received_payloads,
+        vec![b"hello-from-a".to_vec(), b"hello-from-c".to_vec()]
+    );
+    assert_eq!(delivered.len(), 2);
+    assert!(delivered
+        .iter()
+        .all(|outcome| outcome.target == sink_target.local_addr().unwrap()));
+    let service_metrics = sink.metrics_snapshot().services.get("udp-main").unwrap().clone();
+    assert_eq!(service_metrics.rx_packets, 2);
+}
+
+#[test]
+fn shared_sink_reserved_response_uses_authenticated_peer_scope() {
+    let source_a_path_addr = reserve_loopback_addr();
+    let source_c_path_addr = reserve_loopback_addr();
+    let sink_path_addr = reserve_loopback_addr();
+    let sink_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let a_to_sink = [0x50_u8; 32];
+    let sink_to_a = [0x51_u8; 32];
+    let c_to_sink = [0x60_u8; 32];
+    let sink_to_c = [0x61_u8; 32];
+
+    let source_a_config = CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        vec![service("udp-main", sink_target.local_addr().unwrap())],
+        vec![path(7, source_a_path_addr, sink_path_addr)],
+        SchedulerConfig::default(),
+        TransportSecurityConfig::Static {
+            local_receiver_index: 101,
+            remote_receiver_index: 201,
+            send_key: a_to_sink,
+            receive_key: sink_to_a,
+        },
+    )
+    .unwrap();
+    let source_c_config = CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        vec![service("udp-main", sink_target.local_addr().unwrap())],
+        vec![path(7, source_c_path_addr, sink_path_addr)],
+        SchedulerConfig::default(),
+        TransportSecurityConfig::Static {
+            local_receiver_index: 102,
+            remote_receiver_index: 202,
+            send_key: c_to_sink,
+            receive_key: sink_to_c,
+        },
+    )
+    .unwrap();
+    let sink_config = secure_multi_config(
+        vec![service("udp-main", sink_target.local_addr().unwrap())],
+        vec![path_bind_only(7, sink_path_addr)],
+        vec![
+            TransportSecuritySessionConfig::new(201, 101, sink_to_a, a_to_sink, vec![256]),
+            TransportSecuritySessionConfig::new(202, 102, sink_to_c, c_to_sink, vec![256]),
+        ],
+    );
+    let mut source_a = CoreDataplane::bind(source_a_config).unwrap();
+    let mut source_c = CoreDataplane::bind(source_c_config).unwrap();
+    let mut sink = CoreDataplane::bind(sink_config).unwrap();
+
+    source_a
+        .transmit_service_payload(SERVICE_ID_REMOTE_STATUS, b"status-request-a".to_vec())
+        .unwrap();
+    source_c
+        .transmit_service_payload(SERVICE_ID_REMOTE_STATUS, b"status-request-c".to_vec())
+        .unwrap();
+    let mut events = Vec::new();
+    for _ in 0..20 {
+        sink.receive_available_from_paths(8).unwrap();
+        events.extend(sink.drain_reserved_service_events());
+        if events.len() >= 2 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(events.iter().any(|event| event.peer_scope == Some(201)));
+    assert!(events.iter().any(|event| event.peer_scope == Some(202)));
+
+    sink.transmit_service_payload_to_peer(SERVICE_ID_REMOTE_STATUS, b"response-a".to_vec(), 201)
+        .unwrap();
+    let mut a_events = Vec::new();
+    let mut c_events = Vec::new();
+    for _ in 0..20 {
+        source_a.receive_available_from_paths(8).unwrap();
+        source_c.receive_available_from_paths(8).unwrap();
+        a_events.extend(source_a.drain_reserved_service_events());
+        c_events.extend(source_c.drain_reserved_service_events());
+        if !a_events.is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(a_events[0].payload, b"response-a");
+    assert!(c_events.is_empty());
+}
+
+#[test]
+fn shared_sink_peer_scoped_sources_route_replies_to_the_right_authenticated_source() {
+    let source_a_path_addr = reserve_loopback_addr();
+    let source_c_path_addr = reserve_loopback_addr();
+    let sink_path_addr = reserve_loopback_addr();
+    let app_server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    app_server.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let source_a_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let source_c_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    source_a_target
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    source_c_target
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let a_to_sink = [0x30_u8; 32];
+    let sink_to_a = [0x31_u8; 32];
+    let c_to_sink = [0x40_u8; 32];
+    let sink_to_c = [0x41_u8; 32];
+
+    let source_a_config = CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        vec![service("udp-main", source_a_target.local_addr().unwrap())],
+        vec![path(7, source_a_path_addr, sink_path_addr)],
+        SchedulerConfig::default(),
+        TransportSecurityConfig::Static {
+            local_receiver_index: 101,
+            remote_receiver_index: 201,
+            send_key: a_to_sink,
+            receive_key: sink_to_a,
+        },
+    )
+    .unwrap();
+    let source_c_config = CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        vec![service("udp-main", source_c_target.local_addr().unwrap())],
+        vec![path(7, source_c_path_addr, sink_path_addr)],
+        SchedulerConfig::default(),
+        TransportSecurityConfig::Static {
+            local_receiver_index: 102,
+            remote_receiver_index: 202,
+            send_key: c_to_sink,
+            receive_key: sink_to_c,
+        },
+    )
+    .unwrap();
+    let sink_config = secure_multi_config(
+        vec![service_with_listen_return_mode(
+            "udp-main",
+            "0.0.0.0:0".parse().unwrap(),
+            app_server.local_addr().unwrap(),
+            ServiceReturnMode::PeerScopedSource,
+        )],
+        vec![path_bind_only(7, sink_path_addr)],
+        vec![
+            TransportSecuritySessionConfig::new(201, 101, sink_to_a, a_to_sink, vec![256]),
+            TransportSecuritySessionConfig::new(202, 102, sink_to_c, c_to_sink, vec![256]),
+        ],
+    );
+    let mut source_a = CoreDataplane::bind(source_a_config).unwrap();
+    let mut source_c = CoreDataplane::bind(source_c_config).unwrap();
+    let mut sink = CoreDataplane::bind(sink_config.clone()).unwrap();
+    let app_a = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let app_c = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_a = source_a.service("udp-main").unwrap().local_addr().unwrap();
+    let service_c = source_c.service("udp-main").unwrap().local_addr().unwrap();
+
+    app_a.send_to(b"from-a", service_a).unwrap();
+    app_c.send_to(b"from-c", service_c).unwrap();
+    source_a.forward_one_for_service("udp-main").unwrap();
+    source_c.forward_one_for_service("udp-main").unwrap();
+    for _ in 0..20 {
+        sink.receive_available_from_paths(8).unwrap();
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut buffer = [0_u8; 128];
+    let (a_len, a_reply_addr) = recv_with_retry(&app_server, &mut buffer);
+    assert_eq!(&buffer[..a_len], b"from-a");
+    let (c_len, c_reply_addr) = recv_with_retry(&app_server, &mut buffer);
+    assert_eq!(&buffer[..c_len], b"from-c");
+    assert_ne!(a_reply_addr, c_reply_addr);
+    assert_eq!(a_reply_addr.ip(), app_server.local_addr().unwrap().ip());
+    assert_eq!(c_reply_addr.ip(), app_server.local_addr().unwrap().ip());
+    let sink_snapshot = sink.metrics_snapshot();
+    let path_snapshot = sink_snapshot.paths.get(&7).unwrap();
+    assert_eq!(path_snapshot.rx_packets, 2);
+    assert_eq!(path_snapshot.packets_needing_reorder, 0);
+    assert_eq!(path_snapshot.reordered_packets, 0);
+    assert_eq!(sink_snapshot.services.get("udp-main").unwrap().rx_packets, 2);
+
+    // A harmless config refresh must not invalidate the WireGuard-like app
+    // endpoints that the sink-side server just learned. The peer source sockets
+    // and authenticated carrier remotes are execution state, not lab scaffolding.
+    sink.reapply_config(sink_config.clone()).unwrap();
+
+    app_server.send_to(b"reply-a", a_reply_addr).unwrap();
+    app_server.send_to(b"reply-c", c_reply_addr).unwrap();
+    for _ in 0..20 {
+        sink.forward_available_for_service_nonblocking("udp-main", 8).unwrap();
+        source_a.receive_available_from_paths(8).unwrap();
+        source_c.receive_available_from_paths(8).unwrap();
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let (length, _source) = recv_with_retry(&source_a_target, &mut buffer);
+    assert_eq!(&buffer[..length], b"reply-a");
+    let (length, _source) = recv_with_retry(&source_c_target, &mut buffer);
+    assert_eq!(&buffer[..length], b"reply-c");
+
+    // Shared-sink replies are scoped to the authenticated peer/session. Each
+    // receiver sees its own monotonic sequence space; packets intentionally
+    // sent to another peer must not look like local reorder pressure.
+    let source_a_snapshot = source_a.metrics_snapshot();
+    let source_a_path = source_a_snapshot.paths.get(&7).unwrap();
+    assert_eq!(source_a_path.packets_needing_reorder, 0);
+    assert_eq!(source_a_path.reordered_packets, 0);
+    let source_c_snapshot = source_c.metrics_snapshot();
+    let source_c_path = source_c_snapshot.paths.get(&7).unwrap();
+    assert_eq!(source_c_path.packets_needing_reorder, 0);
+    assert_eq!(source_c_path.reordered_packets, 0);
 }
 
 #[test]

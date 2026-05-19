@@ -44,7 +44,7 @@ every design doc into user docs.
 
 ## GitHub Wiki Publishing
 
-For v1.1, publish the short user docs to the repository GitHub Wiki as release
+For v0.9.1, publish the short user docs to the repository GitHub Wiki as release
 documentation. This must be automated as part of the package/release process;
 manual Wiki editing is allowed only for emergency correction and must be copied
 back into `docs/user/` immediately.
@@ -75,7 +75,7 @@ The first Wiki set should cover:
 
 ## Release Checklist
 
-Before a v1.1 release:
+Before a v0.9.1 release:
 
 1. Review `docs/user/` for stale commands.
 2. Verify sample configs work without Cloudflare, Traefik, or external accounts.

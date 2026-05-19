@@ -28,9 +28,7 @@ def evaluate_relay_health(
         return RelayHealth(node_id=candidate.node_id, state="stale_topology", reason="relay has no endpoints")
 
     reachable = [
-        endpoint.authority()
-        for endpoint in candidate.endpoints
-        if endpoint_probe is None or endpoint_probe(endpoint)
+        endpoint.authority() for endpoint in candidate.endpoints if endpoint_probe is None or endpoint_probe(endpoint)
     ]
     if not reachable:
         return RelayHealth(

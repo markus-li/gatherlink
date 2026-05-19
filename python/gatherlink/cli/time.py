@@ -91,4 +91,3 @@ def correct(
     typer.echo(json.dumps(response.export_dict(), indent=2, sort_keys=True))
     if response.status in {"error", "refused"}:
         raise typer.Exit(1)
-

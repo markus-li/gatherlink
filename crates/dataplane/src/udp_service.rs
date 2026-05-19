@@ -4,6 +4,7 @@
 //! sockets, route mutation, firewall policy, helper tunnels, or root-only
 //! capabilities belong in this module.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
@@ -65,6 +66,7 @@ impl ServiceSchedulerConfig {
 pub enum ServiceReturnMode {
     Fixed,
     LearnedSingleSource,
+    PeerScopedSource,
 }
 
 /// UDP service configuration compiled by Python before it reaches Rust.
@@ -253,6 +255,7 @@ impl UdpServiceConfig {
 pub struct UserlandUdpService {
     config: UdpServiceConfig,
     socket: UdpSocket,
+    peer_sources: HashMap<u32, UdpSocket>,
 }
 
 impl UserlandUdpService {
@@ -305,7 +308,9 @@ impl UserlandUdpService {
         }
 
         let socket = self.socket.try_clone().map_err(UdpServiceError::CloneFailed)?;
-        Self::from_bound_socket(config, socket)
+        let mut service = Self::from_bound_socket(config, socket)?;
+        service.peer_sources = self.clone_peer_sources()?;
+        Ok(service)
     }
 
     /// Receive one UDP datagram from the userland service socket.
@@ -329,6 +334,27 @@ impl UserlandUdpService {
         result
     }
 
+    /// Receive one queued reply from any peer-scoped app-facing source socket.
+    pub fn try_recv_peer_scoped(&self, buffer: &mut [u8]) -> Result<Option<(u32, usize, SocketAddr)>, UdpServiceError> {
+        for (peer_scope, socket) in &self.peer_sources {
+            socket
+                .set_nonblocking(true)
+                .map_err(UdpServiceError::ConfigureSocketFailed)?;
+            let result = match socket.recv_from(buffer) {
+                Ok((length, source)) => Ok(Some((*peer_scope, length, source))),
+                Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+                Err(error) => Err(UdpServiceError::ReceiveFailed(error)),
+            };
+            socket
+                .set_nonblocking(false)
+                .map_err(UdpServiceError::ConfigureSocketFailed)?;
+            if result.as_ref().is_ok_and(Option::is_some) {
+                return result;
+            }
+        }
+        Ok(None)
+    }
+
     /// Emit one UDP datagram to this service's configured target.
     pub fn emit_to_target(&self, payload: &[u8]) -> Result<usize, UdpServiceError> {
         self.emit_to(payload, self.config.target())
@@ -341,6 +367,26 @@ impl UserlandUdpService {
             .map_err(UdpServiceError::SendFailed)
     }
 
+    /// Emit from a peer-specific local UDP source so app replies map back to that peer.
+    pub fn emit_to_from_peer_source(
+        &mut self,
+        peer_scope: u32,
+        payload: &[u8],
+        target: SocketAddr,
+    ) -> Result<(usize, SocketAddr), UdpServiceError> {
+        if !self.peer_sources.contains_key(&peer_scope) {
+            let source = self.bind_peer_source(target)?;
+            self.peer_sources.insert(peer_scope, source);
+        }
+        let socket = self
+            .peer_sources
+            .get(&peer_scope)
+            .ok_or(UdpServiceError::MissingPeerSource { peer_scope })?;
+        let sent = socket.send_to(payload, target).map_err(UdpServiceError::SendFailed)?;
+        let local_addr = socket.local_addr().map_err(UdpServiceError::LocalAddrFailed)?;
+        Ok((sent, local_addr))
+    }
+
     fn from_bound_socket(config: UdpServiceConfig, socket: UdpSocket) -> Result<Self, UdpServiceError> {
         // Tests and future supervisors should fail predictably instead of
         // blocking forever when a service is miswired.
@@ -348,7 +394,30 @@ impl UserlandUdpService {
             .set_read_timeout(Some(Duration::from_millis(500)))
             .map_err(UdpServiceError::ConfigureSocketFailed)?;
 
-        Ok(Self { config, socket })
+        Ok(Self {
+            config,
+            socket,
+            peer_sources: HashMap::new(),
+        })
+    }
+
+    fn bind_peer_source(&self, target: SocketAddr) -> Result<UdpSocket, UdpServiceError> {
+        let bind_addr = SocketAddr::new(target.ip(), 0);
+        let socket = UdpSocket::bind(bind_addr).map_err(UdpServiceError::BindFailed)?;
+        socket
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .map_err(UdpServiceError::ConfigureSocketFailed)?;
+        Ok(socket)
+    }
+
+    fn clone_peer_sources(&self) -> Result<HashMap<u32, UdpSocket>, UdpServiceError> {
+        self.peer_sources
+            .iter()
+            .map(|(peer_scope, socket)| {
+                let cloned = socket.try_clone().map_err(UdpServiceError::CloneFailed)?;
+                Ok((*peer_scope, cloned))
+            })
+            .collect()
     }
 }
 
@@ -372,6 +441,12 @@ pub enum UdpServiceError {
     MissingPath,
     MissingPathTransport {
         path_id: PathId,
+    },
+    MissingPathRemote {
+        path_id: PathId,
+    },
+    MissingPeerSource {
+        peer_scope: u32,
     },
     PathMtuTooSmall {
         path_id: PathId,
@@ -398,6 +473,7 @@ pub enum UdpServiceError {
     LocalAddrFailed(std::io::Error),
     ReceiveFailed(std::io::Error),
     SendFailed(std::io::Error),
+    RelayHopWrapFailed,
 }
 
 impl fmt::Display for UdpServiceError {
@@ -420,6 +496,12 @@ impl fmt::Display for UdpServiceError {
                 formatter,
                 "path {path_id} has no bound transport socket for encoded frame delivery"
             ),
+            Self::MissingPathRemote { path_id } => {
+                write!(formatter, "path {path_id} has no configured or learned remote transport endpoint")
+            }
+            Self::MissingPeerSource { peer_scope } => {
+                write!(formatter, "missing peer-scoped app source socket for peer scope {peer_scope}")
+            }
             Self::PathMtuTooSmall { path_id, mtu } => {
                 write!(formatter, "path {path_id} MTU {mtu} is too small for Gatherlink framing")
             }
@@ -455,6 +537,7 @@ impl fmt::Display for UdpServiceError {
                 write!(formatter, "failed to receive UDP datagram: {error}")
             }
             Self::SendFailed(error) => write!(formatter, "failed to send UDP datagram: {error}"),
+            Self::RelayHopWrapFailed => write!(formatter, "failed to wrap endpoint packet in relay-hop envelope"),
         }
     }
 }

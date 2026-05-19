@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "node": "shared-sink",
+  "role": "server",
+  "services": [
+    {
+      "name": "udp-main",
+      "target": "127.0.0.1:51820",
+      "return_mode": "peer-scoped-source"
+    }
+  ],
+  "security": {
+    "mode": "static",
+    "sessions": [
+      {
+        "name": "source-a",
+        "local_receiver_index": 201,
+        "remote_receiver_index": 101,
+        "send_key": "MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE=",
+        "receive_key": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+        "services": [
+          "udp-main"
+        ]
+      },
+      {
+        "name": "source-b",
+        "local_receiver_index": 202,
+        "remote_receiver_index": 102,
+        "send_key": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE=",
+        "receive_key": "QEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA=",
+        "services": [
+          "udp-main"
+        ]
+      }
+    ]
+  }
+}

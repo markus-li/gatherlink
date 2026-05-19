@@ -2,7 +2,7 @@
 
 Start with these checks before reading design docs.
 
-For deeper scenario diagnosis, use `docs/operations/v1-troubleshooting-guide.md`.
+For deeper scenario diagnosis, use `docs/operations/v0.9-troubleshooting-guide.md`.
 For event and counter meanings, use `docs/operations/diagnostics-dictionary.md`.
 
 ## Quick Doctor Check
@@ -83,6 +83,11 @@ Look for transmitted packets on one side and received packets on the other.
 Expected duplicate counters may increase when fanout sends more than one
 encrypted copy. That is normal when one copy is delivered and later copies are
 discarded.
+
+Remote service rows come from two steps. Discovery metadata is sparse and may
+only prove that a remote service exists. Live remote counters require an
+explicit temporary monitor/status request. If that request has expired, the
+remote row should show stale or unknown until the monitor refreshes it.
 
 ## DNS Is Not Resolving
 

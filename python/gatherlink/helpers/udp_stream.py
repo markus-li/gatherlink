@@ -127,7 +127,9 @@ class GatherlinkUdpStreamExit:
         elif frame_type == "close":
             await self._close_session_write(key)
 
-    async def _open_session(self, key: tuple[str, tuple[str, int]], frame: dict[str, Any], addr: tuple[str, int]) -> None:
+    async def _open_session(
+        self, key: tuple[str, tuple[str, int]], frame: dict[str, Any], addr: tuple[str, int]
+    ) -> None:
         host = str(frame.get("host", ""))
         port = int(frame.get("port", 0))
         if not self._target_allowed(host, port):

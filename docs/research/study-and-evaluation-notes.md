@@ -322,7 +322,7 @@ Gatherlink should not become:
 
 - HTTP proxy
 - L7 load balancer
-- xDS-scale dynamic config system in v1
+- xDS-scale dynamic config system in v0.9
 
 ### TODO
 

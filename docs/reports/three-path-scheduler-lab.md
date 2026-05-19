@@ -1,5 +1,10 @@
 # Three-path scheduler lab report
 
+Status: historical report from the scheduler implementation period. It records
+the deterministic scheduler matrix and saved lab evidence used to build the v0.9
+scheduler. Current scheduler behavior is specified in `docs/runtime/scheduler.md`
+and current release gates are tracked in `docs/operations/v0.9-release-checklist.md`.
+
 This report combines deterministic scheduler-policy decisions with saved three-path lab snapshots. The deterministic matrix checks every Python scheduler policy and the Rust compile target it maps to. The lab snapshots check the current runnable local testbed: network shaping, bidirectional UDP traffic, per-path counters, control metadata, and NTP status.
 
 ## Scheduler policy matrix
@@ -105,10 +110,14 @@ These snapshots were taken from fresh three-path lab starts for each named mode.
 ## Validation
 
 - `ruff check python tests/python`: passed.
-- `pytest -q`: 108 passed.
+- `pytest -q`: passed.
 - `cargo fmt --check`: passed.
 - `cargo test -q`: passed, including the Rust scheduler primitive tests.
 
-## Current limitation
+## Historical limitation at the time of this report
 
-The runnable lab now uses the Rust path transport for user traffic and control duplication. The remaining scheduler integration gap is the live Python loop that converts telemetry into refreshed scheduler primitives and hot-reapplies them to Rust during the run.
+At the time this report was created, the remaining scheduler integration gap
+was the live Python loop that converts telemetry into refreshed scheduler
+primitives and hot-reapplies them to Rust during the run. That later moved into
+the v0.9 implementation; use this report as evidence/rationale rather than as the
+current scheduler backlog.

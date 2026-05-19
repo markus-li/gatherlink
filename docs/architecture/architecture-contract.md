@@ -17,6 +17,13 @@ Gatherlink must not become responsible for firewall policy, NAT policy, traffic
 shaping, QoS, IDS/IPS, firewall-style DPI, L7 routing, or enterprise LAN orchestration.
 Those belong in OPNsense, OpenWrt, UniFi, MikroTik, Fortinet, Linux routing, or other tools.
 
+A future Linux endpoint-protection helper may manage a narrow set of kernel
+firewall/NAT primitives for explicit Gatherlink endpoint scenarios, but it must
+stay helper-owned and opt-in. It must use labeled chains, marks, sets, or
+similarly explicit hook points so other firewall software can place rules before
+and after Gatherlink-owned rules. It must not become the host firewall manager
+or decide general LAN policy.
+
 Gatherlink's job is to give those tools better WAN transport primitives.
 
 ## Project laws
@@ -27,19 +34,21 @@ probably drifting and should be redesigned before it spreads.
 
 - Rust executes compact facts; Python owns meaning.
 - No plaintext routing.
-- No `route_id`.
+- Routing uses authenticated session/control context and relay-hop state.
 - Helpers never become core.
 - Authenticated sessions are the normal secure path; static crypto is explicit
   lab/manual fallback only.
 - Every development slice gets focused unit tests and relevant lab proof.
+- Labs may shape networks and faults, but must not own behavior that production
+  cannot run.
 - Operator and status output comes from structured facts.
 - If a field is redundant after decrypt/context, remove it.
 - If a thing only exists for compatibility with a bad earlier idea, delete it.
 
 ## Platform compatibility boundary
 
-V1 supports Debian only. The Debian backend is the only compatibility backend
-that must exist for v1.
+V0.9 supports Debian only. The Debian backend is the only compatibility backend
+that must exist for v0.9.
 
 Even so, OS-specific behavior must go through compatibility interfaces instead
 of leaking through runtime, helpers, diagnostics, or protocol code. Future
@@ -178,7 +187,7 @@ Discovery ranks candidate logical paths per physical link and activates the best
 
 ## Scheduler rule
 
-MVP scheduler is fixed/weighted round-robin.
+The baseline scheduler is fixed/weighted round-robin.
 
 Adaptive scheduling must wait until receiver metrics are trustworthy.
 
@@ -281,7 +290,7 @@ Core transport must not depend on DNS helper.
 
 ## Peer failover
 
-Peer failover is v1, not MVP.
+Peer failover is a v0.9-shaped requirement, not a broad mesh feature.
 
 It must support peer priority, automatic failover, conservative failback, session-aware partial failback,
 minimum dwell windows, standby peer probing, new sessions using recovered preferred peer, and existing
@@ -351,7 +360,7 @@ DNS helper, diagnostics, lab tooling, and overlay helper if/when implemented.
 Commercial value may live in hardware appliance, hosted relays, managed UI, fleet management, updates,
 monitoring, and support.
 
-## File-specific TODO
+## TODO(architecture-contract)
 
 - Keep this document aligned with actual implementation decisions.
 - Do not allow new helpers or features to violate the core boundary.

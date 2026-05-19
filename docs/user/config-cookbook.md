@@ -1,6 +1,6 @@
 # Config Cookbook
 
-These are small starting points for common v1 setups. Use the example configs as
+These are small starting points for common v0.9 setups. Use the example configs as
 the source files, then change addresses, names, service targets, and keys for
 your site.
 
@@ -54,7 +54,7 @@ gatherlink run start node-a.json --name core.node-a
 gatherlink run helpers-start node-a.json
 ```
 
-SOCKS5 supports TCP CONNECT for v1. UDP ASSOCIATE is deferred.
+SOCKS5 supports TCP CONNECT for v0.9. UDP ASSOCIATE is deferred.
 
 Local acceptance proof:
 
@@ -132,7 +132,7 @@ gatherlink helpers dns-serve \
   --dnssec-mode allow_unsigned
 ```
 
-The v1 release report should still prove this in the VM environment before
+The v0.9 release report should still prove this in the VM environment before
 tagging.
 
 ## WireGuard Over Gatherlink
@@ -157,6 +157,29 @@ Then point the WireGuard peer `Endpoint` at the local Gatherlink service address
 shown by the plan. WireGuard still owns keys, interface lifecycle, routes, and
 firewall rules.
 
+On a server-like WireGuard node, use `return_mode: "peer-scoped-source"` on the
+Gatherlink WireGuard service when several authenticated Gatherlink peers share
+the same sink carrier port. This preserves WireGuard's endpoint behavior without
+making Gatherlink inspect or implement WireGuard packets.
+
+## Shared Sink Service
+
+Start from:
+
+```text
+configs/examples/shared-sink-server.json
+```
+
+Use this shape when several authenticated source nodes should use the same sink
+UDP carrier port per path. Each session needs a unique `local_receiver_index`,
+and the session `services` list maps that authenticated peer to the user service
+it may reach. For server-like UDP helpers, set the service to
+`return_mode: "peer-scoped-source"` so replies from the local target return to
+the authenticated peer that produced the app-facing UDP source socket.
+
+`gatherlink doctor --config CONFIG` reports a warning if one service is mapped
+to several sessions without `peer-scoped-source`.
+
 ## Untrusted Relay Scenario
 
 Use relay docs before implementing or deploying this shape:
@@ -173,7 +196,7 @@ Rules:
 - invalid relay packets silently drop
 - relays do not decrypt endpoint payloads
 - relays do not route by plaintext service labels
-- there is no `route_id`
+- routing uses authenticated relay-hop/session state
 
 ## Config Safety Checklist
 

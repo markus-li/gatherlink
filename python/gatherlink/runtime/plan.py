@@ -8,6 +8,7 @@ and no root permissions. This planner is for core transport only.
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Literal
 
 from pydantic import Field
@@ -124,7 +125,7 @@ def runtime_warnings(config: RuntimeConfig) -> list[str]:
     if config.security.source_mode == "static":
         warnings.extend(
             [
-                "WARNING: security.mode=static is lab/manual provisioning, not the normal v1 secure path.",
+                "WARNING: security.mode=static is lab/manual provisioning, not the normal v0.9 secure path.",
                 "WARNING: prefer security.mode=authenticated material produced by the signed handshake commands.",
             ]
         )
@@ -134,5 +135,21 @@ def runtime_warnings(config: RuntimeConfig) -> list[str]:
                 "WARNING: explicit service_id is not recommended; "
                 f"service={service.name} service_id={service.service_id}. "
                 "Prefer automatic service ids unless coordinating a deliberate protocol-level mapping."
+            )
+    services_by_id = {service.service_id: service for service in config.services}
+    multi_session_services = Counter(
+        service_id for session in config.security.sessions for service_id in session.service_ids
+    )
+    for service_id, session_count in sorted(multi_session_services.items()):
+        if session_count <= 1:
+            continue
+        service = services_by_id.get(service_id)
+        if service is None:
+            continue
+        if service.return_mode != "peer-scoped-source":
+            warnings.append(
+                "WARNING: service is mapped to multiple authenticated sessions but does not use "
+                f"return_mode=peer-scoped-source; service={service.name} service_id={service.service_id}. "
+                "Sink-originated UDP replies may be ambiguous for server-like helpers."
             )
     return warnings

@@ -1,15 +1,17 @@
-# Next implementation priorities
+# MVP Implementation Priorities, Closed
 
-This list is based on the current architecture, scheduler, protocol, diagnostics,
-time-sync, and lab documentation. The order favors proving the core production
-boundary before adding more policy.
+This was the "next implementation priorities" handoff used during the MVP build.
+It is now closed historical context, not a current priority list. Current work
+belongs in `docs/reports/v0.9.1-roadmap.md` or
+`docs/reports/future-roadmap-pipeline.md`.
 
 ## Priority 1: Hot scheduler reapply loop
 
-Python already expands config, compiles scheduler policy into runtime models,
-and starts the Rust-backed lab services over real path transport sockets. The
-next production gap is the continuous loop that converts live telemetry into
-updated scheduler/runtime primitives and hot-reapplies them to Rust.
+At the time of this handoff, Python already expanded config, compiled scheduler
+policy into runtime models, and started Rust-backed lab services over real path
+transport sockets. The then-current production gap was the continuous loop that
+converts live telemetry into updated scheduler/runtime primitives and
+hot-reapplies them to Rust.
 
 Boundary check:
 
@@ -26,9 +28,10 @@ Boundary check:
 
 ## Priority 2: Production diagnostics event bus
 
-Service monitor is useful now, but diagnostics docs still call out the event bus
-as a release gap. The next layer should normalize Rust counter snapshots and
-service lifecycle events into Python diagnostics events.
+At the time of this handoff, service monitor was useful but diagnostics docs
+still called out the event bus as a release gap. The proposed next layer was to
+normalize Rust counter snapshots and service lifecycle events into Python
+diagnostics events.
 
 Boundary check:
 
@@ -38,8 +41,8 @@ Boundary check:
 ## Priority 5: IPv6 parity in runnable labs
 
 Runtime planning and Rust socket tests already cover IPv6. The lab docs require
-IPv6 from day one, so a runnable IPv6 mirror of the local path lab should be
-added after the Rust-backed runner exists.
+IPv6 from day one, so this handoff called for a runnable IPv6 mirror of the
+local path lab after the Rust-backed runner existed.
 
 Boundary check:
 
@@ -49,8 +52,8 @@ Boundary check:
 ## Priority 6: Capability negotiation and authenticated control
 
 Capability negotiation, crypto, and authenticated control are intentionally
-future work, but the protocol docs define the direction. Add this after the
-plaintext Rust-backed lab is trustworthy.
+future-looking in this closed handoff, but the protocol docs define the
+direction.
 
 Boundary check:
 

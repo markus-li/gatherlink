@@ -117,6 +117,20 @@ def test_relay_runner_state_exposes_ipc_status_and_stop() -> None:
     assert state.stop_event.is_set()
 
 
+def test_relay_runner_status_can_mark_final_hop_exit() -> None:
+    config = _relay_config().model_copy(update={"exit_to_inner_packet": True})
+    state = RelayRunnerState(
+        name=config.name,
+        listen=config.listen,
+        next_hop=config.executor.next_hop_address,
+        direction=config.executor.direction,
+        stop_event=Event(),
+        exit_to_inner_packet=config.exit_to_inner_packet,
+    )
+
+    assert state.snapshot()["exit_to_inner_packet"] is True
+
+
 def test_relay_runtime_config_validates_key_encoding() -> None:
     config = _relay_config(send_key="bad-key")
 

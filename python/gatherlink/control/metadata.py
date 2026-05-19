@@ -117,7 +117,8 @@ def record_sink_time(
         {
             "role": "sink-authoritative" if local_sink else "syncing-to-sink",
             "system_unix_us": system_unix_us(),
-            "gatherlink_unix_us": message.sink_unix_us + (0 if local_sink else estimated_sink_one_way_us(control_metadata)),
+            "gatherlink_unix_us": message.sink_unix_us
+            + (0 if local_sink else estimated_sink_one_way_us(control_metadata)),
             "sink_sent_unix_us": message.sink_unix_us,
             "sink_sent_internal_us": message.sink_internal_us,
             "received_at": datetime.now(UTC).isoformat(),

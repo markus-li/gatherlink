@@ -95,7 +95,9 @@ class GatherlinkServiceExitConnector(Socks5ExitConnector):
     async def open(self, host: str, port: int, *, timeout_seconds: float) -> Connection:
         """Open the CONNECT target through Gatherlink service transport."""
         stream = await self.transport.open_stream(HelperStreamTarget(host, port), timeout_seconds=timeout_seconds)
-        return Connection(reader=stream.reader, writer=stream.writer, address=Address(stream.bound_host, stream.bound_port))
+        return Connection(
+            reader=stream.reader, writer=stream.writer, address=Address(stream.bound_host, stream.bound_port)
+        )
 
 
 class LabDirectTcpExitConnector(GatherlinkServiceExitConnector):

@@ -15,6 +15,7 @@ fn gatherlink_pybindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<dto::PyUdpServiceConfig>()?;
     module.add_class::<dto::PyPathConfig>()?;
     module.add_class::<dto::PySchedulerConfig>()?;
+    module.add_class::<dto::PyTransportSecuritySessionConfig>()?;
     module.add_class::<dto::PyTransportSecurityConfig>()?;
     module.add_class::<dto::PyForwardOutcome>()?;
     module.add_class::<dto::PyRemoteDeliverOutcome>()?;
@@ -22,5 +23,6 @@ fn gatherlink_pybindings(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<dto::PyReapplyOutcome>()?;
     module.add_class::<engine_api::PyCoreDataplane>()?;
     module.add_class::<relay_api::PyRelayHopForwarder>()?;
+    module.add_class::<relay_api::PyRelayHopExitForwarder>()?;
     Ok(())
 }

@@ -43,7 +43,7 @@ class GatherlinkStatePaths:
 
     @classmethod
     def debian(cls, backend: DebianCompatibilityBackend | None = None) -> GatherlinkStatePaths:
-        """Return the v1 Debian path layout."""
+        """Return the current Debian path layout."""
         backend = backend or default_debian_backend()
         return cls(
             config_dir=backend.config_dir,
@@ -88,7 +88,7 @@ class GatherlinkStatePaths:
 @dataclass(frozen=True)
 class PersistentStateStore:
     """
-    Typed local state access for Python-owned v1 control-plane artifacts.
+    Typed local state access for Python-owned control-plane artifacts.
 
     The store deliberately distinguishes authority from hints. Identities,
     trust roots, and signed bundles have explicit paths and permissions; hints
@@ -99,7 +99,7 @@ class PersistentStateStore:
 
     @classmethod
     def debian(cls, backend: DebianCompatibilityBackend | None = None) -> PersistentStateStore:
-        """Return a store rooted at the Debian v1 state layout."""
+        """Return a store rooted at the Debian state layout."""
         return cls(GatherlinkStatePaths.debian(backend))
 
     def write_private_identity(self, node_name: str, payload: dict[str, Any], *, force: bool = False) -> Path:

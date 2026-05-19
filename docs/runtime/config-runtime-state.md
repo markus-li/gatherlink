@@ -48,11 +48,18 @@ explicit runtime values first.
 
 ## Live reload
 
-Configuration changes should be live-reloadable.
+Live reload is the target model, but current behavior is deliberately
+narrower. Scheduler hot reapply exists for the supported scheduler/status loop.
+Broader service, helper, security-session, endpoint, and config-apply reloads
+are future work unless a concrete implementation and tests say otherwise. The
+safe v0.9 operator fallback is validate, stop the affected service, restart it
+with the same service name, and verify status.
 
-Python owns loading, validation, diffing, and apply order. A reload should
-compile a new runtime state generation, push it to Rust/helpers, and keep the
-old generation alive only where needed to drain in-flight traffic safely.
+For future broader reload work, Python owns loading, validation, diffing, and
+apply order. A reload should compile a new runtime state generation, push it to
+Rust/helpers, and keep the old generation alive only where needed to drain
+in-flight traffic safely. Reserved service id `6` is only a future safe
+config-apply lane until that production path exists.
 
 Reload rules:
 

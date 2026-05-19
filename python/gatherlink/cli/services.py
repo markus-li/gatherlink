@@ -30,6 +30,7 @@ from gatherlink.runtime.services import (
 
 app = typer.Typer(help="List managed services and attach to their logs.")
 AttachMode = Literal["raw", "aggregate"]
+MonitorView = Literal["table", "graph"]
 CONTEXT_WIDTH = 48
 CTRL_WIDTH = 64
 DETAIL_CTRL_WIDTH = 120
@@ -37,7 +38,7 @@ DETAIL_CTRL_WIDTH = 120
 
 @app.command("list")
 def list_services() -> None:
-    """List services known to the local Gatherlink registry."""
+    """List local services and remote services learned through discovery."""
     services = ServiceRegistry().list()
     if not services:
         typer.echo("services: none")
@@ -49,6 +50,11 @@ def list_services() -> None:
             f"pid={service.current_pid()} systemd_unit={service.systemd_unit} "
             f"detached={service.detached_from_console} log={service.log_file} cwd={service.cwd}"
         )
+        for remote in _learned_remote_services(service):
+            typer.echo(
+                f"{remote['name']} kind=remote manager=remote state={remote['state']} "
+                f"via={service.name} service_id={remote['service_id']} readonly=true"
+            )
 
 
 @app.command("register-systemd", hidden=True)
@@ -131,6 +137,7 @@ def attach(
     mode: AttachMode = typer.Option("raw", help="Attach mode: raw packet logs or aggregate live counters."),
     interval: float = typer.Option(1.0, help="Seconds between aggregate refreshes."),
     once: bool = typer.Option(False, "--once", help="Render aggregate status once and exit."),
+    view: MonitorView = typer.Option("table", help="Aggregate view: table or graph."),
 ) -> None:
     """Attach to a service log and keep following it."""
     try:
@@ -139,7 +146,7 @@ def attach(
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     if mode == "aggregate":
-        _print_aggregate([service], interval=interval, once=once)
+        _print_aggregate([service], interval=interval, once=once, view=view)
         return
     typer.echo(f"attaching to {service.name} log={service.log_file}")
     if service.manager == "systemd":
@@ -153,6 +160,7 @@ def monitor(
     names: list[str] = typer.Argument(..., help="Service names, prefixes, or unique substrings to monitor."),
     interval: float = typer.Option(1.0, help="Seconds between refreshes."),
     once: bool = typer.Option(False, "--once", help="Render aggregate status once and exit."),
+    view: MonitorView = typer.Option("table", help="Monitor view: table or graph. Press g to toggle interactively."),
 ) -> None:
     """Monitor one or more services as continuously refreshed aggregate counters."""
     registry = ServiceRegistry()
@@ -161,7 +169,7 @@ def monitor(
     except ValueError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
-    _print_aggregate(services, interval=interval, once=once)
+    _print_aggregate(services, interval=interval, once=once, view=view)
 
 
 @app.command("close")
@@ -191,7 +199,9 @@ def _print_log(path: Path, *, follow: bool, tail: int) -> None:
         typer.echo(line)
 
 
-def _print_aggregate(services: list[ServiceRecord], *, interval: float, once: bool) -> None:
+def _print_aggregate(
+    services: list[ServiceRecord], *, interval: float, once: bool, view: MonitorView = "table"
+) -> None:
     previous: dict[str, tuple[float, int, int]] = {}
     next_cadence_request_at: dict[str, float] = {}
     human_units = True
@@ -204,6 +214,7 @@ def _print_aggregate(services: list[ServiceRecord], *, interval: float, once: bo
             for service in services:
                 if not once and now >= next_cadence_request_at.get(service.name, 0.0):
                     _request_monitor_control_cadence(service)
+                    _request_remote_status(service)
                     next_cadence_request_at[service.name] = now + MONITOR_CONTROL_REQUEST_REFRESH_SECONDS
                 service_rows = _aggregate_rows_for_service(service, previous=previous, now=now)
                 rows.extend(service_rows)
@@ -217,6 +228,7 @@ def _print_aggregate(services: list[ServiceRecord], *, interval: float, once: bo
                 speed_bits=speed_bits,
                 decimal_units=decimal_units,
                 interactive=keys.enabled and not once,
+                view=view,
             )
             if once:
                 typer.echo(output)
@@ -233,6 +245,9 @@ def _print_aggregate(services: list[ServiceRecord], *, interval: float, once: bo
                     break
                 if key == "m":
                     decimal_units = not decimal_units
+                    break
+                if key == "g":
+                    view = "graph" if view == "table" else "table"
                     break
                 if key == "q":
                     typer.echo()
@@ -255,6 +270,46 @@ def _request_monitor_control_cadence(service: ServiceRecord) -> None:
         # command yet. Monitoring counters should still work from their normal
         # status payload instead of making observability all-or-nothing.
         return
+
+
+def _request_remote_status(service: ServiceRecord) -> None:
+    """Ask a service to temporarily request read-only remote status snapshots."""
+    if service.manager == "systemd":
+        return
+    try:
+        request_service(
+            service,
+            "remote-status",
+            payload={"ttl_seconds": MONITOR_CONTROL_REQUEST_TTL_SECONDS},
+        )
+    except ServiceIpcError:
+        return
+
+
+def _learned_remote_services(service: ServiceRecord) -> list[dict[str, object]]:
+    """Return read-only service entries learned through production control metadata."""
+    if service.manager == "systemd":
+        return []
+    try:
+        status_payload = request_service(service, "status")["status"]
+    except ServiceIpcError:
+        return []
+    control_metadata = status_payload.get("control_metadata")
+    if not isinstance(control_metadata, dict):
+        return []
+    service_metadata = control_metadata.get("service_metadata")
+    if not isinstance(service_metadata, dict):
+        return []
+    rows = []
+    for service_id, remote_name in sorted(service_metadata.items(), key=lambda item: str(item[0])):
+        rows.append(
+            {
+                "name": f"remote.{service.name}.{remote_name}",
+                "service_id": service_id,
+                "state": "learned",
+            }
+        )
+    return rows
 
 
 def _aggregate_rows_for_service(
@@ -347,7 +402,7 @@ def _aggregate_rows_for_service(
             path_key = f"{service.name}::{path_name}"
             path_row = _row_from_status(
                 row_key=path_key,
-                name=f"  path:{path_name}",
+                name=f"  path {path_name}",
                 state="path",
                 status=path_status,
                 previous=previous.get(path_key),
@@ -383,7 +438,7 @@ def _remote_status_rows(
         row_key = f"{service.name}::remote::{remote_name}"
         row = _row_from_status(
             row_key=row_key,
-            name=f"  remote:{remote_name}",
+            name=f"  remote {remote_name}",
             state="remote",
             status=status,
             previous=previous.get(row_key),
@@ -409,15 +464,15 @@ def _remote_status_rows(
             path_key = f"{row_key}::{path_name}"
             path_row = _row_from_status(
                 row_key=path_key,
-                name=f"    path:{path_name}",
+                name=f"    path {path_name}",
                 state="path",
                 status=path_status,
                 previous=previous.get(path_key),
                 now=now,
-                extra=f"parent=remote:{remote_name}",
+                extra=f"parent=remote {remote_name}",
             )
             path_row["row_type"] = "path"
-            path_row["parent"] = f"remote:{remote_name}"
+            path_row["parent"] = f"remote {remote_name}"
             path_row["path"] = str(path_name)
             path_row["control_metadata"] = row["control_metadata"]
             rows.append(path_row)
@@ -489,6 +544,7 @@ def _render_aggregate_rows(
     speed_bits: bool,
     decimal_units: bool,
     interactive: bool,
+    view: MonitorView = "table",
 ) -> str:
     headers = [
         "service",
@@ -547,12 +603,18 @@ def _render_aggregate_rows(
     mode = "human units" if human_units else "raw bytes"
     speed_mode = "bit/s" if speed_bits else "byte/s"
     unit_base = "decimal" if decimal_units else "binary"
-    keys = " | h units | b speed | m base | q quit" if interactive else ""
-    title = f"Gatherlink service monitor | refreshed {refreshed_at} | {mode} | {unit_base} | speed {speed_mode}{keys}"
+    keys = " | h units | b speed | m base | g graph/table | q quit" if interactive else ""
+    title = (
+        f"Gatherlink service monitor | refreshed {refreshed_at} | view {view} | "
+        f"{mode} | {unit_base} | speed {speed_mode}{keys}"
+    )
     lines = [title, "=" * max(table_width, len(title))]
-    lines.append(" ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
-    lines.append(" ".join("-" * width for width in widths))
-    lines.extend(" ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)) for row in rendered_rows)
+    if view == "graph":
+        lines.extend(_render_dependency_graph(rows))
+    else:
+        lines.append(" ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+        lines.append(" ".join("-" * width for width in widths))
+        lines.extend(" ".join(cell.ljust(widths[index]) for index, cell in enumerate(row)) for row in rendered_rows)
     service_control = _render_service_control_rows(rows)
     if service_control:
         lines.append("")
@@ -564,6 +626,65 @@ def _render_aggregate_rows(
     lines.append("")
     lines.extend(_aggregate_legend())
     return "\n".join(lines) + "\n"
+
+
+def _render_dependency_graph(rows: list[dict[str, object]]) -> list[str]:
+    """Render service, remote-status, and path relationships as an operator tree."""
+    if not rows:
+        return ["dependency graph", "(no services)"]
+    children: dict[str, list[dict[str, object]]] = {}
+    roots: list[dict[str, object]] = []
+    by_service: dict[str, dict[str, object]] = {}
+    for row in rows:
+        service = str(row.get("service") or "")
+        if service:
+            by_service[service] = row
+    for row in rows:
+        parent = str(row.get("parent") or "")
+        if parent and parent in by_service:
+            children.setdefault(parent, []).append(row)
+        else:
+            roots.append(row)
+
+    lines = ["dependency graph"]
+    seen: set[str] = set()
+    for row in roots:
+        lines.extend(_render_graph_branch(row, children, prefix="", branch="", seen=seen))
+    return lines
+
+
+def _render_graph_branch(
+    row: dict[str, object],
+    children: dict[str, list[dict[str, object]]],
+    *,
+    prefix: str,
+    branch: str,
+    seen: set[str],
+) -> list[str]:
+    service = str(row.get("service") or "")
+    row_key = str(row.get("row_key") or service)
+    if row_key in seen:
+        return [f"{prefix}{service} [cycle]"]
+    seen.add(row_key)
+    state = str(row.get("state") or "-")
+    context = _truncate(str(row.get("extra") or ""), DETAIL_CTRL_WIDTH)
+    label = f"{service} [{state}]"
+    if context:
+        label += f" {context}"
+    lines = [f"{prefix}{branch}{label}"]
+    child_rows = children.get(service, [])
+    for index, child in enumerate(child_rows):
+        is_last = index == len(child_rows) - 1
+        lines.extend(
+            _render_graph_branch(
+                child,
+                children,
+                prefix=f"{prefix}{'   ' if branch == '`- ' else '|  ' if branch == '|- ' else ''}",
+                branch="`- " if is_last else "|- ",
+                seen=seen,
+            )
+        )
+    return lines
 
 
 def _render_service_control_rows(rows: list[dict[str, object]]) -> list[str]:
@@ -608,7 +729,7 @@ def _render_path_control_rows(rows: list[dict[str, object]]) -> list[str]:
 def _path_control_cells(row: dict[str, object]) -> list[str]:
     metadata = row.get("control_metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
-    path_name = str(row.get("path") or str(row["service"]).removeprefix("  path:"))
+    path_name = str(row.get("path") or str(row["service"]).strip().removeprefix("path "))
     tx, rx = _path_control_counters(metadata, path_name)
     return [
         str(row.get("parent") or ""),
@@ -698,6 +819,15 @@ def _bit_units(decimal_units: bool) -> list[str]:
 
 
 def _status_context(status: dict[str, object]) -> str:
+    if status.get("kind") == "relay":
+        context = f"relay listen={status.get('listen', '-')}"
+        if status.get("next_hop"):
+            context += f" next={status['next_hop']}"
+        if status.get("direction"):
+            context += f" dir={status['direction']}"
+        if status.get("exit_to_inner_packet"):
+            context += " exit=inner"
+        return context
     if status.get("target"):
         return f"target={status['target']}"
     if status.get("listen"):
@@ -1042,6 +1172,7 @@ def _aggregate_legend() -> list[str]:
         "  txp/rxp  packets transmitted/received from this service or path's local point of view",
         "  txB/rxB  payload bytes transmitted/received; press m to toggle binary/decimal human units",
         "  tx/s rx/s sampled rates; b toggles bit/s vs byte/s, m toggles Kibit/Mibit vs Kbit/Mbit",
+        "  graph    press g in interactive monitor mode to toggle between table and dependency graph views",
         "  miss     missed packets; lab path rows include qdisc drops and receiver missing-sequence facts",
         "  xdup     expected fanout duplicates suppressed before application UDP emit",
         "  dup      unexpected duplicate user-service frames suppressed before application UDP emit",

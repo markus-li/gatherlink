@@ -67,4 +67,4 @@ Do not implement before:
 - real traces exist
 - replayable scenarios exist
 
-This is a future optimization layer, not v1.
+This is a future optimization layer, not v0.9.

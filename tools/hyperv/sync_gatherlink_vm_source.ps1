@@ -1,11 +1,12 @@
 param(
-    [ValidateSet("gatherlink-vm-a", "gatherlink-vm-b")]
-    [string[]] $Name = @("gatherlink-vm-a", "gatherlink-vm-b"),
-    [string] $Branch = "project-orientation",
+    [ValidateSet("gatherlink-vm-a", "gatherlink-vm-b", "gatherlink-vm-c")]
+    [string[]] $Name = @("gatherlink-vm-a", "gatherlink-vm-b", "gatherlink-vm-c"),
+    [string] $Branch = "main",
     [string] $WslDistro = "gatherlink-dev",
-    [string] $WslRepo = "/home/markus/src/gatherlink",
+    [string] $WslRepo = "/home/gatherlink-user/src/gatherlink",
     [string] $HostKeyA = "",
     [string] $HostKeyB = "",
+    [string] $HostKeyC = "",
     [switch] $Install
 )
 
@@ -15,6 +16,7 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $hostKeys = @{
     "gatherlink-vm-a" = $HostKeyA
     "gatherlink-vm-b" = $HostKeyB
+    "gatherlink-vm-c" = $HostKeyC
 }
 
 function Invoke-GatherlinkVm {
@@ -38,7 +40,7 @@ function Invoke-GatherlinkVm {
 foreach ($vmName in $Name) {
     $hostKey = $hostKeys[$vmName]
     if (-not $hostKey) {
-        throw "Provide -HostKeyA or -HostKeyB for unattended sync of ${vmName}."
+        throw "Provide the matching -HostKeyA, -HostKeyB, or -HostKeyC for unattended sync of ${vmName}."
     }
 
     $ip = & (Join-Path $scriptRoot "resolve_gatherlink_vm.ps1") -Name $vmName

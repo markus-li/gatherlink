@@ -4,7 +4,7 @@
 
 The TCP forwarding helper provides simple one-to-one TCP port forwarding over
 Gatherlink. It is an active helper priority and remains Python/control-plane
-owned for the MVP.
+owned for v0.9.
 
 Example:
 
@@ -58,6 +58,10 @@ Implemented first slice:
 - `tools/hyperv/run_socks5_vm_acceptance.sh` also starts `tcp-forward` and
   proves a VM A HTTP client can reach the VM B status HTTP helper through the
   Gatherlink tunnel and companion stream exit
+- acceptance and production configs should allocate TCP forwarding its own
+  helper-facing Gatherlink UDP service port. Sharing one
+  `learned-single-source` service with another helper makes reply ownership
+  ambiguous and is not a supported operational shape.
 
 ## Transport Model
 

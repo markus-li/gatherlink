@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${SCRIPT_DIR}/vm_ip_cache.sh"
 
 PLINK="${PLINK:-/mnt/c/Progra~1/PuTTY/plink.exe}"
 BRANCH="$(cd "${REPO_ROOT}" && git rev-parse --abbrev-ref HEAD)"
@@ -99,14 +100,8 @@ record() {
   printf -- '- %s\n' "$1" | tee -a "${REPORT}"
 }
 
-resolve_vm_ip() {
-  local helper_windows
-  helper_windows="$(wslpath -w "${SCRIPT_DIR}/resolve_gatherlink_vm.ps1")"
-  powershell.exe -ExecutionPolicy Bypass -File "${helper_windows}" -Name "$1" | tr -d '\r'
-}
-
-if [[ -z "${IP_A}" ]]; then IP_A="$(resolve_vm_ip "${VM_A}")"; fi
-if [[ -z "${IP_B}" ]]; then IP_B="$(resolve_vm_ip "${VM_B}")"; fi
+IP_A="$(hyperv_resolve_vm_ip "${REPO_ROOT}" "${SCRIPT_DIR}" "${VM_A}" "${IP_A}")"
+IP_B="$(hyperv_resolve_vm_ip "${REPO_ROOT}" "${SCRIPT_DIR}" "${VM_B}" "${IP_B}")"
 
 remote() {
   local label="$1"
@@ -141,8 +136,8 @@ sync_node() {
 }
 
 cleanup() {
-  remote_a "cleanup-a" "cd /home/gatherlink/src/gatherlink && (.venv/bin/gatherlink services close socks5.vm.node-a || true); pkill -f '[h]elpers socks5-serve' || true; pkill -f '[h]elpers tcp-forward' || true"
-  remote_b "cleanup-b" "cd /home/gatherlink/src/gatherlink && (.venv/bin/gatherlink services close socks5.vm.node-b || true); pkill -f '[h]elpers stream-exit' || true; pkill -f '[h]elpers status-http' || true"
+  remote_a "cleanup-a" "cd /home/gatherlink/src/gatherlink && (.venv/bin/gatherlink services close socks5.vm.node-a >/dev/null 2>&1 || true); pkill -f '[h]elpers socks5-serve' || true; pkill -f '[h]elpers tcp-forward' || true"
+  remote_b "cleanup-b" "cd /home/gatherlink/src/gatherlink && (.venv/bin/gatherlink services close socks5.vm.node-b >/dev/null 2>&1 || true); pkill -f '[h]elpers stream-exit' || true; pkill -f '[h]elpers status-http' || true"
 }
 
 trap cleanup EXIT
@@ -170,13 +165,31 @@ remote_a "write-node-a-config" "cd /home/gatherlink/src/gatherlink && .venv/bin/
 import json
 from pathlib import Path
 cfg = json.loads(Path('configs/hyperv/two-vm-node-a.json').read_text())
-cfg['services'][0]['return_mode'] = 'learned-single-source'
+base = cfg['services'][0]
+base['name'] = 'stream-socks5'
+base['return_mode'] = 'learned-single-source'
+tcp_forward = dict(base)
+tcp_forward['name'] = 'stream-tcp-forward'
+tcp_forward['listen'] = '127.0.0.1:55181'
+cfg['services'] = [base, tcp_forward]
 Path('/tmp/socks5-node-a.json').write_text(json.dumps(cfg, indent=2, sort_keys=True))
 PY"
-remote_b "write-node-b-config" "cd /home/gatherlink/src/gatherlink && cp configs/hyperv/two-vm-node-b.json /tmp/socks5-node-b.json"
+remote_b "write-node-b-config" "cd /home/gatherlink/src/gatherlink && .venv/bin/python - <<'PY'
+import json
+from pathlib import Path
+cfg = json.loads(Path('configs/hyperv/two-vm-node-b.json').read_text())
+base = cfg['services'][0]
+base['name'] = 'stream-socks5'
+base['listen'] = '127.0.0.1:55190'
+tcp_forward = dict(base)
+tcp_forward['name'] = 'stream-tcp-forward'
+tcp_forward['listen'] = '127.0.0.1:55191'
+cfg['services'] = [base, tcp_forward]
+Path('/tmp/socks5-node-b.json').write_text(json.dumps(cfg, indent=2, sort_keys=True))
+PY"
 remote_a "validate-node-a" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink config validate /tmp/socks5-node-a.json"
 remote_b "validate-node-b" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink config validate /tmp/socks5-node-b.json"
-record "generated VM configs validate; node A uses learned-single-source replies for the SOCKS helper stream"
+record "generated VM configs validate; SOCKS5 and TCP forward use separate Gatherlink service ports"
 
 step "Start"
 cleanup
@@ -186,8 +199,10 @@ remote_b "start-node-b" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherl
 sleep 1
 remote_a "start-node-a" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run start /tmp/socks5-node-a.json --name socks5.vm.node-a --diagnostics-jsonl /tmp/socks5-node-a.jsonl"
 sleep 2
+remote_b "status-node-b-started" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services status socks5.vm.node-b >/tmp/socks5-node-b-start-status.json"
+remote_a "status-node-a-started" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services status socks5.vm.node-a >/tmp/socks5-node-a-start-status.json"
 remote_a "start-socks5" "cd /home/gatherlink/src/gatherlink && (nohup .venv/bin/gatherlink helpers socks5-serve --listen 127.0.0.1:1081 --allow-host 127.0.0.1 --allow-port 18081 --gatherlink-service 127.0.0.1:55180 --diagnostics-jsonl /tmp/socks5-helper.jsonl >/tmp/socks5-helper.log 2>&1 </dev/null & echo \$! >/tmp/socks5-helper.pid)"
-remote_a "start-tcp-forward" "cd /home/gatherlink/src/gatherlink && (nohup .venv/bin/gatherlink helpers tcp-forward --listen 127.0.0.1:18082 --target 127.0.0.1:18081 --gatherlink-service 127.0.0.1:55180 --diagnostics-jsonl /tmp/tcp-forward-helper.jsonl >/tmp/tcp-forward-helper.log 2>&1 </dev/null & echo \$! >/tmp/tcp-forward-helper.pid)"
+remote_a "start-tcp-forward" "cd /home/gatherlink/src/gatherlink && (nohup .venv/bin/gatherlink helpers tcp-forward --listen 127.0.0.1:18082 --target 127.0.0.1:18081 --gatherlink-service 127.0.0.1:55181 --diagnostics-jsonl /tmp/tcp-forward-helper.jsonl >/tmp/tcp-forward-helper.log 2>&1 </dev/null & echo \$! >/tmp/tcp-forward-helper.pid)"
 sleep 1
 record "status HTTP, stream exit, both core services, SOCKS5 helper, and TCP forward helper started"
 

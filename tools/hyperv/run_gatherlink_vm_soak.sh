@@ -14,7 +14,7 @@ usage() {
   cat <<'USAGE'
 Usage: run_gatherlink_vm_soak.sh --host-key-a KEY --host-key-b KEY [options]
 
-Prepares the v1 Hyper-V two-VM soak command. The default is a one-hour run
+Prepares the v0.9 Hyper-V two-VM soak command. The default is a one-hour run
 through the normal Hyper-V VM acceptance runner, using managed services, real
 per-path UDP sockets, diagnostics capture, and cleanup.
 

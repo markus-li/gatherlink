@@ -1,10 +1,10 @@
 """
-Debian compatibility backend for Gatherlink v1.
+Debian compatibility backend for Gatherlink v0.9.
 
 Python owns platform integration: process management, operator commands, lab
 network setup, diagnostics collection, and filesystem layout. Keeping those
 calls behind this backend prevents OS-specific details from leaking into helper
-or runtime policy code while v1 intentionally supports Debian only.
+or runtime policy code while v0.9 intentionally supports Debian only.
 """
 
 from __future__ import annotations
@@ -125,25 +125,25 @@ class DebianCompatibilityBackend:
 
     @property
     def config_dir(self) -> Path:
-        """Return the Debian static config directory for v1."""
+        """Return the Debian static config directory for the current release."""
         return DEBIAN_CONFIG_DIR
 
     @property
     def state_dir(self) -> Path:
-        """Return the Debian persistent state/cache directory for v1."""
+        """Return the Debian persistent state/cache directory for the current release."""
         return DEBIAN_STATE_DIR
 
     @property
     def runtime_dir(self) -> Path:
-        """Return the Debian volatile runtime directory for v1."""
+        """Return the Debian volatile runtime directory for the current release."""
         return DEBIAN_RUNTIME_DIR
 
     @property
     def log_dir(self) -> Path:
-        """Return the Debian local log/event directory for v1."""
+        """Return the Debian local log/event directory for the current release."""
         return DEBIAN_LOG_DIR
 
 
 def default_debian_backend(*, runner: CommandRunner | None = None) -> DebianCompatibilityBackend:
-    """Return the Debian backend used by v1 control-plane code."""
+    """Return the Debian backend used by current-release control-plane code."""
     return DebianCompatibilityBackend(runner=runner)

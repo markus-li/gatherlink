@@ -91,7 +91,7 @@ turning helpers into core protocol features.
 | `dns.dnssec_bogus` | DNSSEC policy rejected answer | upstream AD bit or validation policy |
 
 Direct DNS upstreams run now. Gatherlink-tunnel DNS upstream execution remains a
-v1 follow-up until implemented and VM-proven.
+v0.9 follow-up until implemented and VM-proven.
 
 ## Reading JSONL
 

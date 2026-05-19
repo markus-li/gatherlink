@@ -112,6 +112,33 @@ def test_service_ids_must_be_user_range_and_unique() -> None:
         )
 
 
+def test_security_sessions_must_have_unique_local_receiver_indexes() -> None:
+    key = "ERERERERERERERERERERERERERERERERERERERERERE="
+    with pytest.raises(ValueError, match="local_receiver_index values must be unique"):
+        GatherlinkConfig(
+            schema_version=1,
+            role="server",
+            services=[{"name": "udp-main", "target": "127.0.0.1:1"}],
+            security={
+                "mode": "static",
+                "sessions": [
+                    {
+                        "local_receiver_index": 201,
+                        "remote_receiver_index": 101,
+                        "send_key": key,
+                        "receive_key": key,
+                    },
+                    {
+                        "local_receiver_index": 201,
+                        "remote_receiver_index": 102,
+                        "send_key": key,
+                        "receive_key": key,
+                    },
+                ],
+            },
+        )
+
+
 def test_config_detect_cli_prints_format() -> None:
     result = CliRunner().invoke(app, ["config", "detect", str(EXAMPLES / "wireguard-client.json")])
 
@@ -283,3 +310,8 @@ def test_service_return_mode_expands_into_runtime_contract() -> None:
     runtime = expand_config(validate_config_dict(data))
 
     assert runtime.services[0].return_mode == "learned-single-source"
+
+    data["services"][0]["return_mode"] = "peer-scoped-source"
+    runtime = expand_config(validate_config_dict(data))
+
+    assert runtime.services[0].return_mode == "peer-scoped-source"

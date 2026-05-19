@@ -7,8 +7,9 @@ from threading import Event
 import pytest
 from gatherlink.config.expansion import expand_config
 from gatherlink.config.models import GatherlinkConfig, PathConfig, ServiceConfig
+from gatherlink.control.remote_status import encode_request
 from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
-from gatherlink.protocol import SERVICE_ID_CONTROL_METADATA, encode_control_payload
+from gatherlink.protocol import SERVICE_ID_CONTROL_METADATA, SERVICE_ID_REMOTE_STATUS, encode_control_payload
 from gatherlink.runtime.runner import CoreRunnerState, run_core_service
 
 
@@ -24,6 +25,7 @@ class FakeDataplane:
     def __init__(self) -> None:
         self.calls = 0
         self.blocking_calls = 0
+        self.transmitted_payloads: list[tuple[int, bytes]] = []
 
     def forward_available_for_service(self, service_name: str, batch_size: int):
         self.blocking_calls += 1
@@ -47,6 +49,10 @@ class FakeDataplane:
             "control_metadata": {"sent": {"frames": 1, "bytes": 32}},
             "disabled_services": {},
         }
+
+    def transmit_service_payload(self, service_id: int, payload: bytes) -> int:
+        self.transmitted_payloads.append((service_id, payload))
+        return 1
 
 
 class FakeReservedEvent:
@@ -97,6 +103,21 @@ class FakeControlDataplane(FakeDataplane):
 
     def disable_service(self, service_id: int, reason: str) -> None:
         self.disabled_services.append((service_id, reason))
+
+    def set_service_scheduler(self, service_id: int, fanout: int, fanout_below_bytes: int) -> None:
+        self.scheduler_policies.append((service_id, fanout, fanout_below_bytes))
+
+
+class FakeRemoteStatusDataplane(FakeDataplane):
+    def __init__(self) -> None:
+        super().__init__()
+        self.scheduler_policies: list[tuple[int, int, int]] = []
+        self._reserved_events = [FakeReservedEvent(SERVICE_ID_REMOTE_STATUS, 1, 20, encode_request(7))]
+
+    def drain_reserved_service_events(self):
+        events = self._reserved_events
+        self._reserved_events = []
+        return events
 
     def set_service_scheduler(self, service_id: int, fanout: int, fanout_below_bytes: int) -> None:
         self.scheduler_policies.append((service_id, fanout, fanout_below_bytes))
@@ -241,13 +262,37 @@ def test_core_runner_drains_python_reserved_services_and_applies_policy() -> Non
     status = state.snapshot()
 
     assert dataplane.disabled_services == [(256, "peer disabled test service")]
-    assert dataplane.scheduler_policies == [(256, 2, 96)]
+    assert dataplane.scheduler_policies == [(1, 0, 0), (8, 1, 0), (256, 2, 96)]
     assert status["control_metadata"]["received"]["frames"] == 1
     assert status["control_metadata"]["service_disables"]["256"] == "peer disabled test service"
     assert status["control_metadata"]["service_scheduler_policies"]["256"] == {
         "fanout": 2,
         "fanout_below_bytes": 96,
     }
+
+
+def test_core_runner_handles_remote_status_requests_in_production_path() -> None:
+    dataplane = FakeRemoteStatusDataplane()
+    state = CoreRunnerState(
+        node="local",
+        security_mode="none",
+        service_names=["udp-main"],
+        stop_event=Event(),
+    )
+
+    run_core_service(
+        _runtime_config(),
+        dataplane_factory=lambda _runtime_config: dataplane,
+        max_iterations=1,
+        batch_size=8,
+        runner_state=state,
+    )
+
+    remote_status_payloads = [
+        payload for service_id, payload in dataplane.transmitted_payloads if service_id == SERVICE_ID_REMOTE_STATUS
+    ]
+    assert remote_status_payloads
+    assert b'"type":"status_response"' in remote_status_payloads[-1]
 
 
 def test_core_runner_runs_scheduler_reapply_loop_from_status(monkeypatch) -> None:

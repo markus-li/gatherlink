@@ -1,7 +1,9 @@
 param(
+    [ValidateSet("gatherlink-vm-a", "gatherlink-vm-b", "gatherlink-vm-c")]
+    [string[]] $Name = @("gatherlink-vm-a", "gatherlink-vm-b", "gatherlink-vm-c"),
     [string] $VmRoot = "D:\hyper-v\gatherlink",
     [string] $IsoPath = "",
-    [string] $InternetSwitchName = "External Network"
+    [string] $InternetSwitchName = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,6 +18,11 @@ $VmSpecs = @(
         Name = "gatherlink-vm-b"
         MacBase = "00155D9200"
         PathIpNote = "path-a=10.91.1.12/24 path-b=10.91.2.12/24 path-c=10.91.3.12/24"
+    },
+    @{
+        Name = "gatherlink-vm-c"
+        MacBase = "00155D9300"
+        PathIpNote = "path-a=10.91.1.13/24 path-b=10.91.2.13/24 path-c=10.91.3.13/24"
     }
 )
 
@@ -24,6 +31,23 @@ $PathSwitches = @(
     @{ AdapterName = "path-b"; SwitchName = "gatherlink-path-b"; MacSuffix = "B1" },
     @{ AdapterName = "path-c"; SwitchName = "gatherlink-path-c"; MacSuffix = "C1" }
 )
+
+$SelectedVmSpecs = $VmSpecs | Where-Object { $Name -contains $_.Name }
+
+if (-not $InternetSwitchName) {
+    $existingInternetAdapter = Get-VMNetworkAdapter -VMName "gatherlink-vm-a" -Name "internet" -ErrorAction SilentlyContinue
+    if ($existingInternetAdapter -and $existingInternetAdapter.SwitchName) {
+        $InternetSwitchName = $existingInternetAdapter.SwitchName
+    } elseif (Get-VMSwitch -Name "External Network" -ErrorAction SilentlyContinue) {
+        $InternetSwitchName = "External Network"
+    } elseif (Get-VMSwitch -Name "Default Switch" -ErrorAction SilentlyContinue) {
+        $InternetSwitchName = "Default Switch"
+    }
+}
+
+if (-not $InternetSwitchName) {
+    throw "No internet/management Hyper-V switch was selected. Pass -InternetSwitchName with an existing switch name."
+}
 
 if (-not $IsoPath) {
     $iso = Get-ChildItem -LiteralPath "D:\media\debian" -Filter "debian-*-amd64-netinst.iso" -ErrorAction SilentlyContinue |
@@ -46,7 +70,7 @@ foreach ($switchName in @($InternetSwitchName, "gatherlink-path-a", "gatherlink-
 
 New-Item -ItemType Directory -Force -Path $VmRoot | Out-Null
 
-foreach ($spec in $VmSpecs) {
+foreach ($spec in $SelectedVmSpecs) {
     $vmName = $spec.Name
     if (Get-VM -Name $vmName -ErrorAction SilentlyContinue) {
         Write-Host "reused existing VM $vmName"
@@ -83,11 +107,12 @@ foreach ($spec in $VmSpecs) {
     Write-Host "created VM $vmName ($($spec.PathIpNote))"
 }
 
-Get-VM -Name gatherlink-vm-a,gatherlink-vm-b |
+$SelectedVmSpecs.Name |
+    ForEach-Object { Get-VM -Name $_ } |
     Select-Object Name, State, Generation, ProcessorCount, MemoryStartup, CheckpointType, Path |
     Format-Table -AutoSize
 
-foreach ($vmName in @("gatherlink-vm-a", "gatherlink-vm-b")) {
+foreach ($vmName in $SelectedVmSpecs.Name) {
     Write-Host ""
     Write-Host "network adapters for $vmName"
     Get-VMNetworkAdapter -VMName $vmName |

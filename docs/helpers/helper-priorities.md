@@ -58,7 +58,7 @@ First scope:
 
 - local resolver endpoint
 - cache and serve-stale behavior
-- upstream policy that can use direct and Gatherlink-tunnel choices for v1
+- upstream policy that can use direct and Gatherlink-tunnel choices for v0.9
 - DoH policy shape only; DoH execution remains later unless promoted
 - diagnostics for upstream choice, cache state, and validation failures
 
@@ -70,12 +70,12 @@ Not-yet scope:
 
 ### 3. SOCKS5 Helper
 
-The SOCKS5 helper is Python-owned for the MVP. Use a maintained Python SOCKS5
+The SOCKS5 helper is Python-owned for v0.9. Use a maintained Python SOCKS5
 server library where practical. The selected candidate is
 `asyncio-socks-server`, because it is a SOCKS5 server library with asyncio
 support and hook points suitable for integrating Gatherlink forwarding.
 
-MVP protocol scope is SOCKS5 TCP CONNECT. SOCKS5 UDP ASSOCIATE is deferred.
+V0.9 protocol scope is SOCKS5 TCP CONNECT. SOCKS5 UDP ASSOCIATE is deferred.
 When this document says SOCKS5 traffic travels "through UDP", it means the
 helper carries proxy traffic over Gatherlink's UDP service transport to a
 companion remote exit helper. It does not mean SOCKS5 UDP ASSOCIATE is part of
@@ -218,7 +218,7 @@ Not-yet scope:
 - implemented write operations
 - replacing the CLI
 - stable public API guarantees
-- browser UI as part of v1
+- browser UI as part of v0.9
 - long-lived write access
 
 ## Deferred Helpers

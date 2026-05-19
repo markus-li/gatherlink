@@ -31,3 +31,37 @@ def test_windows_two_node_configs_and_acceptance_script_cover_three_paths() -> N
         assert path_name in script
     assert "diagnostics.jsonl" in script
     assert "services close" in script
+
+
+def test_shared_sink_example_documents_multi_session_peer_scoped_return() -> None:
+    config = validate_config_file(REPO_ROOT / "configs/examples/shared-sink-server.json")
+
+    assert config.security.sessions
+    assert len({session.local_receiver_index for session in config.security.sessions}) == len(config.security.sessions)
+    assert all(session.services == ["udp-main"] for session in config.security.sessions)
+    assert config.services[0].return_mode == "peer-scoped-source"
+
+
+def test_windows_shared_sink_examples_cover_two_sources_one_sink_port() -> None:
+    source_a = validate_config_file(REPO_ROOT / "configs/examples/windows-shared-sink-source-a.json")
+    source_b = validate_config_file(REPO_ROOT / "configs/examples/windows-shared-sink-source-b.json")
+    sink = validate_config_file(REPO_ROOT / "configs/examples/windows-shared-sink-server.json")
+    setup_script = (REPO_ROOT / "tools/setup_wsl_private_lan.ps1").read_text(encoding="utf-8")
+
+    assert source_a.services[0].listen == "10.88.0.11:55180"
+    assert source_b.services[0].listen == "10.88.0.13:55180"
+    assert source_a.services[0].return_mode == "learned-single-source"
+    assert source_b.services[0].return_mode == "learned-single-source"
+    assert sink.services[0].return_mode == "peer-scoped-source"
+    assert [path.transport_bind for path in sink.paths] == [
+        "10.88.1.12:57001",
+        "10.88.2.12:57002",
+        "10.88.3.12:57003",
+    ]
+    assert [path.transport_remote for path in sink.paths] == [None, None, None]
+    assert source_a.paths[0].transport_remote == sink.paths[0].transport_bind
+    assert source_b.paths[0].transport_remote == sink.paths[0].transport_bind
+    assert {session.local_receiver_index for session in sink.security.sessions} == {201, 202}
+    assert all(session.services == ["udp-main"] for session in sink.security.sessions)
+    for address in ["10.88.0.13", "10.88.1.13", "10.88.2.13", "10.88.3.13"]:
+        assert address in setup_script

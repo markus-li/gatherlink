@@ -40,7 +40,7 @@ SchedulerPolicy = Literal[
     "adaptive",
 ]
 ServicePriority = Literal["bulk", "normal", "high", "critical"]
-ServiceReturnMode = Literal["fixed", "learned-single-source"]
+ServiceReturnMode = Literal["fixed", "learned-single-source", "peer-scoped-source"]
 DnsUpstreamKind = Literal["direct", "tunnel", "doh"]
 RESERVED_SERVICE_ID_END = 255
 USER_SERVICE_ID_START = RESERVED_SERVICE_ID_END + 1
@@ -66,6 +66,28 @@ class PathSchedulerConfig(GatherlinkBaseModel):
     max_in_flight_bytes: int = Field(default=0, ge=0)
 
 
+class PathRelayHopConfig(GatherlinkBaseModel):
+    """Optional outer relay-hop wrapping facts for one path."""
+
+    # TODO(relay-provisioning): This is a low-level compiled shape for manual
+    # VM acceptance and early signed-topology output. Normal configs should
+    # receive these facts from Python provisioning rather than hand-authored
+    # base64 keys.
+    relay_receiver_index: int = Field(ge=0, le=2**32 - 1)
+    send_key: str
+
+    @model_validator(mode="after")
+    def validate_relay_key(self) -> PathRelayHopConfig:
+        """Ensure relay-hop key material is present and exactly one AEAD key."""
+        try:
+            decoded = b64decode(self.send_key, validate=True)
+        except ValueError as exc:
+            raise ValueError("path relay send_key must be base64") from exc
+        if len(decoded) != 32:
+            raise ValueError("path relay send_key must decode to 32 bytes")
+        return self
+
+
 class SchedulerConfig(GatherlinkBaseModel):
     """User-visible scheduler policy selected by Python and executed by Rust."""
 
@@ -88,6 +110,7 @@ class PathConfig(GatherlinkBaseModel):
     transport_bind: str | None = None
     transport_remote: str | None = None
     scheduler: PathSchedulerConfig = Field(default_factory=PathSchedulerConfig)
+    relay: PathRelayHopConfig | None = None
 
 
 class ServiceConfig(GatherlinkBaseModel):
@@ -108,16 +131,44 @@ class ServiceConfig(GatherlinkBaseModel):
     # applies to every payload; otherwise larger payloads use one scheduled path.
     scheduler_fanout: int = Field(default=1, ge=0, le=65535)
     scheduler_fanout_below_bytes: int = Field(default=0, ge=0)
-    # TODO(service-return-policy): Fixed return ports are the production shape
-    # and match WireGuard/helper usage. The learned mode exists for simple UDP
-    # tools and early manual tests, not as a general UDP NAT/VPN feature.
+    # TODO(service-return-policy): Fixed return ports are the common production
+    # shape. The peer-scoped mode is for server-like helpers, including
+    # WireGuard, that need one local app-facing UDP source per authenticated
+    # Gatherlink peer. The learned mode exists for simple UDP tools and early
+    # manual tests, not as a general UDP NAT/VPN feature.
     return_mode: ServiceReturnMode = "fixed"
+
+
+class SecuritySessionConfig(GatherlinkBaseModel):
+    """One explicit peer session for shared sink carrier sockets."""
+
+    # TODO(shared-sink-provisioning): Prefer signed/authenticated provisioning
+    # to hand-authored static sessions. Explicit static sessions remain useful
+    # for labs that prove several authenticated peers can share one sink port.
+    name: str | None = None
+    local_receiver_index: int = Field(ge=0, le=2**32 - 1)
+    remote_receiver_index: int = Field(ge=0, le=2**32 - 1)
+    send_key: str
+    receive_key: str
+    services: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_session_keys(self) -> SecuritySessionConfig:
+        """Ensure explicit static session keys are complete and well sized."""
+        for field_name, value in {"send_key": self.send_key, "receive_key": self.receive_key}.items():
+            try:
+                decoded = b64decode(value, validate=True)
+            except ValueError as exc:
+                raise ValueError(f"security.sessions[].{field_name} must be base64") from exc
+            if len(decoded) != 32:
+                raise ValueError(f"security.sessions[].{field_name} must decode to 32 bytes")
+        return self
 
 
 class SecurityConfig(GatherlinkBaseModel):
     """Transport security mode selected by the Python control plane."""
 
-    # Noise IK provisioning is the normal v1 path for producing authenticated
+    # Noise IK provisioning is the normal v0.9 path for producing authenticated
     # config-facing AEAD facts. Python verifies identities and compiles
     # short-lived session material; Rust only executes those facts at packet
     # rate. Static remains explicit lab/manual provisioning.
@@ -127,11 +178,17 @@ class SecurityConfig(GatherlinkBaseModel):
     remote_receiver_index: int | None = Field(default=None, ge=0, le=2**32 - 1)
     send_key: str | None = None
     receive_key: str | None = None
+    sessions: list[SecuritySessionConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_security_material(self) -> SecurityConfig:
         """Ensure explicit static crypto material is complete and well sized."""
         if self.mode == "none":
+            return self
+        if self.sessions:
+            receiver_indexes = [session.local_receiver_index for session in self.sessions]
+            if len(set(receiver_indexes)) != len(receiver_indexes):
+                raise ValueError("security.sessions local_receiver_index values must be unique")
             return self
         if self.send_key is None or self.receive_key is None:
             raise ValueError(f"security.mode={self.mode} requires send_key and receive_key")
@@ -235,7 +292,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
     # These maps keep example input formats explicit. The detector in validation.py
     # only chooses a source format; this canonical model still performs the real
     # normalization and cross-field validation for every input path.
-    # TODO: Add schema_version migration before accepting persisted appliance configs.
+    # TODO(config-schema-migration): Add schema_version migration before accepting persisted appliance configs.
     # Version 1 is intentionally explicit in all examples so upgrades never depend
     # on guessing what a versionless file meant.
     __field_maps__: ClassVar = {
@@ -344,5 +401,11 @@ class GatherlinkConfig(GatherlinkBaseModel):
             raise ValueError("socks5 helper service must reference an existing service")
         if self.helpers.tcp_forward and self.helpers.tcp_forward.service not in service_names:
             raise ValueError("tcp_forward helper service must reference an existing service")
+        for session in self.security.sessions:
+            unknown_services = sorted(set(session.services) - service_names)
+            if unknown_services:
+                raise ValueError(
+                    "security session services must reference existing services: " + ", ".join(unknown_services)
+                )
 
         return self

@@ -1,4 +1,4 @@
-# Hyper-V Two-VM Gatherlink Lab
+# Hyper-V Gatherlink VM Lab
 
 This document records the Gatherlink-specific Hyper-V lab shape. It does not
 cover how to enable Hyper-V, install the Hyper-V PowerShell module, or prepare
@@ -7,10 +7,11 @@ Debian installation documentation for those generic steps.
 
 ## VM Shape
 
-Use two Debian VMs:
+Use three Debian VMs:
 
 - `gatherlink-vm-a`
 - `gatherlink-vm-b`
+- `gatherlink-vm-c`
 
 Agreed VM settings:
 
@@ -19,11 +20,12 @@ Agreed VM settings:
 - 4 GB RAM
 - dynamic memory disabled for repeatable network tests
 - 48 GB dynamically expanding VHDX
-- VM storage rooted under `D:\hyper-v\gatherlink\`
+- VM storage rooted under an operator-chosen host-local directory outside Git
 - checkpoints only when intentionally taking a manual restore point
 
 The VHDX files are dynamic, so they do not reserve the full 48 GB on the host
-drive up front.
+drive up front. Do not treat any local path used during one lab run as a
+canonical project path.
 
 ## Hyper-V Switches
 
@@ -45,26 +47,43 @@ Run that from an elevated PowerShell prompt at the repository root. The script
 only creates/reuses the three Gatherlink private switches and verifies that the
 existing `External Network` switch is present.
 
+`create_gatherlink_vms.ps1` can also reuse the internet switch from
+`gatherlink-vm-a` when adding VM C to an existing lab. If no existing A adapter
+is available, pass `-InternetSwitchName` explicitly with the management switch
+name for this host.
+
 ## Debian Install Media
 
 The manual installer path uses Debian amd64 netinst media. Download the current
 Debian stable netinst ISO with:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\tools\hyperv\download_debian_netinst.ps1
+$ImageDirectory = "X:\path\to\debian-media"
+powershell.exe -ExecutionPolicy Bypass `
+  -File .\tools\hyperv\download_debian_netinst.ps1 `
+  -DestinationDirectory $ImageDirectory
 ```
 
-The script stores the ISO under `D:\media\debian\`. It intentionally uses the
-official Debian `current` netinst index instead of pinning a version in this
-repo.
+The script stores the ISO under the configured host-local image directory. It
+intentionally uses the official Debian `current` netinst index instead of
+pinning a version in this repo.
 
 The repeatable lab path uses the official Debian generic cloud image plus a
 NoCloud seed ISO. That seed creates the `gatherlink` user, injects an operator
-provided SSH public key, and configures the three static path NICs. Keep the
+provided SSH public key, installs the Python/Rust build tools used by the
+Gatherlink PyO3 dataplane, and configures the three static path NICs. Keep the
 public key in a host-local file outside Git, then run:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\tools\hyperv\prepare_gatherlink_cloud_vms.ps1 -PublicKeyPath C:\path\to\authorized_key.pub
+$VmRoot = "X:\path\to\gatherlink-vms"
+$ImageDirectory = "X:\path\to\debian-media"
+$PublicKeyPath = "X:\path\to\authorized_key.pub"
+powershell.exe -ExecutionPolicy Bypass `
+  -File .\tools\hyperv\prepare_gatherlink_cloud_vms.ps1 `
+  -Name gatherlink-vm-a,gatherlink-vm-b,gatherlink-vm-c `
+  -VmRoot $VmRoot `
+  -ImageDirectory $ImageDirectory `
+  -PublicKeyPath $PublicKeyPath
 ```
 
 Do not commit host-local public key files, generated seed files, or VM disks.
@@ -72,6 +91,30 @@ Do not commit host-local public key files, generated seed files, or VM disks.
 The `gatherlink` user is the normal lab login account. It has passwordless sudo
 for lab setup and traffic shaping, but Gatherlink services should still run
 unprivileged unless a specific lab setup command needs elevation.
+
+VM C uses the same specs and is prepared for later multi-source and routing
+work. The immediate v0.9 acceptance runners still use VM A and VM B; VM C exists
+so future tests can model a second source into the same sink or a transit/routing
+node without rebuilding the lab.
+
+When adding VM C to an already working A/B lab, select only VM C during
+cloud-image preparation so the A/B cloud disks and seed media are left alone:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass `
+  -File .\tools\hyperv\create_gatherlink_vms.ps1 `
+  -Name gatherlink-vm-c `
+  -VmRoot $VmRoot
+
+powershell.exe -ExecutionPolicy Bypass `
+  -File .\tools\hyperv\prepare_gatherlink_cloud_vms.ps1 `
+  -Name gatherlink-vm-c `
+  -VmRoot $VmRoot `
+  -ImageDirectory $ImageDirectory `
+  -PublicKeyPath $PublicKeyPath
+```
+
+The public key file is an operator-local input and must stay outside Git.
 
 When using Pageant-backed keys from Windows automation, use PuTTY `plink` with
 agent forwarding enabled:
@@ -96,7 +139,20 @@ change after reboot. Resolve the current address by VM name with:
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\tools\hyperv\resolve_gatherlink_vm.ps1 -Name gatherlink-vm-a
 powershell.exe -ExecutionPolicy Bypass -File .\tools\hyperv\resolve_gatherlink_vm.ps1 -Name gatherlink-vm-b
+powershell.exe -ExecutionPolicy Bypass -File .\tools\hyperv\resolve_gatherlink_vm.ps1 -Name gatherlink-vm-c
 ```
+
+The WSL/Bash acceptance runners cache discovered management addresses in the
+ignored project state file:
+
+```text
+.gatherlink/hyperv-vm-ip-cache.env
+```
+
+Delete that file, pass `--ip-a`/`--ip-b`/`--ip-c`, or set the matching
+inventory variables when a VM management address changes. The cache is only an
+operator convenience; Gatherlink data-path tests still use the private
+`10.91.x.x` path addresses inside the guests.
 
 Run a command through Pageant-backed `plink` with:
 
@@ -122,12 +178,21 @@ The primary source-sync path is the WSL/Bash acceptance runner documented below.
 For Windows-only maintenance, the PowerShell helper is:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\tools\hyperv\sync_gatherlink_vm_source.ps1 -HostKeyA "<vm-a-host-key>" -HostKeyB "<vm-b-host-key>" -Install
+powershell.exe -ExecutionPolicy Bypass `
+  -File .\tools\hyperv\sync_gatherlink_vm_source.ps1 `
+  -Name gatherlink-vm-a,gatherlink-vm-b,gatherlink-vm-c `
+  -HostKeyA "<vm-a-host-key>" `
+  -HostKeyB "<vm-b-host-key>" `
+  -HostKeyC "<vm-c-host-key>" `
+  -Install
 ```
 
 `-Install` refreshes the VM virtualenv and builds the Rust PyO3 dataplane with
 `maturin develop`. Omit it for a fast source-only push after the VM is already
 prepared.
+
+Use `-Name gatherlink-vm-c -HostKeyC "<vm-c-host-key>"` for a source-only or
+install refresh of the third VM.
 
 From the WSL development checkout, push the current branch to each VM over
 Pageant-backed PuTTY SSH. The `--%` marker keeps PowerShell from rewriting the
@@ -224,6 +289,21 @@ The runner:
 - writes a report under `.gatherlink/hyperv-vm-acceptance/`
 - closes services unless `--keep-running` is set
 
+The three-VM shared-sink runner proves the server-style shape where more than
+one source node connects to the same sink carrier sockets:
+
+```bash
+tools/hyperv/run_shared_sink_three_vm_acceptance.sh \
+  --host-key-a "<vm-a-host-key>" \
+  --host-key-b "<vm-b-host-key>" \
+  --host-key-c "<vm-c-host-key>"
+```
+
+In that run, VM A and VM C each start a source node, VM B starts one shared sink,
+and request/reply UDP traffic from both sources exits through VM B's single
+configured service. The sink distinguishes peers by authenticated session state
+and `peer-scoped-source`, not by assigning each source a different sink port.
+
 Useful options:
 
 ```bash
@@ -249,15 +329,20 @@ this Windows host.
 
 ## VM Creation
 
-Create the two VMs with:
+Create the VMs with:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\tools\hyperv\create_gatherlink_vms.ps1
 ```
 
-The script creates `gatherlink-vm-a` and `gatherlink-vm-b` when they are absent.
-If a VM with one of those names already exists, the script reuses it and does
-not overwrite disks or adapters.
+The script creates `gatherlink-vm-a`, `gatherlink-vm-b`, and `gatherlink-vm-c`
+when they are absent. If a VM with one of those names already exists, the script
+reuses it and does not overwrite disks or adapters.
+
+Use `-Name gatherlink-vm-c` when adding only the third VM to an existing lab.
+The companion cloud-image preparation script accepts the same `-Name` selector;
+that selector is important because cloud-image preparation intentionally
+replaces the selected VM's boot disk and NoCloud seed media.
 
 The VMs boot from the downloaded Debian netinst ISO first. Use Hyper-V console
 access for the initial Debian install, then remove or deprioritize the DVD boot
@@ -281,14 +366,17 @@ Use static addresses on the three path NICs:
 path A:
   gatherlink-vm-a 10.91.1.11/24
   gatherlink-vm-b 10.91.1.12/24
+  gatherlink-vm-c 10.91.1.13/24
 
 path B:
   gatherlink-vm-a 10.91.2.11/24
   gatherlink-vm-b 10.91.2.12/24
+  gatherlink-vm-c 10.91.2.13/24
 
 path C:
   gatherlink-vm-a 10.91.3.11/24
   gatherlink-vm-b 10.91.3.12/24
+  gatherlink-vm-c 10.91.3.13/24
 ```
 
 Do not set default gateways on the path NICs. The only default route should be

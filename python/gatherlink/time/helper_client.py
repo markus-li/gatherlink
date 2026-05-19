@@ -100,4 +100,3 @@ def _recv_all(client: socket.socket) -> bytes:
         if not chunk:
             return b"".join(chunks)
         chunks.append(chunk)
-

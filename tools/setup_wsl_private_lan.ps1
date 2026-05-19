@@ -2,6 +2,7 @@ param(
     [string]$Distro = "gatherlink-dev",
     [string]$NodeAAddress = "10.88.0.11",
     [string]$NodeBAddress = "10.88.0.12",
+    [string]$NodeCAddress = "10.88.0.13",
     [string]$LogPath = ""
 )
 
@@ -26,12 +27,16 @@ Write-Log "WSL2 distros share one Linux network namespace, so this is configured
 $addresses = @(
     $NodeAAddress,
     $NodeBAddress,
+    $NodeCAddress,
     "10.88.1.11",
     "10.88.1.12",
+    "10.88.1.13",
     "10.88.2.11",
     "10.88.2.12",
+    "10.88.2.13",
     "10.88.3.11",
-    "10.88.3.12"
+    "10.88.3.12",
+    "10.88.3.13"
 )
 $addressCommands = ($addresses | ForEach-Object { "sudo ip addr replace $_/32 dev lo" }) -join "; "
 $script = "set -euo pipefail; $addressCommands; ip -br addr show lo"
@@ -40,6 +45,7 @@ wsl -d $Distro -- bash -lc $script | Tee-Object -FilePath $LogPath -Append
 Write-Log "WSL private LAN setup complete."
 Write-Log "Node A service address: $NodeAAddress"
 Write-Log "Node B service address: $NodeBAddress"
-Write-Log "Path A: 10.88.1.11 <-> 10.88.1.12"
-Write-Log "Path B: 10.88.2.11 <-> 10.88.2.12"
-Write-Log "Path C: 10.88.3.11 <-> 10.88.3.12"
+Write-Log "Node C service address: $NodeCAddress"
+Write-Log "Path A: sources 10.88.1.11/10.88.1.13 -> sink 10.88.1.12"
+Write-Log "Path B: sources 10.88.2.11/10.88.2.13 -> sink 10.88.2.12"
+Write-Log "Path C: sources 10.88.3.11/10.88.3.13 -> sink 10.88.3.12"

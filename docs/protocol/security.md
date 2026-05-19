@@ -36,7 +36,7 @@ The current Rust dataplane can run path transports in two modes:
 
 - `security.mode=none`: plaintext Gatherlink frames on path UDP sockets. This is
   intentionally retained for local labs and diagnostics and must log loudly.
-- `security.mode=authenticated`: the normal v1 config-facing secure path.
+- `security.mode=authenticated`: the normal v0.9 config-facing secure path.
   Python verifies signed topology/session documents, compiles short-lived
   directional ChaCha20-Poly1305 keys plus local/remote receiver indexes, and
   hands only those packet-rate facts to Rust. Rust still sees the compact AEAD
@@ -44,7 +44,7 @@ The current Rust dataplane can run path transports in two modes:
 - `security.mode=static`: explicit lab/manual provisioning. It uses the same
   Rust AEAD executor as authenticated mode, but the operator supplied the
   directional keys directly or through static-session tooling. It must stay
-  warning-heavy and should not be treated as the normal v1 secure path.
+  warning-heavy and should not be treated as the normal v0.9 secure path.
 
 Static mode is not the final production trust model. It exists so labs can
 exercise the production AEAD packet path before Noise handshake orchestration is
@@ -69,7 +69,7 @@ gatherlink secrets static-session --local ./local.identity.json --peer ./peer.id
 gatherlink secrets static-session --local ./peer.identity.json --peer ./local.identity.json --role responder
 ```
 
-For v1 provisioning, Python also creates and verifies signed topology bundles:
+For v0.9 provisioning, Python also creates and verifies signed topology bundles:
 
 ```bash
 gatherlink secrets identity-create ./issuer.identity.json
@@ -106,7 +106,7 @@ path, not a replacement for the authenticated Noise handshake. Python owns the
 identity files, public identity exchange, transcript context, and eventual
 trust policy. Rust receives only the compiled receiver index and traffic keys.
 
-The v1 implementation now has a Python-owned Noise IK style authenticated
+The current implementation has a Python-owned Noise IK style authenticated
 session setup. It consumes a verified topology bundle, confirms both identities
 are present and not revoked, binds the prologue/transcript to the topology
 generation and issuer, encrypts the initiator static X25519 key after the `es`
@@ -157,7 +157,7 @@ revoked inputs fail closed locally and must not produce unauthenticated network
 errors.
 
 The older signed ephemeral document bridge remains as a compatibility/manual
-tool while Noise IK becomes the normal v1 path:
+tool while Noise IK becomes the normal v0.9 path:
 
 ```text
 gatherlink secrets handshake-init \
@@ -186,7 +186,7 @@ gatherlink secrets handshake-complete \
 ```
 
 The signed bridge also produces config-compatible authenticated AEAD blocks with
-distinct local and remote receiver indexes, but new v1 workflows should use the
+distinct local and remote receiver indexes, but new workflows should use the
 Noise IK commands above.
 
 Compiled transport security now distinguishes local and remote receiver
@@ -224,6 +224,14 @@ for an encrypted data packet is 29 bytes plus the encrypted compact Gatherlink
 v2 frame.
 The AEAD associated data is exactly the 13-byte clear header plus the domain
 separator `GATHERLINK_DATA_V1`.
+
+Public sink carrier sockets are shared across authenticated source peers. A
+server-like sink should normally expose one UDP carrier port per path, not one
+port per source peer. Rust may use the clear `receiver_index` to find candidate
+compiled session state, but only successful AEAD authentication makes the peer
+real. The UDP source address/port is useful for reply-path learning,
+NAT/rebinding handling, rate limiting, and diagnostics; it must not be treated
+as the peer identity or service-routing authority.
 
 The crypto suite, protocol version, and active key phase are session state
 selected by the authenticated handshake. They are not repeated in every data
@@ -319,7 +327,12 @@ revocation lists.
 
 ## Handshake
 
-Authenticated session setup uses reserved service id `7` (`auth / crypto`).
+Current authenticated session setup is out-of-band CLI/file provisioning:
+Noise IK or the signed ephemeral bridge produces config-facing session material
+that Python validates and compiles for Rust. Reserved service id `7`
+(`auth / crypto`) is reserved for a future in-band handshake lane; docs and code
+must not imply that id `7` is active until the production runner actually
+implements it.
 
 Normal configured peers should use Noise IK:
 
@@ -541,8 +554,8 @@ plaintext context:
 - `header_len`: replaced by the fragment-present bit and fixed fragment metadata
 - `flags`: replaced by `kind_flags` with reserved bits that must be zero
 - `session_id`: mapped from `receiver_index` to the authenticated peer session
-- `route_id`: removed completely. It must not appear in packet format, runtime
-  DTOs, scheduler hot path, transmit plans, or active compatibility views.
+- routing labels: not present; routing uses authenticated context and relay-hop
+  state instead of endpoint-visible packet fields
 - `payload_len`: derived from authenticated plaintext length
 
 After decryption, runtime code may expose a compatibility view that looks like

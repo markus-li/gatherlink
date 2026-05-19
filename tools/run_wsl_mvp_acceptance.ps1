@@ -1,9 +1,9 @@
 param(
     [string]$PrimaryDistro = "gatherlink-dev",
     [string]$PeerDistro = "gatherlink-peer",
-    [string]$User = "markus",
-    [string]$Repo = "/home/markus/src/gatherlink",
-    [string]$Branch = "project-orientation",
+    [string]$User = "gatherlink-user",
+    [string]$Repo = "/home/gatherlink-user/src/gatherlink",
+    [string]$Branch = "main",
     [string]$BundlePath = "",
     [int]$PacketCount = 12,
     [switch]$ClearShaping
@@ -11,7 +11,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 if (-not $BundlePath) {
-    $BundlePath = "/mnt/c/Users/$env:USERNAME/Documents/gatherlink-project-orientation.bundle"
+    $BundlePath = "/mnt/c/Users/$env:USERNAME/Documents/gatherlink-main.bundle"
 }
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $SetupScript = Join-Path $ScriptRoot "setup_wsl_private_lan.ps1"

@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${SCRIPT_DIR}/vm_ip_cache.sh"
 
 PLINK="${PLINK:-/mnt/c/Progra~1/PuTTY/plink.exe}"
 BRANCH="$(cd "${REPO_ROOT}" && git rev-parse --abbrev-ref HEAD)"
@@ -20,7 +21,7 @@ usage() {
   cat <<'USAGE'
 Usage: run_wireguard_vm_acceptance.sh --host-key-a KEY --host-key-b KEY [options]
 
-Proves the v1 WireGuard helper contract in the two-Debian-VM Hyper-V lab:
+Proves the v0.9 WireGuard helper contract in the two-Debian-VM Hyper-V lab:
 
 1. render the WireGuard-over-Gatherlink plan on VM A
 2. point a WireGuard-style UDP sender at the planned Gatherlink Endpoint
@@ -99,14 +100,8 @@ record() {
   printf -- '- %s\n' "$1" | tee -a "${REPORT}"
 }
 
-resolve_vm_ip() {
-  local helper_windows
-  helper_windows="$(wslpath -w "${SCRIPT_DIR}/resolve_gatherlink_vm.ps1")"
-  powershell.exe -ExecutionPolicy Bypass -File "${helper_windows}" -Name "$1" | tr -d '\r'
-}
-
-if [[ -z "${IP_A}" ]]; then IP_A="$(resolve_vm_ip "${VM_A}")"; fi
-if [[ -z "${IP_B}" ]]; then IP_B="$(resolve_vm_ip "${VM_B}")"; fi
+IP_A="$(hyperv_resolve_vm_ip "${REPO_ROOT}" "${SCRIPT_DIR}" "${VM_A}" "${IP_A}")"
+IP_B="$(hyperv_resolve_vm_ip "${REPO_ROOT}" "${SCRIPT_DIR}" "${VM_B}" "${IP_B}")"
 
 remote() {
   local label="$1"

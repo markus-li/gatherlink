@@ -1,5 +1,5 @@
 """
-Operational readiness checks for Gatherlink v1.
+Operational readiness checks for Gatherlink v0.9.
 
 The doctor command is intentionally a Python control-plane tool. It validates
 operator-facing facts such as config readability, diagnostics JSONL shape,
@@ -25,6 +25,7 @@ from gatherlink.config.validation import validate_config_file
 from gatherlink.dataplane.rust_backend import RustDataplaneUnavailableError, _load_bindings
 from gatherlink.diagnostics.events import DiagnosticEvent
 from gatherlink.persistence.store import GatherlinkStatePaths, PersistentStateStore, redact_secrets
+from gatherlink.runtime.plan import runtime_warnings
 from gatherlink.runtime.services import ServiceRegistry
 
 
@@ -71,7 +72,7 @@ def doctor(
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable doctor results."),
 ) -> None:
-    """Run local Gatherlink v1 readiness checks."""
+    """Run local Gatherlink v0.9 readiness checks."""
     checks: list[DoctorCheck] = [
         _check_python_runtime(),
         _check_rust_binding(),
@@ -218,10 +219,11 @@ def _check_config(path: Path) -> DoctorCheck:
                 "errors": [detail.export_dict() for detail in exc.details],
             },
         )
+    warnings = runtime_warnings(runtime_config)
     return DoctorCheck(
         name="config.validate",
         ok=True,
-        message=f"valid config: {path}",
+        message=f"valid config: {path}" if not warnings else f"valid config with {len(warnings)} warning(s): {path}",
         details={
             "path": str(path),
             "node": runtime_config.node,
@@ -230,6 +232,7 @@ def _check_config(path: Path) -> DoctorCheck:
             "security_source_mode": runtime_config.security.source_mode,
             "services": len(runtime_config.services),
             "paths": len(runtime_config.paths),
+            "warnings": warnings,
         },
     )
 

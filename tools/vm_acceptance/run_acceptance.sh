@@ -14,7 +14,7 @@ usage() {
   cat <<'USAGE'
 Usage: run_acceptance.sh [--inventory FILE] [--out DIR] [--dry-run|--execute]
 
-Build and optionally execute the two-Debian-VM Gatherlink v1 acceptance flow.
+Build and optionally execute the two-Debian-VM Gatherlink v0.9 acceptance flow.
 
 Default mode is --dry-run. Dry-run renders configs, validates them locally, and
 reports the SSH/Bash commands that would run, but it never contacts VMs.

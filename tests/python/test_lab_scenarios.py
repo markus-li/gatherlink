@@ -98,6 +98,35 @@ def test_lab_plan_cli_prints_not_implemented_steps() -> None:
     assert any(step["status"] == "not_implemented" for step in payload["steps"])
 
 
+def test_lab_shared_sink_smoke_cli_reports_two_sources(monkeypatch) -> None:
+    from gatherlink.cli import lab as lab_cli
+    from gatherlink.lab.runtime import SharedSinkSmokeResult
+
+    scenario = load_lab_scenario_file(LAB_CONFIGS / "local-dual-path-encrypted.json")
+    monkeypatch.setattr(lab_cli, "load_lab_scenario_file", lambda path: scenario)
+    monkeypatch.setattr(
+        lab_cli,
+        "run_shared_sink_transport_smoke",
+        lambda scenario, **_kwargs: SharedSinkSmokeResult(
+            source_count=2,
+            packets=10,
+            bytes=260,
+            paths=2,
+            sink_transport="127.0.0.1:56002",
+            remote_target="127.0.0.1:51820",
+        ),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        ["lab", "shared-sink-smoke", str(LAB_CONFIGS / "local-dual-path-encrypted.json"), "--count", "5"],
+    )
+
+    assert result.exit_code == 0
+    assert "sources=2" in result.output
+    assert "sink_transport=127.0.0.1:56002" in result.output
+
+
 def test_lab_status_cli_reports_stopped_service(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("GATHERLINK_SERVICE_REGISTRY", str(tmp_path / "services"))
     result = CliRunner().invoke(app, ["lab", "status", str(LAB_CONFIGS / "local-dual-path.json")])
@@ -122,7 +151,7 @@ def test_lab_up_starts_forwarder_and_sink_services(monkeypatch, tmp_path: Path) 
         lambda path, scenario, **_kwargs: ServiceStartResult(
             name="lab.local-dual-path",
             pid=101,
-            user="markus",
+            user="gatherlink-user",
             pid_file=tmp_path / "forwarder.pid",
             log_file=tmp_path / "service.log",
             status="started",
@@ -134,7 +163,7 @@ def test_lab_up_starts_forwarder_and_sink_services(monkeypatch, tmp_path: Path) 
         lambda path, scenario, **_kwargs: ServiceStartResult(
             name="lab.local-dual-path.sink",
             pid=102,
-            user="markus",
+            user="gatherlink-user",
             pid_file=tmp_path / "sink.pid",
             log_file=tmp_path / "sink.log",
             status="started",
@@ -1162,7 +1191,7 @@ def test_service_monitor_summarizes_control_metadata_separately() -> None:
             "control_metadata": status["control_metadata"],
         },
         {
-            "service": "path:path-a",
+            "service": "path path-a",
             "row_type": "path",
             "parent": "lab.local-dual-path",
             "path": "path-a",

@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "node": "hyperv-source-c",
+  "role": "client",
+  "peer": "hyperv-shared-sink",
+  "paths": [
+    {
+      "name": "path-a",
+      "interface": "path-a",
+      "transport_bind": "10.91.1.13:56001",
+      "transport_remote": "10.91.1.12:57001",
+      "scheduler": {
+        "mtu": 1200,
+        "tx_capacity_bps": 3000000,
+        "rx_capacity_bps": 3000000
+      }
+    },
+    {
+      "name": "path-b",
+      "interface": "path-b",
+      "transport_bind": "10.91.2.13:56002",
+      "transport_remote": "10.91.2.12:57002",
+      "scheduler": {
+        "mtu": 1200,
+        "tx_capacity_bps": 2000000,
+        "rx_capacity_bps": 2000000
+      }
+    },
+    {
+      "name": "path-c",
+      "interface": "path-c",
+      "transport_bind": "10.91.3.13:56003",
+      "transport_remote": "10.91.3.12:57003",
+      "scheduler": {
+        "mtu": 1200,
+        "tx_capacity_bps": 1000000,
+        "rx_capacity_bps": 1000000
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "udp-main",
+      "listen": "127.0.0.1:55180",
+      "target": "127.0.0.1:55181",
+      "return_mode": "learned-single-source"
+    }
+  ],
+  "security": {
+    "mode": "authenticated",
+    "local_receiver_index": 102,
+    "remote_receiver_index": 202,
+    "send_key": "QEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA=",
+    "receive_key": "QUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE="
+  }
+}

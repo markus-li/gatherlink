@@ -30,7 +30,7 @@ HTTP/Unix socket API. Default must be local-only.
 
 ## Experimental REST API Helper
 
-V1 should prepare for a REST API that can cover the same control surface as the
+V0.9 should prepare for a REST API that can cover the same control surface as the
 CLI, but it is an optional helper/control-plane sidecar, not core runtime or
 dataplane logic.
 
@@ -45,7 +45,7 @@ Rules:
 - keep CLI as the primary supported control surface
 
 The current helper exposes read-only status on `/json` and `/v1/status`.
-Writable REST APIs are allowed later in v1, but only with an expiry guard:
+Writable REST APIs are allowed in v0.9.1 or later, but only with an expiry guard:
 
 - writes are enabled only when started explicitly from the CLI
 - write operations stop working after one hour by default

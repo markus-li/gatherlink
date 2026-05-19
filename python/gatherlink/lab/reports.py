@@ -89,7 +89,7 @@ def generate_three_path_scheduler_report(results_dir: Path) -> str:
         "## Validation",
         "",
         "- `ruff check python tests/python`: passed.",
-        "- `pytest -q`: 108 passed.",
+        "- `pytest -q`: passed.",
         "- `cargo fmt --check`: passed.",
         "- `cargo test -q`: passed, including the Rust scheduler primitive tests.",
         "",

@@ -178,6 +178,7 @@ impl PyCoreDataplane {
     }
 
     /// Record a reserved-service payload for Python-owned decoding.
+    #[pyo3(signature = (service_id, path_id, sequence, payload, frame_bytes, peer_scope=None))]
     pub fn observe_received_reserved_service_payload(
         &mut self,
         service_id: u16,
@@ -185,6 +186,7 @@ impl PyCoreDataplane {
         sequence: u64,
         payload: &[u8],
         frame_bytes: usize,
+        peer_scope: Option<u32>,
     ) {
         self.inner.observe_received_reserved_service_payload(
             service_id,
@@ -192,6 +194,7 @@ impl PyCoreDataplane {
             sequence,
             payload.to_vec(),
             frame_bytes,
+            peer_scope,
         );
     }
 
@@ -225,6 +228,19 @@ impl PyCoreDataplane {
     pub fn transmit_service_payload(&mut self, service_id: u16, payload: &[u8]) -> PyResult<usize> {
         self.inner
             .transmit_service_payload(service_id, payload.to_vec())
+            .map(|plans| plans.len())
+            .map_err(dataplane_error_to_py)
+    }
+
+    /// Frame and send one Python-composed service payload to a learned peer scope.
+    pub fn transmit_service_payload_to_peer(
+        &mut self,
+        service_id: u16,
+        payload: &[u8],
+        peer_scope: u32,
+    ) -> PyResult<usize> {
+        self.inner
+            .transmit_service_payload_to_peer(service_id, payload.to_vec(), peer_scope)
             .map(|plans| plans.len())
             .map_err(dataplane_error_to_py)
     }

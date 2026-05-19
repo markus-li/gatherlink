@@ -2,7 +2,7 @@
 
 Diagnostics are structured facts first and terminal text second.
 
-The current MVP path has three operator surfaces:
+The current v0.9 path has three operator surfaces:
 
 - `gatherlink services status NAME` for one live service snapshot
 - `gatherlink services monitor NAME...` for continuously refreshed counters
@@ -16,7 +16,7 @@ instead of writing one-off JSON or parsing terminal text. The bus must never
 block dataplane or control loops; if a sink is slow, diagnostics are dropped and
 the queue drop counter/event tells the operator what happened.
 
-MVP producer coverage includes:
+V0.9 producer coverage includes:
 
 - startup warnings for plaintext/static/manual security choices
 - service bind lifecycle events

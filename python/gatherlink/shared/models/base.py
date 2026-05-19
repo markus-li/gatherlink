@@ -12,13 +12,13 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, Union
+from typing import Any, ClassVar, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 from pydantic.fields import FieldInfo
 
-SourceMapKey: TypeAlias = type[Any] | str
-FieldMapValue: TypeAlias = Union[str, "FieldTransform"]
+type SourceMapKey = type[Any] | str
+type FieldMapValue = str | FieldTransform
 T = TypeVar("T")
 TargetModelT = TypeVar("TargetModelT", bound="GatherlinkBaseModel")
 
@@ -292,7 +292,7 @@ class ExpirableModel(GatherlinkBaseModel):
         return (datetime.now(UTC) - self._creation_date).total_seconds() > self._expiry_seconds
 
 
-class ListLikeModel(GatherlinkBaseModel, Generic[T]):
+class ListLikeModel[T](GatherlinkBaseModel):
     """Pydantic model wrapper that behaves like its first list field."""
 
     _list_field_name: str = PrivateAttr()
@@ -328,11 +328,11 @@ class ListLikeModel(GatherlinkBaseModel, Generic[T]):
         return iter(getattr(self, self._list_field_name))
 
 
-class ExpirableListLikeModel(ListLikeModel[T], ExpirableModel, Generic[T]):
+class ExpirableListLikeModel[T](ListLikeModel[T], ExpirableModel):
     """List-like model with expiry metadata."""
 
 
-class GenericListResponse(ExpirableListLikeModel[T], Generic[T]):
+class GenericListResponse[T](ExpirableListLikeModel[T]):
     """Generic list response base that uses the subclass' first field as the list."""
 
     _detected_list_field_name: ClassVar[str]

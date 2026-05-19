@@ -45,6 +45,8 @@ class FakePathConfig:
     max_in_flight_bytes: int
     transport_bind: str | None
     transport_remote: str | None
+    relay_receiver_index: int | None
+    relay_send_key: bytes | None
 
 
 @dataclass
@@ -60,6 +62,7 @@ class FakeTransportSecurityConfig:
     remote_receiver_index: int | None = None
     send_key: bytes | None = None
     receive_key: bytes | None = None
+    sessions: list[FakeTransportSecuritySessionConfig] | None = None
 
     @staticmethod
     def none() -> FakeTransportSecurityConfig:
@@ -67,7 +70,9 @@ class FakeTransportSecurityConfig:
 
     @staticmethod
     def static_keys(receiver_index: int, send_key: bytes, receive_key: bytes) -> FakeTransportSecurityConfig:
-        return FakeTransportSecurityConfig("static", receiver_index, receiver_index, receiver_index, send_key, receive_key)
+        return FakeTransportSecurityConfig(
+            "static", receiver_index, receiver_index, receiver_index, send_key, receive_key
+        )
 
     @staticmethod
     def static_keys_v2(
@@ -85,11 +90,25 @@ class FakeTransportSecurityConfig:
             receive_key,
         )
 
+    @staticmethod
+    def static_sessions(sessions: list[FakeTransportSecuritySessionConfig]) -> FakeTransportSecurityConfig:
+        return FakeTransportSecurityConfig("static", sessions=sessions)
+
+
+@dataclass
+class FakeTransportSecuritySessionConfig:
+    local_receiver_index: int
+    remote_receiver_index: int
+    send_key: bytes
+    receive_key: bytes
+    service_ids: list[int]
+
 
 class FakeBindings:
     UdpServiceConfig = FakeUdpServiceConfig
     PathConfig = FakePathConfig
     SchedulerConfig = FakeSchedulerConfig
+    TransportSecuritySessionConfig = FakeTransportSecuritySessionConfig
     TransportSecurityConfig = FakeTransportSecurityConfig
 
 
@@ -158,8 +177,36 @@ def test_runtime_config_converts_to_rust_binding_dtos() -> None:
             max_in_flight_bytes=262_144,
             transport_bind="127.0.0.1:56001",
             transport_remote="127.0.0.1:56002",
+            relay_receiver_index=None,
+            relay_send_key=None,
         )
     ]
+
+
+def test_runtime_path_relay_wrap_config_reaches_rust_binding_dto() -> None:
+    relay_key = bytes([0x66]) * 32
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        paths=[
+            PathConfig(
+                name="path-a",
+                interface="gl-a",
+                transport_bind="127.0.0.1:56001",
+                transport_remote="127.0.0.1:56002",
+                relay={"relay_receiver_index": 901, "send_key": b64encode(relay_key).decode("ascii")},
+            )
+        ],
+        services=[ServiceConfig(name="udp-main", listen="127.0.0.1:55180", target="127.0.0.1:51820")],
+    )
+    runtime_config = expand_config(config)
+
+    dtos = build_rust_runtime_dtos(runtime_config, bindings=FakeBindings)
+
+    assert dtos.paths[0].relay_receiver_index == 901
+    assert dtos.paths[0].relay_send_key == relay_key
 
 
 def test_static_security_config_compiles_to_rust_binding_dto_and_inner_mtu() -> None:
@@ -202,6 +249,61 @@ def test_static_security_config_compiles_to_rust_binding_dto_and_inner_mtu() -> 
         bytes([0x22]) * 32,
     )
     assert dtos.paths[0].mtu == 1171
+
+
+def test_static_multi_session_security_compiles_for_shared_sink_port() -> None:
+    send_key_a = b64encode(bytes([0x11]) * 32).decode("ascii")
+    receive_key_a = b64encode(bytes([0x22]) * 32).decode("ascii")
+    send_key_c = b64encode(bytes([0x33]) * 32).decode("ascii")
+    receive_key_c = b64encode(bytes([0x44]) * 32).decode("ascii")
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="sink",
+        role="server",
+        security={
+            "mode": "static",
+            "sessions": [
+                {
+                    "name": "source-a",
+                    "local_receiver_index": 201,
+                    "remote_receiver_index": 101,
+                    "send_key": send_key_a,
+                    "receive_key": receive_key_a,
+                    "services": ["udp-main"],
+                },
+                {
+                    "name": "source-c",
+                    "local_receiver_index": 202,
+                    "remote_receiver_index": 102,
+                    "send_key": send_key_c,
+                    "receive_key": receive_key_c,
+                    "services": ["udp-main"],
+                },
+            ],
+        },
+        paths=[
+            PathConfig(
+                name="path-a",
+                interface="gl-a",
+                transport_bind="127.0.0.1:56002",
+                scheduler={"mtu": 1200},
+            )
+        ],
+        services=[ServiceConfig(name="udp-main", listen="127.0.0.1:55180", target="127.0.0.1:51820")],
+    )
+    runtime_config = expand_config(config)
+
+    dtos = build_rust_runtime_dtos(runtime_config, bindings=FakeBindings)
+
+    assert dtos.paths[0].transport_bind == "127.0.0.1:56002"
+    assert dtos.paths[0].transport_remote is None
+    assert dtos.security == FakeTransportSecurityConfig(
+        "static",
+        sessions=[
+            FakeTransportSecuritySessionConfig(201, 101, bytes([0x11]) * 32, bytes([0x22]) * 32, [256]),
+            FakeTransportSecuritySessionConfig(202, 102, bytes([0x33]) * 32, bytes([0x44]) * 32, [256]),
+        ],
+    )
 
 
 def test_reapply_core_scheduler_uses_socket_preserving_binding(monkeypatch) -> None:

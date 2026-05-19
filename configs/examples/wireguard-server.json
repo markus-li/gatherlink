@@ -5,7 +5,8 @@
   "services": [
     {
       "name": "wireguard-main",
-      "target": "127.0.0.1:51820"
+      "target": "127.0.0.1:51820",
+      "return_mode": "peer-scoped-source"
     }
   ],
   "security": {

@@ -90,7 +90,9 @@ def _smoke_time_helper() -> HelperSmokeResult:
         thread.start()
         response = request_time_correction(TimeCorrectionRequest(target_unix_us=1010), socket_path=socket_path)
         thread.join(timeout=2)
-    return HelperSmokeResult("time", response.status == "preview", f"status={response.status} offset={response.offset_us}")
+    return HelperSmokeResult(
+        "time", response.status == "preview", f"status={response.status} offset={response.offset_us}"
+    )
 
 
 def _smoke_dns_helper() -> HelperSmokeResult:
@@ -231,7 +233,9 @@ async def _smoke_socks5_helper() -> HelperSmokeResult:
         policy=Socks5Policy.allow(hosts=["example.test"], ports=[443]),
         exit_connector=_SocksSmokeConnector("127.0.0.1", target_port),
     )
-    connection = await addon.on_connect(type("Flow", (), {"dst": type("Dst", (), {"host": "example.test", "port": 443})()})())
+    connection = await addon.on_connect(
+        type("Flow", (), {"dst": type("Dst", (), {"host": "example.test", "port": 443})()})()
+    )
     connection.writer.write(b"abc")
     await connection.writer.drain()
     connection.writer.write_eof()
@@ -240,7 +244,9 @@ async def _smoke_socks5_helper() -> HelperSmokeResult:
     await connection.writer.wait_closed()
     target.close()
     await target.wait_closed()
-    return HelperSmokeResult("socks5", payload == b"cba", f"accepted={addon.stats.accepted} opened={addon.stats.opened}")
+    return HelperSmokeResult(
+        "socks5", payload == b"cba", f"accepted={addon.stats.accepted} opened={addon.stats.opened}"
+    )
 
 
 def _smoke_wireguard_helper() -> HelperSmokeResult:
@@ -262,7 +268,9 @@ def _smoke_relay_fabric_helper() -> HelperSmokeResult:
         capabilities=["v1", "authenticated"],
     )
     report = discover_relays([relay], required_protocol_version="v1", endpoint_probe=lambda _endpoint: True)
-    return HelperSmokeResult("relay-fabric", bool(report.usable_candidates()), json.dumps(report.health[0].export_dict()))
+    return HelperSmokeResult(
+        "relay-fabric", bool(report.usable_candidates()), json.dumps(report.health[0].export_dict())
+    )
 
 
 def _smoke_relay_negative_helper() -> HelperSmokeResult:
@@ -279,7 +287,9 @@ def _smoke_relay_negative_helper() -> HelperSmokeResult:
 def _smoke_transport_boundary_helper() -> HelperSmokeResult:
     addon = GatherlinkSocks5Addon(policy=Socks5Policy.allow(hosts=["example.test"], ports=[443]))
     try:
-        asyncio.run(addon.on_connect(type("Flow", (), {"dst": type("Dst", (), {"host": "example.test", "port": 443})()})()))
+        asyncio.run(
+            addon.on_connect(type("Flow", (), {"dst": type("Dst", (), {"host": "example.test", "port": 443})()})())
+        )
     except MissingGatherlinkTransportError:
         return HelperSmokeResult("transport-boundary", True, "production helper requires Gatherlink transport")
     return HelperSmokeResult("transport-boundary", False, "production helper bypassed Gatherlink transport")

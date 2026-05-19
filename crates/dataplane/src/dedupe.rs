@@ -12,8 +12,8 @@ use gatherlink_protocol::ids::ServiceId;
 #[derive(Debug, Clone)]
 pub struct DedupeWindow {
     capacity: usize,
-    seen: HashSet<(ServiceId, u64)>,
-    order: VecDeque<(ServiceId, u64)>,
+    seen: HashSet<(ServiceId, Option<u32>, u64)>,
+    order: VecDeque<(ServiceId, Option<u32>, u64)>,
 }
 
 impl Default for DedupeWindow {
@@ -32,7 +32,16 @@ impl DedupeWindow {
     }
 
     pub fn observe(&mut self, service_id: ServiceId, sequence: u64) -> DedupeObservation {
-        let key = (service_id, sequence);
+        self.observe_in_scope(service_id, None, sequence)
+    }
+
+    pub fn observe_in_scope(
+        &mut self,
+        service_id: ServiceId,
+        peer_scope: Option<u32>,
+        sequence: u64,
+    ) -> DedupeObservation {
+        let key = (service_id, peer_scope, sequence);
         if self.seen.contains(&key) {
             return DedupeObservation::Duplicate;
         }

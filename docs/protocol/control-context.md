@@ -62,10 +62,34 @@ A service can only exit where authenticated policy allows. If a service may exit
 through multiple peers, that must be explicit in control/config state rather
 than inferred from plaintext packet fields.
 
-`route_id` is not part of control context and should not be preserved as a
-compatibility field. Relay routing uses outer routing/relay-hop headers and
-authenticated relay session state; endpoint service/exit decisions use
-authenticated service/control context only after endpoint decrypt.
+Relay routing uses outer routing/relay-hop headers and authenticated relay
+session state; endpoint service/exit decisions use authenticated
+service/control context only after endpoint decrypt.
+
+## Discovery Vs Remote Status
+
+Discovery and remote IPC/status are different control-plane behaviors.
+
+Discovery is continuous and sparse. It uses authenticated control metadata to
+advertise stable facts such as service id/name mappings, path names, capacity,
+MTU, disabled-service assertions, and endpoint assertions for verification. It
+should run at a low baseline cadence and also send promptly when an important
+fact changes. Discovery is cheap enough to keep on, but it must not become a
+continuous live-status stream.
+
+Remote IPC/status is explicit, louder, temporary, and read-only. It uses the
+remote-status reserved service lane when an operator or local tool asks for a
+peer status snapshot or short-lived status stream. The requester refreshes the
+request while it is still interested; the peer stops sending remote status when
+the request expires. If no fresh response is available, operator views should
+show the remote status as stale or unknown rather than pretending the remote
+service is locally registered.
+
+Learned remote services are read-only discovered facts. They may appear in
+operator listings as remote entries, but the local service registry remains the
+source of truth for local process lifecycle. Discovery and remote status must
+not allow remote start, stop, reload, endpoint changes, trust-root changes, or
+other mutations.
 
 ## Helper control
 

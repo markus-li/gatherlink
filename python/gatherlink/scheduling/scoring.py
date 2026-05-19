@@ -63,4 +63,3 @@ def adaptive_weight(
 def _clamp_weight(value: int) -> int:
     """Keep the compiled value within Rust's u16 scheduler contract."""
     return min(MAX_PATH_WEIGHT, max(MIN_PATH_WEIGHT, value))
-

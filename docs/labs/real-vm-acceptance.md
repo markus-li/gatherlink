@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The WSL two-distro gate is the fast MVP acceptance path. V1 also needs a real
+The WSL two-distro gate is the fast local acceptance path. V0.9 also needs a real
 VM acceptance path because WSL shares enough host networking behavior that it
 does not prove deployment realism.
 
@@ -21,9 +21,9 @@ Compared with WSL, real VMs prove:
 - more realistic latency, queueing, MTU, jitter, and loss
 - service lifecycle on independent machines
 
-## V1 Target
+## V0.9 Target
 
-The v1 acceptance target is:
+The v0.9 acceptance target is:
 
 1. Create or start two Debian VMs.
 2. Install Gatherlink dependencies.
@@ -68,7 +68,10 @@ Current harness:
 - `tools/hyperv/run_wireguard_vm_acceptance.sh` for the WireGuard helper
   endpoint-plan proof and UDP transport proof against the peer-side WireGuard
   target port
-- `tools/hyperv/run_gatherlink_vm_soak.sh` for the prepared one-hour v1 soak
+- `tools/hyperv/run_dns_vm_acceptance.sh` for the DNS helper tunnel proof: a DNS
+  query enters the VM A DNS helper, traverses Gatherlink as UDP service traffic,
+  and resolves from a static DNS endpoint on VM B
+- `tools/hyperv/run_gatherlink_vm_soak.sh` for the prepared one-hour v0.9 soak
   command; do not run the soak casually because it is intentionally long
 
 The harness defaults to `--dry-run`, which renders configs, validates them
@@ -102,19 +105,74 @@ HTTP client on VM A
 This is a real Gatherlink tunnel test. The helper test must not be satisfied by
 `--lab-direct` or by connecting directly to the peer target.
 
-The WireGuard Hyper-V runner proves the v1 WireGuard helper contract. It does
+The WireGuard Hyper-V runner proves the v0.9 WireGuard helper contract. It does
 not create WireGuard interfaces or own WireGuard routes/firewall state. Instead
 it verifies that the helper renders the correct peer `Endpoint` and that UDP
 payloads sent to that endpoint traverse real Gatherlink carrier sockets and
 exit at the configured peer-side WireGuard UDP target.
 
+The relay WireGuard Hyper-V runner proves the three-VM untrusted relay shape:
+
+```text
+VM B WireGuard peer
+  -> VM B Gatherlink core
+  -> VM C secure relay-hop forwarders
+  -> VM A final-hop relay exits
+  -> VM A Gatherlink core
+  -> VM A WireGuard peer
+  -> VM A status HTTP helper
+```
+
+Run it from WSL after the three VMs are prepared:
+
+```bash
+tools/hyperv/run_relay_wireguard_vm_acceptance.sh \
+  --host-key-a "<vm-a-host-key>" \
+  --host-key-b "<vm-b-host-key>" \
+  --host-key-c "<vm-c-host-key>"
+```
+
+This runner uses WireGuard's own `wg` tooling and passwordless lab sudo to
+create temporary test interfaces. Gatherlink still owns only the UDP service
+transport. VM C authenticates and rewraps only relay-hop envelopes; it never
+decrypts endpoint Gatherlink packets or WireGuard packets. The runner captures
+`gatherlink services monitor --view graph --once` output on B, C, and A. In an
+interactive monitor, press `g` to toggle between the counter table and
+dependency graph view.
+
+The DNS helper Hyper-V runner proves Gatherlink-tunnel DNS upstream behavior:
+
+```text
+DNS client on VM A
+  -> DNS helper on VM A
+  -> local Gatherlink UDP service
+  -> per-path Gatherlink carrier sockets
+  -> static DNS endpoint on VM B
+  -> response back to the VM A client
+```
+
+This is a production-path helper tunnel test. It must not be satisfied by
+directly querying VM B from VM A.
+
+A passing v0.9 DNS tunnel run produced:
+
+```text
+.gatherlink/hyperv-dns-acceptance/20260519T050146Z/report.md
+```
+
 The soak wrapper uses the same production runner path with a longer duration.
-For v1, one hour is the default soak length:
+For v0.9, one hour is the default soak length:
 
 ```bash
 tools/hyperv/run_gatherlink_vm_soak.sh \
   --inventory tools/vm_acceptance/inventory.local.env \
   --skip-build
+```
+
+A passing one-hour v0.9 soak produced:
+
+```text
+.gatherlink/hyperv-vm-soak/20260519T060707Z/report.md
 ```
 
 Document the runbook here and keep generated reports under an ignored output
@@ -124,7 +182,7 @@ directory such as:
 .gatherlink/vm-acceptance/
 ```
 
-For v1, prefer simple Bash plus SSH scripts over Ansible.
+For v0.9, prefer simple Bash plus SSH scripts over Ansible.
 
 Reasons:
 
@@ -137,7 +195,7 @@ Reasons:
 
 Ansible can be reconsidered later if VM acceptance grows into many nodes,
 repeatable matrix runs, or hosted CI infrastructure. It should not be required
-for v1.
+for v0.9.
 
 ## AI-Assisted Deploy
 
@@ -155,7 +213,7 @@ The AI-assisted workflow should:
 
 ## Acceptance Result
 
-A v1 real-VM run is healthy when:
+A v0.9 real-VM run is healthy when:
 
 - all configs validate
 - both services start through normal CLI/service management

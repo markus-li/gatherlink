@@ -23,11 +23,7 @@ def test_time_correction_request_renders_helper_wire_format() -> None:
     )
 
     assert request.render_wire() == (
-        "target_unix_us=1776000000000000\n"
-        "source=ntp\n"
-        "quality=synchronized\n"
-        "max_step_us=1000\n"
-        "apply=true\n"
+        "target_unix_us=1776000000000000\n" "source=ntp\n" "quality=synchronized\n" "max_step_us=1000\n" "apply=true\n"
     )
 
 
@@ -88,11 +84,7 @@ def test_time_cli_correct_defaults_to_preview(monkeypatch, tmp_path) -> None:
         captured["request"] = request
         captured["socket_path"] = socket_path
         return parse_time_helper_response(
-            "status=preview\n"
-            "applied=false\n"
-            "offset_us=0\n"
-            "target_unix_us=1000\n"
-            "system_unix_us=1000\n"
+            "status=preview\n" "applied=false\n" "offset_us=0\n" "target_unix_us=1000\n" "system_unix_us=1000\n"
         )
 
     monkeypatch.setattr("gatherlink.cli.time.request_time_correction", fake_request)

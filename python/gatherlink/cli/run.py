@@ -113,7 +113,15 @@ def service(
                     },
                 )
             )
-            ipc = ServiceIpcServer(record, status=runner_state.snapshot, stop=runner_state.stop)
+            ipc = ServiceIpcServer(
+                record,
+                status=runner_state.snapshot,
+                stop=runner_state.stop,
+                commands={
+                    "control-cadence": runner_state.request_control_cadence,
+                    "remote-status": runner_state.request_remote_status,
+                },
+            )
             ipc.start()
         result = run_core_service(
             runtime_config,
@@ -189,6 +197,7 @@ def relay_service(
                 next_hop=relay_config.executor.next_hop_address,
                 direction=relay_config.executor.direction,
                 stop_event=Event(),
+                exit_to_inner_packet=relay_config.exit_to_inner_packet,
             )
             record = ServiceRegistry().register(
                 ServiceRecord(
@@ -204,6 +213,7 @@ def relay_service(
                         "listen": relay_config.listen,
                         "next_hop": relay_config.executor.next_hop_address,
                         "direction": relay_config.executor.direction,
+                        "exit_to_inner_packet": relay_config.exit_to_inner_packet,
                     },
                 )
             )
@@ -303,6 +313,7 @@ def relay_start(
                 "listen": relay_config.listen,
                 "next_hop": relay_config.executor.next_hop_address,
                 "direction": relay_config.executor.direction,
+                "exit_to_inner_packet": relay_config.exit_to_inner_packet,
                 "diagnostics_jsonl": str(diagnostics_path),
             },
         )

@@ -369,7 +369,9 @@ def _encode_service_disables(output: bytearray, service_disables: dict[int, str]
         output.extend(encoded_reason)
 
 
-def _encode_service_scheduler_policies(output: bytearray, service_scheduler_policies: dict[int, tuple[int, int]]) -> None:
+def _encode_service_scheduler_policies(
+    output: bytearray, service_scheduler_policies: dict[int, tuple[int, int]]
+) -> None:
     for service_id, (fanout, fanout_below_bytes) in service_scheduler_policies.items():
         if (
             service_id < USER_SERVICE_ID_START

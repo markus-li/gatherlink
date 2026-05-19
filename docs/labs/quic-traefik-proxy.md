@@ -20,7 +20,7 @@ After QUIC unwrap, the recovered packet must be the same Gatherlink UDP-format
 carrier packet that the raw UDP carrier would have delivered.
 
 This is separate from the HTTP/3 DATAGRAM carrier. HTTP/3 DATAGRAM is also a
-v1.1 carrier, but it must have its own acceptance path because it adds HTTP/3
+v0.9.1 carrier, but it must have its own acceptance path because it adds HTTP/3
 request/session machinery around the datagrams.
 
 ## Required Behavior

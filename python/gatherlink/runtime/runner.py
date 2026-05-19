@@ -17,8 +17,11 @@ from typing import Any
 
 from gatherlink.config.models import GatherlinkConfig
 from gatherlink.config.runtime import RuntimeConfig
+from gatherlink.control import ControlCadenceState
+from gatherlink.control.announcements import announce_control_metadata
 from gatherlink.control.metadata import empty_control_metadata
 from gatherlink.control.policy import apply_control_policy_to_dataplane
+from gatherlink.control.remote_status import RemoteStatusState, handle_event, send_request_if_due
 from gatherlink.control.reserved import drain_reserved_service_events
 from gatherlink.dataplane.rust_backend import bind_core_dataplane
 from gatherlink.dataplane.status import (
@@ -29,6 +32,7 @@ from gatherlink.dataplane.status import (
 )
 from gatherlink.diagnostics.bus import DiagnosticsBus
 from gatherlink.diagnostics.events import DiagnosticEvent
+from gatherlink.protocol import SERVICE_ID_CONTROL_METADATA, SERVICE_ID_REMOTE_STATUS
 from gatherlink.runtime.plan import runtime_warnings
 from gatherlink.runtime.reload import hot_reapply_scheduler_from_status
 from gatherlink.shared.logging import get_logger
@@ -65,9 +69,12 @@ class CoreRunnerState:
     path_stats: dict[str, dict[str, int]] | None = None
     control_metadata: dict[str, object] | None = None
     security_drops: dict[str, int] | None = None
+    control_cadence: ControlCadenceState | None = None
+    remote_status: RemoteStatusState | None = None
 
     def snapshot(self) -> dict[str, object]:
         """Return a service-monitor-friendly status payload."""
+        remote_status = self.remote_status.status() if self.remote_status is not None else None
         payload: dict[str, object] = {
             "running": self.running and not self.stop_event.is_set(),
             "node": self.node,
@@ -85,11 +92,33 @@ class CoreRunnerState:
             payload["control_metadata"] = self.control_metadata
         if self.security_drops is not None:
             payload["security_drops"] = self.security_drops
+        if self.control_cadence is not None:
+            payload["control_cadence"] = self.control_cadence.status()
+        if remote_status is not None:
+            payload["remote_status"] = remote_status["cache"]
+            payload["remote_status_state"] = {key: value for key, value in remote_status.items() if key != "cache"}
         return payload
 
     def stop(self) -> None:
         """Request a graceful runner stop from IPC or tests."""
         self.stop_event.set()
+
+    def request_control_cadence(self, request: dict[str, object]) -> dict[str, object]:
+        """IPC command for temporary monitor-grade control metadata cadence."""
+        profile = str(request.get("profile") or "monitor")
+        ttl_seconds = float(request.get("ttl_seconds") or 120.0)
+        if profile != "monitor":
+            raise RuntimeError(f"unsupported control cadence profile: {profile}")
+        if self.control_cadence is None:
+            self.control_cadence = ControlCadenceState()
+        return self.control_cadence.request_monitor_profile(ttl_seconds=ttl_seconds)
+
+    def request_remote_status(self, request: dict[str, object]) -> dict[str, object]:
+        """IPC command for temporary read-only remote status over service id 8."""
+        ttl_seconds = float(request.get("ttl_seconds") or 120.0)
+        if self.remote_status is None:
+            self.remote_status = RemoteStatusState()
+        return self.remote_status.request(ttl_seconds=ttl_seconds)
 
 
 DataplaneFactory = Callable[[RuntimeConfig], Any]
@@ -146,6 +175,8 @@ def run_core_service(
         stop_event=stop_event,
     )
     state.running = True
+    state.control_cadence = state.control_cadence or ControlCadenceState()
+    state.remote_status = state.remote_status or RemoteStatusState()
     next_scheduler_reapply_at = (
         time.monotonic() + scheduler_reapply_interval_seconds
         if source_config is not None and scheduler_reapply_interval_seconds is not None
@@ -163,6 +194,9 @@ def run_core_service(
     applied_disabled_services: set[str] = set()
     path_names_by_id = {path.scheduler.path_id: path.name for path in runtime_config.paths}
     local_targets_by_service_id = {service.service_id: service.target for service in runtime_config.services}
+    peer_names_by_scope = _peer_names_by_scope(runtime_config)
+    _apply_reserved_service_schedulers(dataplane)
+    next_control_metadata_at = 0.0
 
     while not stop_event.is_set():
         if max_iterations is not None and iterations >= max_iterations:
@@ -185,11 +219,29 @@ def run_core_service(
         delivered_bytes += sum(int(outcome.payload_len()) for outcome in delivered)
         state.delivered_packets = delivered_packets
         state.delivered_bytes = delivered_bytes
+        if time.monotonic() >= next_control_metadata_at:
+            _try_announce_control_metadata(
+                dataplane,
+                runtime_config,
+                decoded_control_metadata,
+                include_sink_time=runtime_config.role == "server",
+            )
+            next_control_metadata_at = time.monotonic() + state.control_cadence.next_interval(
+                forwarded_packets + delivered_packets
+            )
+        try:
+            send_request_if_due(dataplane, state.remote_status, peer_scopes=peer_names_by_scope)
+        except RuntimeError as exc:
+            logger.warning("remote status request skipped", extra={"error": str(exc)})
         if _drain_python_reserved_services(
             dataplane,
             decoded_control_metadata,
             path_names_by_id=path_names_by_id,
             local_targets_by_service_id=local_targets_by_service_id,
+            remote_status=state.remote_status,
+            peer_names_by_scope=peer_names_by_scope,
+            fallback_peer_name=runtime_config.peer or "peer",
+            status_provider=state.snapshot,
         ):
             apply_control_policy_to_dataplane(
                 dataplane,
@@ -207,10 +259,7 @@ def run_core_service(
                 last_packets=last_security_drop_packets,
             )
             current_counter_snapshot = (forwarded_packets, forwarded_bytes, delivered_packets, delivered_bytes)
-            if (
-                current_counter_snapshot != last_counter_snapshot
-                and time.monotonic() >= next_counter_snapshot_at
-            ):
+            if current_counter_snapshot != last_counter_snapshot and time.monotonic() >= next_counter_snapshot_at:
                 diagnostics_bus.publish(
                     DiagnosticEvent.counter_snapshot(
                         node=runtime_config.node,
@@ -237,6 +286,7 @@ def run_core_service(
                     runtime_config,
                     state.snapshot(),
                 )
+                _apply_reserved_service_schedulers(dataplane)
                 if diagnostics_bus is not None:
                     diagnostics_bus.publish(
                         DiagnosticEvent.config_reapplied(
@@ -371,6 +421,10 @@ def _drain_python_reserved_services(
     *,
     path_names_by_id: dict[int, str],
     local_targets_by_service_id: dict[int, str],
+    remote_status: RemoteStatusState | None = None,
+    peer_names_by_scope: dict[int, str] | None = None,
+    fallback_peer_name: str = "peer",
+    status_provider: Callable[[], dict[str, object]] | None = None,
 ) -> int:
     """
     Drain reserved service payloads that Rust intentionally forwards to Python.
@@ -382,13 +436,83 @@ def _drain_python_reserved_services(
     drain = getattr(dataplane, "drain_reserved_service_events", None)
     if not callable(drain):
         return 0
+    extra_handlers = {}
+    if remote_status is not None and status_provider is not None:
+        extra_handlers[SERVICE_ID_REMOTE_STATUS] = lambda event: handle_event(
+            event,
+            dataplane=dataplane,
+            state=remote_status,
+            peer_name=_peer_name_for_event(event, peer_names_by_scope or {}, fallback_peer_name),
+            status_provider=status_provider,
+            logger=logger.warning,
+        )
     return drain_reserved_service_events(
         dataplane,
         control_metadata,
         path_names_by_id=path_names_by_id,
         local_targets_by_service_id=local_targets_by_service_id,
+        extra_handlers=extra_handlers,
         logger=logger.warning,
     )
+
+
+def _peer_names_by_scope(runtime_config: RuntimeConfig) -> dict[int, str]:
+    """Return authenticated peer/session labels keyed by Rust peer scope."""
+    if runtime_config.security.sessions:
+        return {
+            int(session.local_receiver_index): session.name or f"receiver:{session.local_receiver_index}"
+            for session in runtime_config.security.sessions
+        }
+    peer = runtime_config.peer
+    local_receiver_index = runtime_config.security.local_receiver_index
+    if peer and local_receiver_index is not None:
+        return {int(local_receiver_index): peer}
+    return {}
+
+
+def _peer_name_for_event(event: Any, peer_names_by_scope: dict[int, str], fallback_peer_name: str) -> str:
+    """Resolve a monitor-friendly peer name for a reserved service event."""
+    peer_scope = getattr(event, "peer_scope", None)
+    if callable(peer_scope):
+        peer_scope = peer_scope()
+    if peer_scope is None:
+        return fallback_peer_name
+    return peer_names_by_scope.get(int(peer_scope), f"peer:{peer_scope}")
+
+
+def _apply_reserved_service_schedulers(dataplane: Any) -> None:
+    """Compile Python-owned reserved-service scheduling into Rust primitives."""
+    setter = getattr(dataplane, "set_service_scheduler", None)
+    if not callable(setter):
+        return
+    setter(SERVICE_ID_CONTROL_METADATA, 0, 0)
+    setter(SERVICE_ID_REMOTE_STATUS, 1, 0)
+
+
+def _try_announce_control_metadata(
+    dataplane: Any,
+    runtime_config: RuntimeConfig,
+    control_metadata: dict[str, object],
+    *,
+    include_sink_time: bool,
+) -> None:
+    """
+    Send sparse discovery if the current transport state can carry it.
+
+    Shared sink configs may not have a fixed outbound carrier tuple before the
+    first authenticated source packet arrives. That is not a fatal service
+    failure; Python retries at the normal control cadence after Rust learns
+    enough peer/session state to transmit.
+    """
+    try:
+        announce_control_metadata(
+            dataplane,
+            runtime_config,
+            control_metadata,
+            include_sink_time=include_sink_time,
+        )
+    except RuntimeError as exc:
+        logger.warning("control metadata announcement skipped", extra={"error": str(exc)})
 
 
 def _forward_available_for_service(dataplane: Any, service_name: str, batch_size: int) -> list[Any]:

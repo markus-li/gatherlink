@@ -98,7 +98,9 @@ def test_relay_session_rejects_non_relay_or_revoked_nodes() -> None:
             relay_receiver_index=55,
         )
 
-    revoked_topology = _topology(upstream, relay, downstream, revoked=[IdentityPublicRecord.from_identity(downstream).node_id])
+    revoked_topology = _topology(
+        upstream, relay, downstream, revoked=[IdentityPublicRecord.from_identity(downstream).node_id]
+    )
     with pytest.raises(ValueError, match="revoked"):
         authorize_relay_session(
             topology=revoked_topology,

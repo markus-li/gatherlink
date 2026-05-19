@@ -20,6 +20,7 @@ class ReservedServicePayload:
     sequence: int
     payload: bytes
     frame_bytes: int
+    peer_scope: int | None = None
 
 
 def drain_reserved_service_events(
@@ -78,6 +79,7 @@ def handle_control_metadata_event(
     logger: Callable[[str], None] | None = None,
 ) -> bool:
     """Decode and apply one control-metadata payload into the shared status shape."""
+    _ = local_targets_by_service_id
     control_frame = decode_control_payload(event.payload)
     if control_frame is None:
         _log(logger, f"invalid control metadata payload on path {event.path_id}; dropping {len(event.payload)}B")
@@ -115,12 +117,6 @@ def handle_control_metadata_event(
         path_names_by_id,
         received_at_internal_us=control_metadata_helpers.internal_monotonic_us(),
     )
-    mismatches = control_metadata_helpers.verify_service_endpoint_assertions(
-        control_metadata,
-        local_targets_by_service_id,
-    )
-    for service_id, reason in mismatches.items():
-        _log(logger, f"service endpoint assertion mismatch for service id {service_id}: {reason}")
     return True
 
 
@@ -132,7 +128,16 @@ def reserved_event_from_py(event: object) -> ReservedServicePayload:
         sequence=int(event.sequence()),
         payload=bytes(event.payload()),
         frame_bytes=int(event.frame_bytes()),
+        peer_scope=_event_peer_scope(event),
     )
+
+
+def _event_peer_scope(event: object) -> int | None:
+    peer_scope = getattr(event, "peer_scope", None)
+    if not callable(peer_scope):
+        return None
+    value = peer_scope()
+    return int(value) if value is not None else None
 
 
 def note_control_metadata_sent(

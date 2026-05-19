@@ -7,7 +7,7 @@ traversal framework too early.
 
 ## Initial model
 
-MVP assumes the client initiates to a reachable relay/server and that the
+The current deployment model assumes the client initiates to a reachable relay/server and that the
 relay/server has a reachable endpoint.
 
 ## NAT rebinding

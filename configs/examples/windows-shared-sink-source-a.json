@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "node": "windows-source-a",
+  "peer": "windows-shared-sink",
+  "paths": [
+    {
+      "name": "wsl-path-a",
+      "interface": "eth0",
+      "transport_bind": "10.88.1.11:56001",
+      "transport_remote": "10.88.1.12:57001",
+      "scheduler": {
+        "mtu": 1200,
+        "tx_capacity_bps": 50000000,
+        "rx_capacity_bps": 50000000
+      }
+    },
+    {
+      "name": "wsl-path-b",
+      "interface": "eth0",
+      "transport_bind": "10.88.2.11:56002",
+      "transport_remote": "10.88.2.12:57002",
+      "scheduler": {
+        "mtu": 1200,
+        "tx_capacity_bps": 50000000,
+        "rx_capacity_bps": 50000000
+      }
+    },
+    {
+      "name": "wsl-path-c",
+      "interface": "eth0",
+      "transport_bind": "10.88.3.11:56003",
+      "transport_remote": "10.88.3.12:57003",
+      "scheduler": {
+        "mtu": 1200,
+        "tx_capacity_bps": 50000000,
+        "rx_capacity_bps": 50000000
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "udp-main",
+      "listen": "10.88.0.11:55180",
+      "target": "10.88.0.11:55181",
+      "return_mode": "learned-single-source"
+    }
+  ],
+  "security": {
+    "mode": "static",
+    "local_receiver_index": 101,
+    "remote_receiver_index": 201,
+    "send_key": "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=",
+    "receive_key": "MTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTE="
+  }
+}

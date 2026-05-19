@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+source "${SCRIPT_DIR}/vm_ip_cache.sh"
 
 PLINK="${PLINK:-/mnt/c/Progra~1/PuTTY/plink.exe}"
 BRANCH="$(cd "${REPO_ROOT}" && git rev-parse --abbrev-ref HEAD)"
@@ -127,19 +128,8 @@ record() {
   printf -- '- %s\n' "$1" | tee -a "${REPORT}"
 }
 
-resolve_vm_ip() {
-  local name="$1"
-  local helper_windows
-  helper_windows="$(wslpath -w "${SCRIPT_DIR}/resolve_gatherlink_vm.ps1")"
-  powershell.exe -ExecutionPolicy Bypass -File "${helper_windows}" -Name "${name}" | tr -d '\r'
-}
-
-if [[ -z "${IP_A}" ]]; then
-  IP_A="$(resolve_vm_ip "${VM_A}")"
-fi
-if [[ -z "${IP_B}" ]]; then
-  IP_B="$(resolve_vm_ip "${VM_B}")"
-fi
+IP_A="$(hyperv_resolve_vm_ip "${REPO_ROOT}" "${SCRIPT_DIR}" "${VM_A}" "${IP_A}")"
+IP_B="$(hyperv_resolve_vm_ip "${REPO_ROOT}" "${SCRIPT_DIR}" "${VM_B}" "${IP_B}")"
 
 remote() {
   local label="$1"
@@ -189,8 +179,12 @@ sync_node() {
 }
 
 cleanup_services_and_shapes() {
-  remote_a "cleanup-node-a" "cd /home/gatherlink/src/gatherlink && (.venv/bin/gatherlink services close vm.node-a || true); for path in path-a path-b path-c; do sudo tc qdisc del dev \${path} root 2>/dev/null || true; sudo ip link set \${path} up; done"
-  remote_b "cleanup-node-b" "cd /home/gatherlink/src/gatherlink && (.venv/bin/gatherlink services close vm.node-b || true); for path in path-a path-b path-c; do sudo tc qdisc del dev \${path} root 2>/dev/null || true; sudo ip link set \${path} up; done"
+  # The Hyper-V acceptance VMs are dedicated lab machines. Close any
+  # process-managed Gatherlink service before binding the v0.9 node ports so
+  # helper demos from a previous run cannot hold UDP sockets and create a false
+  # dataplane failure.
+  remote_a "cleanup-node-a" "cd /home/gatherlink/src/gatherlink && if [ -x .venv/bin/gatherlink ]; then .venv/bin/gatherlink services list | awk '/^[^[:space:]:]+[[:space:]]/ {print \$1}' | while read -r service; do [ -n \"\${service}\" ] && .venv/bin/gatherlink services close \"\${service}\" || true; done; fi; for path in path-a path-b path-c; do sudo tc qdisc del dev \${path} root 2>/dev/null || true; sudo ip link set \${path} up; done"
+  remote_b "cleanup-node-b" "cd /home/gatherlink/src/gatherlink && if [ -x .venv/bin/gatherlink ]; then .venv/bin/gatherlink services list | awk '/^[^[:space:]:]+[[:space:]]/ {print \$1}' | while read -r service; do [ -n \"\${service}\" ] && .venv/bin/gatherlink services close \"\${service}\" || true; done; fi; for path in path-a path-b path-c; do sudo tc qdisc del dev \${path} root 2>/dev/null || true; sudo ip link set \${path} up; done"
 }
 
 start_services() {
@@ -217,12 +211,12 @@ run_packet_smoke() {
 }
 
 run_duration_traffic() {
-  remote_b "duration-receiver" "cd /home/gatherlink/src/gatherlink && rm -f /tmp/duration-received.txt; (timeout $((DURATION + 10)) .venv/bin/python tools/udp_probe.py receive 127.0.0.1:51820 --count 100000 --min-count 1 --timeout $((DURATION + 5)) > /tmp/duration-received.txt 2>&1 & echo \$! > /tmp/duration-receiver.pid)"
+  remote_b "duration-receiver" "cd /home/gatherlink/src/gatherlink && rm -f /tmp/duration-received.txt /tmp/duration-received-count.txt; (timeout $((DURATION + 10)) .venv/bin/python tools/udp_probe.py receive 127.0.0.1:51820 --count 10000000 --min-count 1 --timeout $((DURATION + 5)) --max-print-packets 0 --count-file /tmp/duration-received-count.txt > /tmp/duration-received.txt 2>&1 & echo \$! > /tmp/duration-receiver.pid)"
   sleep 1
   remote_a "duration-send" "cd /home/gatherlink/src/gatherlink && .venv/bin/python tools/udp_probe.py send 127.0.0.1:55180 hyperv-duration --count 0 --duration ${DURATION} --interval ${INTERVAL} --payload-size ${PAYLOAD_SIZE} > /tmp/duration-sent.txt"
   sleep 2
   remote_capture "duration-sent-count" "${IP_A}" "${HOST_KEY_A}" "grep '^sent_packets=' /tmp/duration-sent.txt" "${OUT_DIR}/duration-sent.txt"
-  remote_capture "duration-received-count" "${IP_B}" "${HOST_KEY_B}" "count=\$(grep -c '^hyperv-duration' /tmp/duration-received.txt || true); test \${count} -gt 0; echo received_packets=\${count}" "${OUT_DIR}/duration-received.txt"
+  remote_capture "duration-received-count" "${IP_B}" "${HOST_KEY_B}" "cat /tmp/duration-received-count.txt" "${OUT_DIR}/duration-received.txt"
   assert_duration_delivery
 }
 

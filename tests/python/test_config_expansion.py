@@ -94,6 +94,36 @@ def test_static_runtime_export_redacts_key_material() -> None:
     assert len(runtime.security.send_key) == 32
 
 
+def test_path_relay_runtime_export_redacts_hop_key() -> None:
+    from base64 import b64encode
+
+    from gatherlink.config.models import PathRelayHopConfig
+
+    config = validate_config_file(EXAMPLES / "minimal-client.json")
+    relay_config = config.model_copy(
+        update={
+            "paths": [
+                config.paths[0].model_copy(
+                    update={
+                        "relay": PathRelayHopConfig(
+                            relay_receiver_index=901,
+                            send_key=b64encode(bytes([0x66]) * 32).decode("ascii"),
+                        )
+                    }
+                )
+            ]
+        }
+    )
+
+    runtime = expand_config(relay_config)
+    exported = runtime.export_dict()
+
+    assert runtime.paths[0].relay is not None
+    assert runtime.paths[0].relay.relay_receiver_index == 901
+    assert runtime.paths[0].relay.send_key == bytes([0x66]) * 32
+    assert exported["paths"][0]["relay"]["send_key"] == "[redacted:32 bytes]"
+
+
 def test_authenticated_security_compiles_to_rust_static_executor_and_redacts() -> None:
     config = validate_config_file(EXAMPLES / "windows-two-node-a.json")
     authenticated_config = config.model_copy(

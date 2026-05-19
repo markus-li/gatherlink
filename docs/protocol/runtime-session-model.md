@@ -47,7 +47,7 @@ It must be:
 - rotated when a receive session or key phase is replaced
 - mapped locally to authenticated peer/session/key state
 
-It is not a stable node identifier, route identifier, service identifier, or
+It is not a stable node identifier, service identifier, routing authority, or
 operator-facing name.
 
 ## Services and paths
@@ -59,6 +59,28 @@ Examples include a control service reachable over more than one authenticated
 relationship, or a service deliberately exposed through multiple exits. Routing
 and exit choice must come from authenticated configuration/control context, not
 from plaintext packet labels.
+
+A sink may accept more than one authenticated source peer on the same local UDP
+carrier port for each path. This is the normal server-like shape: adding a
+source peer must not require opening a new public sink UDP port. The sink
+demultiplexes inbound secure packets by opaque `receiver_index` into compiled
+session state, then by decrypted service/path context after AEAD succeeds.
+Source address and UDP port are observed carrier facts and may be used for
+return-path learning or diagnostics, but they are not the authentication or
+service-routing authority.
+
+When the sink emits multiple peers into one local UDP server, server-like
+helpers usually need peer-scoped app sources. In that mode Rust sends each
+authenticated peer/session's payloads to the configured local target from a
+separate ephemeral UDP source socket, then maps replies arriving on that socket
+back to the same peer/session. This keeps WireGuard-style endpoint behavior
+usable without turning Gatherlink into a VPN or putting peer policy in Rust.
+Python owns which services may use this mode.
+
+Compatible runtime reapply preserves those peer-scoped app sources and learned
+authenticated carrier remotes. A harmless config refresh should not make a
+server-like helper observe new local UDP source endpoints for already-active
+peers.
 
 `service_id` is local runtime context. Python assigns or compiles it from the
 human-facing config and control state. Rust treats it as a compact execution
@@ -98,7 +120,7 @@ sequence    <- compact v2 sequence
 New hot-path code should prefer compact v2 after decryption and should not
 reintroduce redundant plaintext fields.
 
-`route_id` is explicitly removed. Do not keep it as a runtime compatibility
-field. Routing through untrusted peers is represented by outer routing/relay-hop
-headers and authenticated relay session state. Endpoint service/exit decisions
-happen only after endpoint decrypt from authenticated service/control context.
+Do not keep routing labels as runtime compatibility fields. Routing through
+untrusted peers is represented by outer routing/relay-hop headers and
+authenticated relay session state. Endpoint service/exit decisions happen only
+after endpoint decrypt from authenticated service/control context.

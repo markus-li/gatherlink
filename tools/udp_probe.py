@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import socket
 import time
+from pathlib import Path
 
 
 def _parse_host_port(value: str) -> tuple[str, int]:
@@ -18,21 +19,40 @@ def _parse_host_port(value: str) -> tuple[str, int]:
     return host, port
 
 
-def _receive(bind: tuple[str, int], timeout: float, count: int, min_count: int) -> None:
+def _write_count_file(path: Path | None, count: int) -> None:
+    if path is not None:
+        path.write_text(f"received_packets={count}\n", encoding="utf-8")
+
+
+def _receive(
+    bind: tuple[str, int],
+    timeout: float,
+    count: int,
+    min_count: int,
+    *,
+    max_print_packets: int | None = None,
+    count_file: Path | None = None,
+) -> None:
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
         udp_socket.settimeout(timeout)
         udp_socket.bind(bind)
         received = 0
+        _write_count_file(count_file, received)
         while received < count:
             try:
                 data, source = udp_socket.recvfrom(65535)
             except TimeoutError:
                 if received >= min_count:
+                    _write_count_file(count_file, received)
                     return
                 raise
             received += 1
-            print(data.decode("utf-8", errors="replace"))
-            print(f"{source[0]}:{source[1]}")
+            if max_print_packets is None or received <= max_print_packets:
+                print(data.decode("utf-8", errors="replace"))
+                print(f"{source[0]}:{source[1]}")
+            if count_file is not None and (received == count or received % 100 == 0):
+                _write_count_file(count_file, received)
+        _write_count_file(count_file, received)
 
 
 def _send(
@@ -63,6 +83,52 @@ def _send(
         return sent_packets
 
 
+def _echo(
+    bind: tuple[str, int],
+    timeout: float,
+    count: int,
+    *,
+    prefix: str = "reply:",
+) -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
+        udp_socket.settimeout(timeout)
+        udp_socket.bind(bind)
+        received = 0
+        while received < count:
+            data, source = udp_socket.recvfrom(65535)
+            response = prefix.encode() + data
+            udp_socket.sendto(response, source)
+            received += 1
+            print(data.decode("utf-8", errors="replace"))
+            print(f"{source[0]}:{source[1]}")
+        return received
+
+
+def _request(
+    target: tuple[str, int],
+    payload: str,
+    timeout: float,
+    *,
+    bind: tuple[str, int] | None = None,
+    expected_prefix: str = "reply:",
+) -> bytes:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp_socket:
+        udp_socket.settimeout(timeout)
+        if bind is not None:
+            udp_socket.bind(bind)
+        udp_socket.sendto(payload.encode(), target)
+        data, source = udp_socket.recvfrom(65535)
+        expected = f"{expected_prefix}{payload}".encode()
+        if data != expected:
+            raise RuntimeError(
+                f"unexpected reply from {source[0]}:{source[1]}: "
+                f"expected {expected.decode(errors='replace')!r}, got {data.decode(errors='replace')!r}"
+            )
+        print(data.decode("utf-8", errors="replace"))
+        print(f"{source[0]}:{source[1]}")
+        return data
+
+
 def main() -> None:
     """Run the UDP probe command line."""
     parser = argparse.ArgumentParser(description=__doc__)
@@ -78,6 +144,18 @@ def main() -> None:
         help="Allow timeout after at least this many packets; defaults to --count.",
     )
     receive_parser.add_argument("--timeout", type=float, default=5.0)
+    receive_parser.add_argument(
+        "--max-print-packets",
+        type=int,
+        default=None,
+        help="Only print payload/source lines for this many packets; defaults to all packets.",
+    )
+    receive_parser.add_argument(
+        "--count-file",
+        type=Path,
+        default=None,
+        help="Continuously write received_packets=N for long-running probes.",
+    )
 
     send_parser = subparsers.add_parser("send", help="send one UDP datagram")
     send_parser.add_argument("target", type=_parse_host_port)
@@ -87,12 +165,34 @@ def main() -> None:
     send_parser.add_argument("--interval", type=float, default=0.0)
     send_parser.add_argument("--payload-size", type=int, default=None)
 
+    echo_parser = subparsers.add_parser("echo", help="receive UDP datagrams and reply to each sender")
+    echo_parser.add_argument("bind", type=_parse_host_port)
+    echo_parser.add_argument("--count", type=int, default=1)
+    echo_parser.add_argument("--timeout", type=float, default=5.0)
+    echo_parser.add_argument("--prefix", default="reply:")
+
+    request_parser = subparsers.add_parser("request", help="send one UDP datagram and wait for an expected reply")
+    request_parser.add_argument("target", type=_parse_host_port)
+    request_parser.add_argument("payload")
+    request_parser.add_argument("--timeout", type=float, default=5.0)
+    request_parser.add_argument("--bind", type=_parse_host_port, default=None)
+    request_parser.add_argument("--expected-prefix", default="reply:")
+
     args = parser.parse_args()
     if args.command == "receive":
         min_count = args.count if args.min_count is None else args.min_count
         if min_count < 0 or min_count > args.count:
             parser.error("--min-count must be between 0 and --count")
-        _receive(args.bind, args.timeout, args.count, min_count)
+        if args.max_print_packets is not None and args.max_print_packets < 0:
+            parser.error("--max-print-packets must be non-negative")
+        _receive(
+            args.bind,
+            args.timeout,
+            args.count,
+            min_count,
+            max_print_packets=args.max_print_packets,
+            count_file=args.count_file,
+        )
     elif args.command == "send":
         if args.count < 0:
             parser.error("--count must be non-negative")
@@ -111,6 +211,13 @@ def main() -> None:
             payload_size=args.payload_size,
         )
         print(f"sent_packets={sent}")
+    elif args.command == "echo":
+        if args.count < 0:
+            parser.error("--count must be non-negative")
+        echoed = _echo(args.bind, args.timeout, args.count, prefix=args.prefix)
+        print(f"echoed_packets={echoed}")
+    elif args.command == "request":
+        _request(args.target, args.payload, args.timeout, bind=args.bind, expected_prefix=args.expected_prefix)
 
 
 if __name__ == "__main__":

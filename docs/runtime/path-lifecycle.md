@@ -36,7 +36,7 @@ selection, but it should not pretend to provide reliable delivery for arbitrary
 UDP payloads. Reliability belongs to the application protocol above Gatherlink
 unless a future helper explicitly owns a reliable stream abstraction.
 
-For MVP labs:
+For local labs:
 
 - `tools/wsl_shape_private_lan.sh` can rate-limit or drop path traffic
 - `tools/run_wsl_mvp_acceptance.ps1` drops one WSL carrier path and verifies

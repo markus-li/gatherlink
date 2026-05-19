@@ -27,7 +27,7 @@ silently rewrite service intent.
 Secure relay forwarding is hop-authenticated. Gatherlink does not support
 plaintext routing labels for secure transport: relays must not forward by
 reading plaintext service ids, path ids, route labels, endpoint addresses,
-tenant names, or policy labels from data packets. `route_id` is removed.
+tenant names, or policy labels from data packets.
 Routing through untrusted peers uses outer routing/relay-hop headers and
 authenticated relay session state.
 

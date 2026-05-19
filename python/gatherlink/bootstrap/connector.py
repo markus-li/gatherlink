@@ -99,7 +99,9 @@ def probe_candidate(
             warning="authenticated bootstrap requires --peer-identity and --proof",
         )
 
-    logger.warning("using insecure bootstrap candidate %s; this is only acceptable for local labs", endpoint.authority())
+    logger.warning(
+        "using insecure bootstrap candidate %s; this is only acceptable for local labs", endpoint.authority()
+    )
     return BootstrapProbeResult(
         endpoint=endpoint,
         reachable=True,

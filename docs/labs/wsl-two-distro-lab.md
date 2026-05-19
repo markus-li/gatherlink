@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the repeatable Windows-hosted MVP lab. It uses two Debian WSL
+This is the repeatable Windows-hosted WSL lab. It uses two Debian WSL
 distributions as separate Gatherlink processes so the normal service lifecycle,
 status HTTP helper, authenticated config-facing AEAD material, three carrier paths, shaping, path
 degradation/recovery, diagnostics, and teardown can be tested before moving the
@@ -30,7 +30,15 @@ Expected Gatherlink instances:
 - `gatherlink-dev`
 - `gatherlink-peer`
 
-Both should have `/home/markus/src/gatherlink` and the project virtualenv.
+The shared-sink v0.9 gate also uses:
+
+- `gatherlink-peer-b`
+
+Both should have `/home/gatherlink-user/src/gatherlink` and the project virtualenv.
+
+In the current local development setup, the prepared user may be `markus`
+instead of `gatherlink-user`; keep the commands' user/home path aligned with
+the distro that was cloned.
 
 ## Successful Local Setup Summary
 
@@ -38,8 +46,8 @@ The tested WSL setup was:
 
 1. Export the already-working `gatherlink-dev` distro.
 2. Import that export as `gatherlink-peer`.
-3. Run peer commands as `markus`, because the repo and virtualenv live under
-   `/home/markus`.
+3. Run peer commands as `gatherlink-user`, because the repo and virtualenv live under
+   `/home/gatherlink-user`.
 4. Sync code from `gatherlink-dev` to `gatherlink-peer` with a Git bundle.
 5. Add the service and path `/32` addresses to WSL loopback with
    `tools/setup_wsl_private_lan.ps1`.
@@ -66,7 +74,7 @@ From Windows PowerShell:
 ```powershell
 wsl --export gatherlink-dev "$env:USERPROFILE\Documents\gatherlink-dev.tar"
 wsl --import gatherlink-peer "$env:USERPROFILE\Documents\gatherlink-peer" "$env:USERPROFILE\Documents\gatherlink-dev.tar"
-wsl -d gatherlink-peer -u markus -- bash -lc "cd /home/markus/src/gatherlink && . .venv/bin/activate && gatherlink --help"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && . .venv/bin/activate && gatherlink --help"
 ```
 
 If an earlier attempt created the wrong instance, remove only that instance and
@@ -83,22 +91,23 @@ bundle. This avoids needing network access or GitHub credentials inside both
 instances during local testing:
 
 ```powershell
-wsl -d gatherlink-dev -- bash -lc "cd /home/markus/src/gatherlink && git bundle create /mnt/c/Users/<windows-user>/Documents/gatherlink-project-orientation.bundle project-orientation"
-wsl -d gatherlink-peer -u markus -- bash -lc "cd /home/markus/src/gatherlink && git fetch /mnt/c/Users/<windows-user>/Documents/gatherlink-project-orientation.bundle project-orientation:refs/remotes/bundle/project-orientation && git checkout project-orientation && git reset --hard refs/remotes/bundle/project-orientation"
+wsl -d gatherlink-dev -- bash -lc "cd /home/gatherlink-user/src/gatherlink && git bundle create /mnt/c/Users/<windows-user>/Documents/gatherlink-main.bundle main"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && git fetch /mnt/c/Users/<windows-user>/Documents/gatherlink-main.bundle main:refs/remotes/bundle/main && git checkout main && git reset --hard refs/remotes/bundle/main"
 ```
 
 Verify both sides:
 
 ```powershell
 wsl --list --verbose
-wsl -d gatherlink-dev -- bash -lc "cd /home/markus/src/gatherlink && git log --oneline -1 && . .venv/bin/activate && gatherlink config validate configs/examples/windows-two-node-a.json"
-wsl -d gatherlink-peer -u markus -- bash -lc "cd /home/markus/src/gatherlink && git log --oneline -1 && . .venv/bin/activate && gatherlink config validate configs/examples/windows-two-node-b.json"
+wsl -d gatherlink-dev -- bash -lc "cd /home/gatherlink-user/src/gatherlink && git log --oneline -1 && . .venv/bin/activate && gatherlink config validate configs/examples/windows-two-node-a.json"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && git log --oneline -1 && . .venv/bin/activate && gatherlink config validate configs/examples/windows-two-node-b.json"
 ```
 
 Notes:
 
-- Use `-u markus` for `gatherlink-peer` when running project commands. The
-  imported distro has the `markus` user and repo under `/home/markus`.
+- Use `-u gatherlink-user` for `gatherlink-peer` when running project commands. The
+  imported distro has the `gatherlink-user` user and repo under
+  `/home/gatherlink-user`.
 - WSL distributions may share the same `eth0` address. That is acceptable for
   this local process/service smoke path, but it is not a substitute for a true
   two-VM network acceptance test.
@@ -114,7 +123,7 @@ with:
 
 ```powershell
 wsl -d gatherlink-dev -- bash -lc "sudo readlink /proc/1/ns/net"
-wsl -d gatherlink-peer -u markus -- bash -lc "sudo readlink /proc/1/ns/net"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "sudo readlink /proc/1/ns/net"
 ```
 
 Both currently report the same namespace id. Because of that, the WSL test path
@@ -129,18 +138,35 @@ That script runs:
 ```bash
 sudo ip addr replace 10.88.0.11/32 dev lo
 sudo ip addr replace 10.88.0.12/32 dev lo
+sudo ip addr replace 10.88.0.13/32 dev lo
 sudo ip addr replace 10.88.1.11/32 dev lo
 sudo ip addr replace 10.88.1.12/32 dev lo
+sudo ip addr replace 10.88.1.13/32 dev lo
 sudo ip addr replace 10.88.2.11/32 dev lo
 sudo ip addr replace 10.88.2.12/32 dev lo
+sudo ip addr replace 10.88.2.13/32 dev lo
 sudo ip addr replace 10.88.3.11/32 dev lo
 sudo ip addr replace 10.88.3.12/32 dev lo
+sudo ip addr replace 10.88.3.13/32 dev lo
 ```
 
 The aliases are visible to both WSL distros because they share the same network
 namespace. The WSL example configs bind node A to `10.88.0.11` and node B to
 `10.88.0.12`, so the Gatherlink carrier sockets and test service sockets no
 longer use plain `127.0.0.1`.
+
+The shared-sink examples add source B at `10.88.0.13` and path source aliases
+`10.88.1.13`, `10.88.2.13`, and `10.88.3.13`. They prove two source distros can
+send to one sink distro using the same sink carrier UDP ports:
+
+```text
+configs/examples/windows-shared-sink-source-a.json
+configs/examples/windows-shared-sink-source-b.json
+configs/examples/windows-shared-sink-server.json
+```
+
+The sink path configs intentionally omit `transport_remote`. Carrier source
+tuples are learned only after receiver-index demux and AEAD authentication.
 
 ## WSL Path Shaping
 
@@ -149,7 +175,7 @@ both WSL distros share one Linux network namespace, shaping is applied once to
 the shared `lo` device and can be done from either WSL instance:
 
 ```powershell
-wsl -d gatherlink-dev -- bash -lc "cd /home/markus/src/gatherlink && sudo tools/wsl_shape_private_lan.sh apply path-a.ab=3mbit path-a.ba=2mbit path-b.ab=1500kbit path-b.ba=1500kbit path-c.ab=750kbit path-c.ba=1mbit"
+wsl -d gatherlink-dev -- bash -lc "cd /home/gatherlink-user/src/gatherlink && sudo tools/wsl_shape_private_lan.sh apply path-a.ab=3mbit path-a.ba=2mbit path-b.ab=1500kbit path-b.ba=1500kbit path-c.ab=750kbit path-c.ba=1mbit"
 ```
 
 Direction labels:
@@ -173,15 +199,15 @@ loopback in WSL:
 Inspect or clear shaping:
 
 ```powershell
-wsl -d gatherlink-dev -- bash -lc "cd /home/markus/src/gatherlink && sudo tools/wsl_shape_private_lan.sh show"
-wsl -d gatherlink-dev -- bash -lc "cd /home/markus/src/gatherlink && sudo tools/wsl_shape_private_lan.sh clear"
+wsl -d gatherlink-dev -- bash -lc "cd /home/gatherlink-user/src/gatherlink && sudo tools/wsl_shape_private_lan.sh show"
+wsl -d gatherlink-dev -- bash -lc "cd /home/gatherlink-user/src/gatherlink && sudo tools/wsl_shape_private_lan.sh clear"
 ```
 
 Raw UDP sanity check:
 
 ```powershell
-wsl -d gatherlink-peer -u markus -- bash -lc "cd /home/markus/src/gatherlink && python3 tools/udp_probe.py receive 10.88.0.12:59099 --timeout 5"
-wsl -d gatherlink-dev -- bash -lc "cd /home/markus/src/gatherlink && python3 tools/udp_probe.py send 10.88.0.12:59099 raw-private-lan"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && python3 tools/udp_probe.py receive 10.88.0.12:59099 --timeout 5"
+wsl -d gatherlink-dev -- bash -lc "cd /home/gatherlink-user/src/gatherlink && python3 tools/udp_probe.py send 10.88.0.12:59099 raw-private-lan"
 ```
 
 Expected result: the peer receiver prints `raw-private-lan`.
@@ -216,7 +242,7 @@ but it must not silently set target IP/port.
 
 ## Commands
 
-The repeatable WSL MVP acceptance gate is:
+The repeatable WSL acceptance gate is:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File ".\tools\run_wsl_mvp_acceptance.ps1"
@@ -245,34 +271,34 @@ Manual commands are still useful when debugging individual layers.
 In Windows Terminal, start node B first:
 
 ```powershell
-wsl -d gatherlink-peer -u markus -- bash -lc "cd /home/markus/src/gatherlink && . .venv/bin/activate && gatherlink run start configs/examples/windows-two-node-b.json --name core.windows-node-b --scheduler-reapply-interval 5"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && . .venv/bin/activate && gatherlink run start configs/examples/windows-two-node-b.json --name core.windows-node-b --scheduler-reapply-interval 5"
 ```
 
 Then start node A:
 
 ```powershell
-wsl -d gatherlink-dev -u markus -- bash -lc "cd /home/markus/src/gatherlink && . .venv/bin/activate && gatherlink run start configs/examples/windows-two-node-a.json --name core.windows-node-a --scheduler-reapply-interval 5"
+wsl -d gatherlink-dev -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && . .venv/bin/activate && gatherlink run start configs/examples/windows-two-node-a.json --name core.windows-node-a --scheduler-reapply-interval 5"
 ```
 
 Optional status HTTP helpers:
 
 ```powershell
-wsl -d gatherlink-dev -u markus -- bash -lc "cd /home/markus/src/gatherlink && . .venv/bin/activate && gatherlink helpers status-http --listen 127.0.0.1:8765"
-wsl -d gatherlink-peer -u markus -- bash -lc "cd /home/markus/src/gatherlink && . .venv/bin/activate && gatherlink helpers status-http --listen 127.0.0.1:8766"
+wsl -d gatherlink-dev -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && . .venv/bin/activate && gatherlink helpers status-http --listen 127.0.0.1:8765"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && . .venv/bin/activate && gatherlink helpers status-http --listen 127.0.0.1:8766"
 ```
 
 Check managed services:
 
 ```powershell
-wsl -d gatherlink-dev -u markus -- bash -lc "cd /home/markus/src/gatherlink && . .venv/bin/activate && gatherlink services status core.windows-node-a"
-wsl -d gatherlink-peer -u markus -- bash -lc "cd /home/markus/src/gatherlink && . .venv/bin/activate && gatherlink services status core.windows-node-b"
+wsl -d gatherlink-dev -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && . .venv/bin/activate && gatherlink services status core.windows-node-a"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && . .venv/bin/activate && gatherlink services status core.windows-node-b"
 ```
 
 Send one packet through node A and receive it at node B:
 
 ```powershell
-wsl -d gatherlink-peer -u markus -- bash -lc "cd /home/markus/src/gatherlink && python3 tools/udp_probe.py receive 10.88.0.12:51820 --timeout 6"
-wsl -d gatherlink-dev -u markus -- bash -lc "cd /home/markus/src/gatherlink && python3 tools/udp_probe.py send 10.88.0.11:55180 hello-two-node"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && python3 tools/udp_probe.py receive 10.88.0.12:51820 --timeout 6"
+wsl -d gatherlink-dev -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && python3 tools/udp_probe.py send 10.88.0.11:55180 hello-two-node"
 ```
 
 Expected result:
@@ -286,9 +312,37 @@ Expected result:
 Stop services:
 
 ```powershell
-wsl -d gatherlink-dev -u markus -- bash -lc "cd /home/markus/src/gatherlink && . .venv/bin/activate && gatherlink services close core.windows-node-a"
-wsl -d gatherlink-peer -u markus -- bash -lc "cd /home/markus/src/gatherlink && . .venv/bin/activate && gatherlink services close core.windows-node-b"
+wsl -d gatherlink-dev -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && . .venv/bin/activate && gatherlink services close core.windows-node-a"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && . .venv/bin/activate && gatherlink services close core.windows-node-b"
 ```
+
+## Three-WSL Shared Sink Proof
+
+After syncing the same commit and rebuilding local Rust bindings in all three
+distros, start the shared sink and both sources:
+
+```powershell
+wsl -d gatherlink-dev -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && .venv/bin/gatherlink run start configs/examples/windows-shared-sink-server.json --name core.wsl-shared-sink"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && .venv/bin/gatherlink run start configs/examples/windows-shared-sink-source-a.json --name core.wsl-source-a"
+wsl -d gatherlink-peer-b -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && .venv/bin/gatherlink run start configs/examples/windows-shared-sink-source-b.json --name core.wsl-source-b"
+```
+
+For WSL's shared network namespace, bind the app target broadly and let the
+sink config target the sink service IP. This avoids distro-specific loopback
+alias delivery quirks while still proving the Gatherlink carrier path uses the
+shared sink UDP ports.
+
+```powershell
+wsl -d gatherlink-dev -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && .venv/bin/python tools/udp_probe.py echo 0.0.0.0:51820 --count 2 --timeout 30"
+wsl -d gatherlink-peer -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && .venv/bin/python tools/udp_probe.py request 10.88.0.11:55180 source-a-any --timeout 10"
+wsl -d gatherlink-peer-b -u gatherlink-user -- bash -lc "cd /home/gatherlink-user/src/gatherlink && .venv/bin/python tools/udp_probe.py request 10.88.0.13:55180 source-b-any --timeout 10"
+```
+
+Expected result:
+
+- both source commands print their own `reply:` payload
+- the sink echo output shows two different peer-scoped source ports
+- sink and source status show zero security drops and no false reorder counters
 
 ## Current Limits
 

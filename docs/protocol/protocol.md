@@ -99,8 +99,15 @@ local tunnel/session context. They must not need plaintext `service_id`,
 `path_id`, endpoint addresses, tenant names, policy names, or route labels to
 forward end-to-end encrypted data.
 
+Sink UDP carrier sockets must support multiple authenticated source peers on
+the same bind address/port. The first secure demux key is the clear opaque
+`receiver_index`; the authority for accepting the packet is successful AEAD
+authentication against the compiled session selected by that index. The remote
+UDP source tuple is a carrier observation and possible return-path hint, not a
+trusted peer identity and not a reason to allocate a separate sink port.
+
 The v1 wire format carries `version`, but not separate header length, flags,
-session id, route id, route_id, or payload length fields. V2 omits `version` as
+session id, routing label, or payload length fields. V2 omits `version` as
 well.
 
 ## Encrypted Relay Routing
@@ -190,17 +197,26 @@ Service IDs are unsigned 16-bit integers. The full protocol space is
 `0..65535`, but the low range is reserved so Gatherlink internals never collide
 with user/application UDP services.
 
+The reserved table names protocol lanes, not automatic implementation status.
+Current code uses reserved service id `1` for the generic control metaband
+and id `8` for production-owned remote status. Other named lanes are reserved
+for future dedicated protocols unless a specific implementation doc says
+otherwise. For example, DNS tunnel traffic uses an explicit configured user
+service today, sink time and path labels ride inside control metadata, monitor
+cadence is local IPC, config changes use restart or scheduler reapply, and
+Noise/session provisioning is out-of-band CLI/file exchange.
+
 | Range | Owner | Notes |
 | ---: | --- | --- |
 | `0` | invalid / unset | Used only before runtime config assigns an id |
-| `1` | control metadata | Generic control metaband |
-| `2` | time sync | Sink time and internal clock sync |
-| `3` | internal DNS | Reserved for the DNS helper path |
-| `4` | path discovery / keepalive | Reserved for peer/path liveness |
-| `5` | diagnostics | Reserved for monitor detail requests and diagnostic streams |
-| `6` | config apply | Reserved for safe reload/apply coordination |
-| `7` | auth / crypto | Reserved for future handshake traffic |
-| `8` | remote status | Reserved for on-demand IPC/status export |
+| `1` | control metadata | Active generic control metaband |
+| `2` | time sync | Reserved for a future dedicated time-sync lane; current sink time uses control metadata |
+| `3` | internal DNS | Reserved for a future internal DNS lane; current DNS tunnel helper uses configured user services |
+| `4` | path discovery / keepalive | Reserved for future dedicated peer/path liveness; current path labels use control metadata |
+| `5` | diagnostics | Reserved for future monitor detail requests and diagnostic streams |
+| `6` | config apply | Reserved for future safe reload/apply coordination |
+| `7` | auth / crypto | Reserved for future in-band handshake traffic |
+| `8` | remote status | V1-required lane for explicit temporary read-only IPC/status export |
 | `9..255` | Gatherlink reserved | Future internal services |
 | `256..65535` | user/application services | Normal configured UDP services |
 
@@ -220,15 +236,18 @@ and foreground service startup warn whenever a user service pins an explicit ID.
 
 ## Global Sequence Numbers
 
-The fixed data header carries one global `u64` sequence number. It is global
-instead of per-path so the receiver can detect cross-path missing packets,
-duplicates, and out-of-order arrivals without extra data-header overhead.
+The fixed data header carries one `u64` sequence number. Within one authenticated
+peer/session/service transmission scope it is global instead of per-path, so the
+receiver can detect cross-path missing packets, duplicates, and out-of-order
+arrivals without extra data-header overhead. A shared sink keeps independent
+sequence spaces for each authenticated peer it sends to; packets intentionally
+sent to another peer must not appear as local gaps.
 
 Receivers compare sequence numbers with wraparound-safe arithmetic. A later
 sequence creates a missing range; an older sequence within the receive window is
 out of order, late, or duplicate. The counter space is `2^64` packets per
 session/service, so wrap is practically unreachable but still part of the
-protocol contract.
+protocol contract for each authenticated peer/session/service scope.
 
 The receiver cannot attribute a missing sequence to a path from the missing data
 packet itself, because the packet never arrived. Path attribution comes from the
@@ -342,7 +361,31 @@ means. Heavier diagnostic or IPC data uses its own reserved service id, enabled
 or requested by control metadata, so Python can compile normal one-path fanout
 for it. Reserved service id `8` is the remote-status lane for on-demand IPC
 snapshots. Its payload is Python-owned, and Rust only frames/sends/receives it
-according to Python-compiled service/path scheduler settings.
+according to Python-compiled service/path scheduler settings. When a shared
+sink receives an id `8` request from an authenticated peer, Rust attaches the
+peer/session scope to the reserved-service event so Python can reply to that
+exact peer without parsing carrier endpoints or teaching Rust the remote-status
+protocol.
+Reserved-service frames still advance Rust's cheap global sequence telemetry so
+normal control/remote-status traffic does not appear as missing user-service
+packets in operator counters.
+Forward sequence gaps are exposed as reorder pressure, not confirmed loss,
+until a timeout/expiry mechanism proves the skipped packets will not arrive.
+
+Discovery/control metadata and remote IPC/status must stay separate:
+
+- discovery is continuous, sparse, authenticated metadata on the control
+  metaband
+- discovery sends at a low baseline cadence and promptly on important changes
+- discovery advertises stable facts such as service id/name mappings, path
+  names, capacity, MTU, disabled-service assertions, and endpoint assertions
+  for verification
+- remote status uses reserved service id `8` only when explicitly requested by
+  a local operator/tool
+- remote status is read-only, temporary, and auto-expires when the requester
+  stops refreshing it
+- remote status may carry live counters and status snapshots; discovery should
+  not stream those by default
 
 This is enough for real telemetry:
 

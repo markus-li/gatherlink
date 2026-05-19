@@ -40,4 +40,3 @@ class ReplayWindow:
             return False
         self.bitmap |= mask
         return True
-

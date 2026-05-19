@@ -69,9 +69,9 @@ Protocol/control-plane should leave space for:
 - allowed_next_hops
 - route_class
 
-`route_id` is removed. Secure transit/routing is represented by outer
-routing/relay-hop headers and authenticated relay session state, not by
-endpoint packet fields or compatibility route labels.
+Secure transit/routing is represented by outer routing/relay-hop headers and
+authenticated relay session state, not by endpoint packet fields or
+compatibility route labels.
 
 ## Site-to-site
 

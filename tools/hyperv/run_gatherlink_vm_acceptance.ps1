@@ -1,7 +1,7 @@
 param(
     [string] $HostKeyA = "",
     [string] $HostKeyB = "",
-    [string] $Branch = "project-orientation",
+    [string] $Branch = "main",
     [int] $Count = 5,
     [switch] $SkipSync,
     [switch] $KeepRunning

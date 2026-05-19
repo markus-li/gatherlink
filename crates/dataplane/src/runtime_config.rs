@@ -41,6 +41,66 @@ pub enum TransportSecurityConfig {
         send_key: [u8; 32],
         receive_key: [u8; 32],
     },
+    /// Multiple static sessions sharing the same sink carrier sockets.
+    ///
+    /// Python decides which peers and services are allowed. Rust only uses the
+    /// clear receiver index to choose a key for authentication and, when a
+    /// service id is mapped to exactly one session, the outbound key.
+    StaticSessions(Vec<TransportSecuritySessionConfig>),
+}
+
+/// One Python-compiled static transport session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransportSecuritySessionConfig {
+    local_receiver_index: u32,
+    remote_receiver_index: u32,
+    send_key: [u8; 32],
+    receive_key: [u8; 32],
+    service_ids: Vec<ServiceId>,
+}
+
+impl TransportSecuritySessionConfig {
+    /// Build one low-level transport session from Python-owned trust policy.
+    pub fn new(
+        local_receiver_index: u32,
+        remote_receiver_index: u32,
+        send_key: [u8; 32],
+        receive_key: [u8; 32],
+        service_ids: Vec<ServiceId>,
+    ) -> Self {
+        Self {
+            local_receiver_index,
+            remote_receiver_index,
+            send_key,
+            receive_key,
+            service_ids,
+        }
+    }
+
+    /// Local receiver index this node expects from the peer.
+    pub fn local_receiver_index(&self) -> u32 {
+        self.local_receiver_index
+    }
+
+    /// Remote receiver index this node puts on packets sent to the peer.
+    pub fn remote_receiver_index(&self) -> u32 {
+        self.remote_receiver_index
+    }
+
+    /// Directional send key.
+    pub fn send_key(&self) -> [u8; 32] {
+        self.send_key
+    }
+
+    /// Directional receive key.
+    pub fn receive_key(&self) -> [u8; 32] {
+        self.receive_key
+    }
+
+    /// Service ids Python mapped to this peer for outbound sends.
+    pub fn service_ids(&self) -> &[ServiceId] {
+        &self.service_ids
+    }
 }
 
 impl Default for TransportSecurityConfig {
@@ -54,9 +114,23 @@ impl TransportSecurityConfig {
     pub fn packet_overhead(&self) -> usize {
         match self {
             Self::None => 0,
-            Self::Static { .. } => {
+            Self::Static { .. } | Self::StaticSessions(_) => {
                 gatherlink_crypto::envelope::ENCRYPTED_DATA_HEADER_LEN + gatherlink_crypto::envelope::AEAD_TAG_LEN
             }
+        }
+    }
+
+    /// Return local receiver indexes that remain valid after this config applies.
+    pub fn local_receiver_indexes(&self) -> Vec<u32> {
+        match self {
+            Self::None => Vec::new(),
+            Self::Static {
+                local_receiver_index, ..
+            } => vec![*local_receiver_index],
+            Self::StaticSessions(sessions) => sessions
+                .iter()
+                .map(TransportSecuritySessionConfig::local_receiver_index)
+                .collect(),
         }
     }
 }
@@ -186,10 +260,38 @@ pub struct CorePathConfig {
     mtu: usize,
     transport_bind: Option<SocketAddr>,
     transport_remote: Option<SocketAddr>,
+    relay_send: Option<RelayHopSendConfig>,
     enabled: bool,
     state: PathSchedulerState,
     weight: u16,
     primitives: PathSchedulerPrimitives,
+}
+
+/// Already-compiled outer relay-hop wrapping facts for a path transport.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayHopSendConfig {
+    relay_receiver_index: u32,
+    send_key: [u8; 32],
+}
+
+impl RelayHopSendConfig {
+    /// Build hop wrapping facts after Python has authorized the relay session.
+    pub fn new(relay_receiver_index: u32, send_key: [u8; 32]) -> Self {
+        Self {
+            relay_receiver_index,
+            send_key,
+        }
+    }
+
+    /// Receiver index the relay expects on the outer hop envelope.
+    pub fn relay_receiver_index(&self) -> u32 {
+        self.relay_receiver_index
+    }
+
+    /// Hop AEAD key for this sender-to-relay direction.
+    pub fn send_key(&self) -> [u8; 32] {
+        self.send_key
+    }
 }
 
 impl CorePathConfig {
@@ -244,6 +346,7 @@ impl CorePathConfig {
             mtu,
             transport_bind: None,
             transport_remote: None,
+            relay_send: None,
             enabled,
             state,
             weight,
@@ -271,10 +374,31 @@ impl CorePathConfig {
         self.transport_remote
     }
 
+    /// Optional outer relay-hop wrapping facts for this path.
+    pub fn relay_send(&self) -> Option<&RelayHopSendConfig> {
+        self.relay_send.as_ref()
+    }
+
     /// Return a copy with production path transport endpoints attached.
     pub fn with_transport(mut self, bind: SocketAddr, remote: SocketAddr) -> Self {
         self.transport_bind = Some(bind);
         self.transport_remote = Some(remote);
+        self
+    }
+
+    /// Return a copy with only the local carrier bind attached.
+    ///
+    /// Shared sink sockets intentionally have no single configured remote; the
+    /// carrier source tuple is learned after successful peer authentication.
+    pub fn with_transport_bind(mut self, bind: SocketAddr) -> Self {
+        self.transport_bind = Some(bind);
+        self.transport_remote = None;
+        self
+    }
+
+    /// Return a copy with Python-compiled relay-hop wrapping attached.
+    pub fn with_relay_send(mut self, relay_receiver_index: u32, send_key: [u8; 32]) -> Self {
+        self.relay_send = Some(RelayHopSendConfig::new(relay_receiver_index, send_key));
         self
     }
 

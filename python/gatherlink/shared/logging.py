@@ -12,10 +12,7 @@ import logging
 import sys
 from typing import Final
 
-DEFAULT_FORMAT: Final[str] = (
-    "%(asctime)s %(levelname)-8s %(name)s "
-    "%(message)s"
-)
+DEFAULT_FORMAT: Final[str] = "%(asctime)s %(levelname)-8s %(name)s " "%(message)s"
 
 
 def configure_logging(
@@ -52,7 +49,8 @@ def get_logger(name: str) -> logging.Logger:
     """Return a module-scoped logger."""
     return logging.getLogger(name)
 
-# File-specific TODO:
+
+# TODO(logging-diagnostics):
 # - Add optional JSON formatter for machine-readable logs.
 # - Add log redaction helpers for secrets, tokens, endpoints, and keys.
 # - Support runtime log-level reload from CLI/API.

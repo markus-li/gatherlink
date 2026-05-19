@@ -340,8 +340,8 @@ def test_services_cli_monitor_can_render_multiple_aggregate_rows(tmp_path: Path,
     assert result.exit_code == 0
     assert "Gatherlink service monitor" in result.output
     assert "lab.tx" in result.output
-    assert "path:path-a" in result.output
-    assert "path:path-b" in result.output
+    assert "path path-a" in result.output
+    assert "path path-b" in result.output
     assert "lab.rx" in result.output
     assert "4.0KiB" in result.output
     assert ("hello" * 20) not in result.output
@@ -357,6 +357,53 @@ def test_services_cli_monitor_can_render_multiple_aggregate_rows(tmp_path: Path,
     assert "2/128B" in result.output
     assert "1/64B" in result.output
     assert "tx=3.0Mb rx=1.5Mb" in result.output
+
+
+def test_services_cli_monitor_can_render_dependency_graph(tmp_path: Path, monkeypatch) -> None:
+    registry_path = tmp_path / "services"
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(registry_path))
+    record = ServiceRegistry(registry_path).register(
+        ServiceRecord(
+            name="vm.shared-sink",
+            kind="core",
+            pid=os.getpid(),
+            log_file=tmp_path / "service.log",
+        )
+    )
+    server = ServiceIpcServer(
+        record,
+        status=lambda: {
+            "running": True,
+            "listen": "127.0.0.1:51820",
+            "path_stats": {"path-a": {"rx_packets": 1, "rx_bytes": 10}},
+            "remote_status": {
+                "source-a": {
+                    "request_id": 66,
+                    "source_path_id": 1,
+                    "received_at": "2026-05-17T09:48:12+00:00",
+                    "status": {
+                        "running": True,
+                        "target": "127.0.0.1:51820",
+                        "path_stats": {"path-a": {"tx_packets": 1, "tx_bytes": 10}},
+                    },
+                }
+            },
+        },
+        stop=lambda: None,
+    )
+    server.start()
+    try:
+        result = CliRunner().invoke(app, ["services", "monitor", "vm.shared-sink", "--once", "--view", "graph"])
+    finally:
+        server.close()
+
+    assert result.exit_code == 0
+    assert "view graph" in result.output
+    assert "dependency graph" in result.output
+    assert "vm.shared-sink [running]" in result.output
+    assert "|-   path path-a [path]" in result.output
+    assert "`-   remote source-a [remote]" in result.output
+    assert "path path-a [path] parent=remote source-a" in result.output
 
 
 def test_services_cli_monitor_handles_stopped_records_with_new_counter_columns(tmp_path: Path, monkeypatch) -> None:
@@ -399,7 +446,7 @@ def test_services_cli_prune_removes_stopped_records(tmp_path: Path, monkeypatch)
 
 
 def test_service_monitor_requests_temporary_control_cadence(tmp_path: Path, monkeypatch) -> None:
-    from gatherlink.cli.services import _request_monitor_control_cadence
+    from gatherlink.cli.services import _request_monitor_control_cadence, _request_remote_status
     from gatherlink.control import MONITOR_CONTROL_REQUEST_TTL_SECONDS
 
     registry_path = tmp_path / "services"
@@ -419,17 +466,59 @@ def test_service_monitor_requests_temporary_control_cadence(tmp_path: Path, monk
         stop=lambda: None,
         commands={
             "control-cadence": lambda request: requests.append(request) or {"profile": request["profile"]},
+            "remote-status": lambda request: requests.append({"remote": request}) or {"enabled": True},
         },
     )
     server.start()
     try:
         _request_monitor_control_cadence(record)
+        _request_remote_status(record)
     finally:
         server.close()
 
     assert requests
     assert requests[0]["profile"] == "monitor"
     assert requests[0]["ttl_seconds"] == MONITOR_CONTROL_REQUEST_TTL_SECONDS
+    assert requests[1]["remote"]["ttl_seconds"] == MONITOR_CONTROL_REQUEST_TTL_SECONDS
+
+
+def test_services_list_can_derive_learned_remote_services(tmp_path: Path, monkeypatch) -> None:
+    from gatherlink.cli.services import _learned_remote_services
+
+    registry_path = tmp_path / "services"
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(registry_path))
+    record = ServiceRegistry(registry_path).register(
+        ServiceRecord(
+            name="core.source",
+            kind="core",
+            pid=os.getpid(),
+            log_file=tmp_path / "service.log",
+        )
+    )
+    server = ServiceIpcServer(
+        record,
+        status=lambda: {
+            "running": True,
+            "control_metadata": {
+                "service_metadata": {"256": "wireguard-main"},
+                "service_metadata_count": 1,
+            },
+        },
+        stop=lambda: None,
+    )
+    server.start()
+    try:
+        remote = _learned_remote_services(record)
+    finally:
+        server.close()
+
+    assert remote == [
+        {
+            "name": "remote.core.source.wireguard-main",
+            "service_id": "256",
+            "state": "learned",
+        }
+    ]
 
 
 def test_services_cli_close_uses_service_ipc_and_clears_pid(tmp_path: Path, monkeypatch) -> None:

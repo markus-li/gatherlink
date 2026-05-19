@@ -55,6 +55,18 @@ class RuntimePathSchedulerConfig(GatherlinkBaseModel):
     max_in_flight_bytes: int = Field(default=0, ge=0)
 
 
+class RuntimePathRelayHopConfig(GatherlinkBaseModel):
+    """Compiled outer relay-hop wrapping facts for one path."""
+
+    relay_receiver_index: int
+    send_key: bytes
+
+    @field_serializer("send_key", when_used="json")
+    def _serialize_relay_key(self, value: bytes) -> str:
+        """Redact relay-hop key bytes from operator-facing runtime JSON."""
+        return f"[redacted:{len(value)} bytes]"
+
+
 class RuntimeSchedulerConfig(GatherlinkBaseModel):
     """Compiled scheduler runtime mode and path state."""
 
@@ -72,6 +84,7 @@ class RuntimePathConfig(GatherlinkBaseModel):
     transport_bind: str | None = None
     transport_remote: str | None = None
     scheduler: RuntimePathSchedulerConfig
+    relay: RuntimePathRelayHopConfig | None = None
 
 
 class RuntimeServiceConfig(GatherlinkBaseModel):
@@ -90,6 +103,22 @@ class RuntimeServiceConfig(GatherlinkBaseModel):
     scheduler_fanout_below_bytes: int = 0
 
 
+class RuntimeSecuritySessionConfig(GatherlinkBaseModel):
+    """One runtime static session compiled by Python for Rust execution."""
+
+    name: str | None = None
+    local_receiver_index: int
+    remote_receiver_index: int
+    send_key: bytes
+    receive_key: bytes
+    service_ids: list[int] = Field(default_factory=list)
+
+    @field_serializer("send_key", "receive_key", when_used="json")
+    def _serialize_session_secret_key(self, value: bytes) -> str:
+        """Redact per-peer runtime key bytes in operator-facing JSON."""
+        return f"[redacted:{len(value)} bytes]"
+
+
 class RuntimeSecurityConfig(GatherlinkBaseModel):
     """Runtime-visible transport security mode."""
 
@@ -100,6 +129,7 @@ class RuntimeSecurityConfig(GatherlinkBaseModel):
     remote_receiver_index: int = 1
     send_key: bytes | None = None
     receive_key: bytes | None = None
+    sessions: list[RuntimeSecuritySessionConfig] = Field(default_factory=list)
 
     @field_serializer("send_key", "receive_key", when_used="json")
     def _serialize_secret_key(self, value: bytes | None) -> str | None:
@@ -180,10 +210,7 @@ class RuntimeTcpForwardHelperConfig(GatherlinkBaseModel):
 
 
 RuntimeHelperConfig = (
-    RuntimeWireGuardHelperConfig
-    | RuntimeDnsHelperConfig
-    | RuntimeSocks5HelperConfig
-    | RuntimeTcpForwardHelperConfig
+    RuntimeWireGuardHelperConfig | RuntimeDnsHelperConfig | RuntimeSocks5HelperConfig | RuntimeTcpForwardHelperConfig
 )
 
 

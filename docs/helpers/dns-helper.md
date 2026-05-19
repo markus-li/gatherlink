@@ -11,7 +11,7 @@ First scope:
 
 - local resolver endpoint
 - cache and serve-stale behavior
-- upstream policy that can use direct or Gatherlink-tunnel choices for v1
+- upstream policy that can use direct or Gatherlink-tunnel choices for v0.9
 - DoH policy shape may exist, but DoH execution is deferred unless explicitly
   promoted later
 - IDNA-aware name handling
@@ -25,13 +25,16 @@ Implemented first slice:
 - `--tunnel-upstream peer-dns=127.0.0.1:55153` sends DNS wire queries to a
   configured local Gatherlink UDP service endpoint; Gatherlink then carries
   that datagram to the peer's DNS exit/service target
+- `tools/hyperv/run_dns_vm_acceptance.sh` is the real VM proof that a DNS query
+  enters a local DNS helper, travels through Gatherlink, and resolves from the
+  peer-side DNS endpoint
 - DNS packets are parsed and rendered with `dnspython`; Gatherlink does not
   hand-roll DNS wire parsing
 - cache keys use IDNA-aware canonical names, query type, and class
 - answers are cached by TTL and may be served stale for a bounded window
 - direct upstreams execute now
 - Gatherlink tunnel upstream execution is implemented in the helper and must be
-  included in VM acceptance before a v1 tag
+  included in VM acceptance before a v0.9 tag
 - DoH is represented in policy and reports as not implemented until its
   transport is wired
 - DNSSEC policy is explicit: `off`, `allow_unsigned`, or `require_ad`; the
@@ -78,7 +81,7 @@ IDNA posture:
 
 Not-yet scope:
 
-- DNS-over-HTTPS unless explicitly promoted after v1
+- DNS-over-HTTPS unless explicitly promoted after v0.9
 - enterprise DNS policy engine
 - replacing existing DNS servers
 - making core transport depend on DNS helper availability
