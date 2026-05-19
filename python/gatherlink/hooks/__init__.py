@@ -1,1 +1,0 @@
-"""Gatherlink hooks package."""

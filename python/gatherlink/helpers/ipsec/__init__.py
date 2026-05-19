@@ -1,1 +1,0 @@
-"""Gatherlink ipsec helper package."""

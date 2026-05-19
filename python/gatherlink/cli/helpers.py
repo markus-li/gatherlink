@@ -12,7 +12,7 @@ from gatherlink.config.validation import validate_config_file
 from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.diagnostics.sinks import JsonlDiagnosticSink
 from gatherlink.helpers.dns import DnsHelperResolver, DnsResolverPolicy, DnsUdpServer, DnsUpstream
-from gatherlink.helpers.dns.policies import DnssecMode
+from gatherlink.helpers.dns.policies import DnssecMode, DnsUpstreamKind
 from gatherlink.helpers.relay_fabric import discover_relays_from_file
 from gatherlink.helpers.socks5 import GatherlinkServiceExitConnector, run_lab_direct_socks5_server, run_socks5_server
 from gatherlink.helpers.status_http import StatusHttpConfig, run_status_http_server
@@ -29,7 +29,17 @@ def dns_serve(
     upstream: list[str] = typer.Option(
         None,
         "--upstream",
-        help="Direct DNS upstream as host:port. Can be passed multiple times.",
+        help="Direct DNS upstream as [name=]host:port[,timeout=seconds]. Can be passed multiple times.",
+    ),
+    tunnel_upstream: list[str] = typer.Option(
+        None,
+        "--tunnel-upstream",
+        help="Gatherlink-carried DNS upstream as [name=]local-service-host:port[,timeout=seconds].",
+    ),
+    doh_upstream: list[str] = typer.Option(
+        None,
+        "--doh-upstream",
+        help="Deferred DoH upstream shape as [name=]host:port[,timeout=seconds]; fails closed until implemented.",
     ),
     dnssec_mode: str = typer.Option(
         "allow_unsigned",
@@ -46,10 +56,16 @@ def dns_serve(
     listen_host, listen_port = _parse_host_port(listen)
     if dnssec_mode not in {"off", "allow_unsigned", "require_ad"}:
         raise typer.BadParameter("dnssec-mode must be off, allow_unsigned, or require_ad")
-    upstreams = [
-        DnsUpstream(name=f"upstream-{index + 1}", address=host, port=port)
-        for index, (host, port) in enumerate(_parse_host_port(value) for value in (upstream or ["1.1.1.1:53"]))
-    ]
+    direct_upstreams = upstream or []
+    tunnel_upstreams = tunnel_upstream or []
+    doh_upstreams = doh_upstream or []
+    if not direct_upstreams and not tunnel_upstreams and not doh_upstreams:
+        direct_upstreams = ["system=1.1.1.1:53"]
+    upstreams = _parse_dns_upstreams(
+        direct=direct_upstreams,
+        tunnel=tunnel_upstreams,
+        doh=doh_upstreams,
+    )
     policy = DnsResolverPolicy(upstreams=upstreams, dnssec_mode=cast(DnssecMode, dnssec_mode))
     sink = JsonlDiagnosticSink(diagnostics_jsonl) if diagnostics_jsonl is not None else None
     diagnostics_bus = DiagnosticsBus(sinks=[sink]) if sink is not None else None
@@ -104,6 +120,8 @@ def socks5_serve(
         raise typer.BadParameter("SOCKS5 helper requires at least one --allow-host and one --allow-port")
     if (username is None) != (password is None):
         raise typer.BadParameter("--username and --password must be provided together")
+    if not lab_direct and gatherlink_service is None:
+        raise typer.BadParameter("SOCKS5 helper requires --gatherlink-service unless --lab-direct is used")
     typer.echo(
         f"SOCKS5 helper listening on {listen_host}:{listen_port}; "
         f"allowed_hosts={','.join(allow_host)} allowed_ports={','.join(str(port) for port in allow_port)}"
@@ -126,10 +144,8 @@ def socks5_serve(
             if sink is not None:
                 sink.close()
         return
-    exit_connector = None
-    if gatherlink_service is not None:
-        service_host, service_port = _parse_host_port(gatherlink_service)
-        exit_connector = GatherlinkServiceExitConnector(GatherlinkUdpStreamTransport(service_host, service_port))
+    service_host, service_port = _parse_host_port(gatherlink_service)
+    exit_connector = GatherlinkServiceExitConnector(GatherlinkUdpStreamTransport(service_host, service_port))
     try:
         run_socks5_server(
             listen_host=listen_host,
@@ -235,11 +251,10 @@ def tcp_forward(
             if sink is not None:
                 sink.close()
         return
-    if gatherlink_service is not None:
-        service_host, service_port = _parse_host_port(gatherlink_service)
-        transport = GatherlinkUdpStreamTransport(service_host, service_port)
-    else:
-        transport = None
+    if gatherlink_service is None:
+        raise typer.BadParameter("TCP forward helper requires --gatherlink-service unless --lab-direct is used")
+    service_host, service_port = _parse_host_port(gatherlink_service)
+    transport = GatherlinkUdpStreamTransport(service_host, service_port)
     try:
         run_tcp_forwarder(config, transport=transport, diagnostics_bus=diagnostics_bus)
     finally:
@@ -368,3 +383,35 @@ def _parse_host_port(value: str) -> tuple[str, int]:
     if not separator or not host or not port_text:
         raise typer.BadParameter("expected host:port or [ipv6]:port")
     return host, int(port_text)
+
+
+def _parse_dns_upstreams(*, direct: list[str], tunnel: list[str], doh: list[str]) -> list[DnsUpstream]:
+    """Parse DNS helper upstream CLI values into explicit policy objects."""
+    parsed: list[DnsUpstream] = []
+    for kind, values in (("direct", direct), ("tunnel", tunnel), ("doh", doh)):
+        for value in values:
+            parsed.append(_parse_dns_upstream(value, kind=kind, index=len(parsed) + 1))
+    return parsed
+
+
+def _parse_dns_upstream(value: str, *, kind: str, index: int) -> DnsUpstream:
+    """Parse one DNS upstream value while keeping kind explicit for diagnostics."""
+    name = f"{kind}-{index}"
+    endpoint = value
+    timeout_seconds = 1.0
+    if "=" in value and value.split("=", 1)[0] and ":" not in value.split("=", 1)[0]:
+        name, endpoint = value.split("=", 1)
+    if "," in endpoint:
+        endpoint, *options = endpoint.split(",")
+        for option in options:
+            option_name, separator, option_value = option.partition("=")
+            if separator and option_name == "timeout":
+                timeout_seconds = float(option_value)
+    host, port = _parse_host_port(endpoint)
+    return DnsUpstream(
+        name=name,
+        address=host,
+        port=port,
+        kind=cast(DnsUpstreamKind, kind),
+        timeout_seconds=timeout_seconds,
+    )

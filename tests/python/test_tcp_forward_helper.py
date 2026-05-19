@@ -3,11 +3,19 @@ from __future__ import annotations
 import asyncio
 
 from gatherlink.cli.main import app
-from gatherlink.diagnostics import DiagnosticsBus
+from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.helpers.tcp_forward import TcpForwardConfig, TcpForwarder
 from gatherlink.helpers.transport import LabDirectTcpStreamTransport
 from gatherlink.helpers.udp_stream import GatherlinkUdpStreamExit, GatherlinkUdpStreamTransport
 from typer.testing import CliRunner
+
+
+class MemorySink:
+    def __init__(self) -> None:
+        self.events: list[DiagnosticEvent] = []
+
+    def write(self, event: DiagnosticEvent) -> None:
+        self.events.append(event)
 
 
 def test_tcp_forward_cli_builds_explicit_forwarder(monkeypatch) -> None:
@@ -38,13 +46,12 @@ def test_tcp_forward_cli_builds_explicit_forwarder(monkeypatch) -> None:
     assert captured["config"].target_port == 80
 
 
-def test_tcp_forward_cli_defaults_to_gatherlink_transport_runner(monkeypatch) -> None:
-    captured = {}
+def test_tcp_forward_cli_requires_gatherlink_service_unless_lab_direct(monkeypatch) -> None:
+    called = False
 
     def fake_run(config, *, transport=None, diagnostics_bus=None):
-        captured["config"] = config
-        captured["transport"] = transport
-        captured["diagnostics_bus"] = diagnostics_bus
+        nonlocal called
+        called = True
 
     monkeypatch.setattr("gatherlink.cli.helpers.run_tcp_forwarder", fake_run)
 
@@ -60,9 +67,9 @@ def test_tcp_forward_cli_defaults_to_gatherlink_transport_runner(monkeypatch) ->
         ],
     )
 
-    assert result.exit_code == 0
-    assert captured["config"].target_port == 80
-    assert captured["transport"] is None
+    assert result.exit_code != 0
+    assert "requires --gatherlink-service" in result.output
+    assert called is False
 
 
 def test_tcp_forward_cli_can_use_gatherlink_udp_service_transport(monkeypatch) -> None:
@@ -115,6 +122,8 @@ def test_tcp_forward_cli_wires_jsonl_diagnostics(monkeypatch, tmp_path) -> None:
             "127.0.0.1:8080",
             "--target",
             "127.0.0.1:80",
+            "--gatherlink-service",
+            "127.0.0.1:55181",
             "--diagnostics-jsonl",
             str(output),
         ],
@@ -324,5 +333,53 @@ def test_tcp_forwarder_emits_structured_diagnostics() -> None:
         target.close()
         await asyncio.gather(server.wait_closed(), target.wait_closed())
         assert bus.queued_events >= 1
+
+    asyncio.run(scenario())
+
+
+def test_tcp_forwarder_drains_diagnostics_while_serving() -> None:
+    async def scenario() -> None:
+        async def echo(reader, writer) -> None:
+            data = await reader.read(1024)
+            writer.write(data)
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        target = await asyncio.start_server(echo, "127.0.0.1", 0)
+        target_port = target.sockets[0].getsockname()[1]
+        sink = MemorySink()
+        bus = DiagnosticsBus(sinks=[sink])
+        forwarder = TcpForwarder(
+            TcpForwardConfig(
+                listen_host="127.0.0.1",
+                listen_port=0,
+                target_host="127.0.0.1",
+                target_port=target_port,
+                idle_timeout_seconds=1,
+            ),
+            transport=LabDirectTcpStreamTransport(),
+            diagnostics_bus=bus,
+        )
+        server = await forwarder.start()
+        listen_port = server.sockets[0].getsockname()[1]
+        diagnostics_task = asyncio.create_task(forwarder.serve_forever())
+        await asyncio.sleep(0)
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", listen_port)
+        writer.write(b"hi")
+        await writer.drain()
+        assert await reader.read(2) == b"hi"
+        writer.close()
+        await writer.wait_closed()
+        await asyncio.sleep(0.3)
+
+        diagnostics_task.cancel()
+        await asyncio.gather(diagnostics_task, return_exceptions=True)
+        server.close()
+        target.close()
+        await asyncio.gather(server.wait_closed(), target.wait_closed())
+
+        assert any(event.code == "helper.stream.opened" for event in sink.events)
 
     asyncio.run(scenario())

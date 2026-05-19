@@ -158,11 +158,12 @@ def test_socks5_cli_starts_with_explicit_policy(monkeypatch) -> None:
     assert captured["allowed_ports"] == [443]
 
 
-def test_socks5_cli_defaults_to_gatherlink_transport_runner(monkeypatch) -> None:
-    captured = {}
+def test_socks5_cli_requires_gatherlink_service_unless_lab_direct(monkeypatch) -> None:
+    called = False
 
     def fake_run(**kwargs):
-        captured.update(kwargs)
+        nonlocal called
+        called = True
 
     monkeypatch.setattr("gatherlink.cli.helpers.run_socks5_server", fake_run)
 
@@ -178,8 +179,9 @@ def test_socks5_cli_defaults_to_gatherlink_transport_runner(monkeypatch) -> None
         ],
     )
 
-    assert result.exit_code == 0
-    assert captured["allowed_hosts"] == ["example.test"]
+    assert result.exit_code != 0
+    assert "requires --gatherlink-service" in result.output
+    assert called is False
 
 
 def test_socks5_cli_can_use_gatherlink_udp_service_transport(monkeypatch) -> None:
@@ -231,6 +233,8 @@ def test_socks5_cli_wires_jsonl_diagnostics(monkeypatch, tmp_path) -> None:
             "example.test",
             "--allow-port",
             "443",
+            "--gatherlink-service",
+            "127.0.0.1:55180",
             "--diagnostics-jsonl",
             str(output),
         ],

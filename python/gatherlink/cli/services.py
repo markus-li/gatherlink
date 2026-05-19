@@ -14,12 +14,10 @@ from pathlib import Path
 from typing import Literal
 
 import typer
-from pydantic import ValidationError
 
 from gatherlink.config.errors import ConfigValidationError
 from gatherlink.config.validation import validate_config_file
 from gatherlink.control import MONITOR_CONTROL_REQUEST_REFRESH_SECONDS, MONITOR_CONTROL_REQUEST_TTL_SECONDS
-from gatherlink.lab.scenarios import load_lab_scenario_file
 from gatherlink.platform.debian import default_debian_backend
 from gatherlink.runtime.services import (
     ServiceIpcError,
@@ -175,6 +173,17 @@ def close(name: str) -> None:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     typer.echo(f"closed {service.name}")
+
+
+@app.command("prune")
+def prune() -> None:
+    """Remove stopped process-managed service records from the registry."""
+    removed = ServiceRegistry().prune_stopped()
+    if not removed:
+        typer.echo("pruned: none")
+        return
+    for name in removed:
+        typer.echo(f"pruned {name}")
 
 
 def _print_log(path: Path, *, follow: bool, tail: int) -> None:
@@ -1100,14 +1109,11 @@ def _print_systemd_log(unit: str | None, *, follow: bool, tail: int) -> None:
 
 
 def _systemd_record_from_config(path: Path, *, unit: str | None) -> ServiceRecord:
-    try:
-        lab_config = load_lab_scenario_file(path)
-    except (OSError, ValueError, ValidationError):
-        lab_config = None
-    if lab_config is not None:
-        unit_name = unit or f"gatherlink-lab@{lab_config.name}.service"
+    lab_facts = _lab_registration_facts(path)
+    if lab_facts is not None:
+        unit_name = unit or f"gatherlink-lab@{lab_facts['name']}.service"
         return ServiceRecord(
-            name=service_name("lab", lab_config.name),
+            name=service_name("lab", lab_facts["name"]),
             kind="lab",
             manager="systemd",
             systemd_unit=unit_name,
@@ -1115,9 +1121,9 @@ def _systemd_record_from_config(path: Path, *, unit: str | None) -> ServiceRecor
             log_file=Path(f"journal:{unit_name}"),
             metadata={
                 "config": str(path),
-                "runtime_dir": lab_config.runtime_dir,
-                "scenario": lab_config.scenario,
-                "security_mode": lab_config.security.mode,
+                "runtime_dir": lab_facts["runtime_dir"],
+                "scenario": lab_facts["scenario"],
+                "security_mode": lab_facts["security_mode"],
             },
         )
 
@@ -1141,3 +1147,36 @@ def _systemd_record_from_config(path: Path, *, unit: str | None) -> ServiceRecor
             "security_mode": config.security.mode,
         },
     )
+
+
+def _lab_registration_facts(path: Path) -> dict[str, str] | None:
+    """
+    Return the small lab facts needed for service registration.
+
+    The generic services CLI should not import lab scenario models or planning
+    behavior. It only needs enough structured information to mark a systemd
+    service as lab-owned in the registry.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict) or "scenario" not in raw:
+        return None
+    name = raw.get("name")
+    scenario = raw.get("scenario")
+    if not isinstance(name, str) or not name:
+        return None
+    if not isinstance(scenario, str) or not scenario:
+        return None
+    security = raw.get("security")
+    security_mode = "none"
+    if isinstance(security, dict) and isinstance(security.get("mode"), str):
+        security_mode = security["mode"]
+    runtime_dir = raw.get("runtime_dir")
+    return {
+        "name": name,
+        "runtime_dir": runtime_dir if isinstance(runtime_dir, str) else ".lab",
+        "scenario": scenario,
+        "security_mode": security_mode,
+    }

@@ -14,6 +14,7 @@ from gatherlink.config.models import USER_SERVICE_ID_START, GatherlinkConfig, Se
 from gatherlink.config.runtime import (
     RuntimeConfig,
     RuntimeDnsHelperConfig,
+    RuntimeDnsUpstreamConfig,
     RuntimePathConfig,
     RuntimePathSchedulerConfig,
     RuntimeSecurityConfig,
@@ -159,6 +160,16 @@ def _expand_helpers(
                 enabled=config.helpers.dns.enabled,
                 listen=config.helpers.dns.listen,
                 strategy=config.helpers.dns.strategy,
+                upstreams=[
+                    RuntimeDnsUpstreamConfig(
+                        name=upstream.name,
+                        address=upstream.address,
+                        port=upstream.port,
+                        kind=upstream.kind,
+                        timeout_seconds=upstream.timeout_seconds,
+                    )
+                    for upstream in config.helpers.dns.upstreams
+                ],
             )
         )
     if config.helpers.socks5:

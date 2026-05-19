@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import Field, field_serializer
 
 from gatherlink.config.models import (
+    DnsUpstreamKind,
     NodeRole,
     PathSchedulerState,
     SecurityMode,
@@ -130,6 +131,16 @@ class RuntimeWireGuardHelperConfig(GatherlinkBaseModel):
     service_listen: str | None = None
 
 
+class RuntimeDnsUpstreamConfig(GatherlinkBaseModel):
+    """Runtime-ready DNS upstream endpoint for the helper process."""
+
+    name: str
+    address: str
+    port: int = 53
+    kind: DnsUpstreamKind = "direct"
+    timeout_seconds: float = 1.0
+
+
 class RuntimeDnsHelperConfig(GatherlinkBaseModel):
     """Runtime-ready DNS helper settings outside the core runner."""
 
@@ -137,6 +148,7 @@ class RuntimeDnsHelperConfig(GatherlinkBaseModel):
     enabled: bool = True
     listen: str
     strategy: str
+    upstreams: list[RuntimeDnsUpstreamConfig] = Field(default_factory=list)
 
 
 class RuntimeSocks5HelperConfig(GatherlinkBaseModel):

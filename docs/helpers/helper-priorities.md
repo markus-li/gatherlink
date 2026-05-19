@@ -58,7 +58,8 @@ First scope:
 
 - local resolver endpoint
 - cache and serve-stale behavior
-- upstream policy that can use direct/tunnel/DoH choices
+- upstream policy that can use direct and Gatherlink-tunnel choices for v1
+- DoH policy shape only; DoH execution remains later unless promoted
 - diagnostics for upstream choice, cache state, and validation failures
 
 Not-yet scope:
@@ -223,9 +224,13 @@ Not-yet scope:
 ## Deferred Helpers
 
 The following helpers are deferred. Do not implement real behavior now. It is
-acceptable to collect notes, preserve tiny stubs, or define narrow interfaces
-when an active helper needs a placeholder, but those stubs must not grow runtime
-behavior.
+acceptable to collect notes in docs or define a narrow interface only when an
+active helper genuinely imports it. Deferred helper packages should not exist in
+the runtime tree just to mark intent.
+
+Prefer docs-only deferred design notes unless a live helper or test imports a
+real interface. Empty modules that only log their existence or carry TODOs
+should be removed; they make future helpers look more implemented than they are.
 
 - captive portal helper
 - IPsec NAT-T helper

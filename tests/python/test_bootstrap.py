@@ -670,6 +670,38 @@ def test_secrets_cli_rejects_unsafe_trust_root_name(tmp_path) -> None:
     assert "name may contain only" in result.output
 
 
+def test_secrets_cli_state_audit_reports_redacted_state(tmp_path) -> None:
+    runner = CliRunner()
+    state_dir = tmp_path / "state"
+    identity = NodeIdentity.generate()
+    identity_record = IdentityRecord.from_identity(identity)
+    atomic_write_json(state_dir / "identities" / "node-a.identity.json", identity_record.export_dict(), mode=0o600)
+
+    result = runner.invoke(app, ["secrets", "state-audit", "--state-dir", str(state_dir), "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["summary"]["ok"] == 1
+    assert "ed25519_private" not in result.output
+    assert "x25519_private" not in result.output
+
+
+def test_secrets_cli_state_audit_fails_for_unsafe_private_state(tmp_path) -> None:
+    runner = CliRunner()
+    state_dir = tmp_path / "state"
+    identity = NodeIdentity.generate()
+    identity_record = IdentityRecord.from_identity(identity)
+    atomic_write_json(state_dir / "identities" / "node-a.identity.json", identity_record.export_dict(), mode=0o644)
+
+    result = runner.invoke(app, ["secrets", "state-audit", "--state-dir", str(state_dir), "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["ok"] is False
+    assert payload["findings"][0]["code"] == "state.permission.too_broad"
+
+
 def test_secrets_cli_seals_inspects_and_opens_secret_without_leaking_plaintext(tmp_path) -> None:
     runner = CliRunner()
     secret_path = tmp_path / "secret.json"

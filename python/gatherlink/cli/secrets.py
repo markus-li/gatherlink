@@ -8,6 +8,7 @@ from pathlib import Path
 
 import typer
 
+from gatherlink.persistence.audit import StateAuditReport, audit_persistent_state
 from gatherlink.persistence.sealed import SealedSecretEnvelope, open_secret_json, seal_secret_json
 from gatherlink.persistence.store import GatherlinkStatePaths, atomic_write_json, load_secret_json, redact_secrets
 from gatherlink.secrets.bundles import SignedDocument
@@ -430,6 +431,26 @@ def trust_root_list(
     typer.echo(json.dumps({"trust_roots": roots}, indent=2, sort_keys=True))
 
 
+@app.command("state-audit")
+def state_audit(
+    state_dir: Path = typer.Option(Path(".gatherlink/state"), "--state-dir", help="Gatherlink state directory."),
+    strict_hints: bool = typer.Option(
+        False,
+        "--strict-hints",
+        help="Treat corrupt non-authoritative hints and endpoint cache entries as errors.",
+    ),
+    json_output: bool = typer.Option(False, "--json", help="Emit the full redacted audit report as JSON."),
+) -> None:
+    """Audit persisted local state without printing secret material."""
+    report = audit_persistent_state(_state_paths(state_dir), strict_hints=strict_hints)
+    if json_output:
+        typer.echo(json.dumps(report.export_dict(), indent=2, sort_keys=True))
+    else:
+        _print_state_audit(report)
+    if not report.ok:
+        raise typer.Exit(1)
+
+
 @app.command("secret-seal")
 def secret_seal(
     input_path: Path = typer.Argument(..., help="Owner-only secret JSON input path."),
@@ -593,3 +614,15 @@ def _validate_state_name(name: str) -> None:
         character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-" for character in name
     ):
         raise typer.BadParameter("name may contain only letters, digits, underscore, dot, and dash")
+
+
+def _print_state_audit(report: StateAuditReport) -> None:
+    """Render a compact redacted state-audit report."""
+    payload = report.export_dict()
+    summary = payload["summary"]
+    typer.echo(
+        f"state audit: {'ok' if report.ok else 'failed'} "
+        f"state_dir={payload['state_dir']} ok={summary['ok']} warnings={summary['warning']} errors={summary['error']}"
+    )
+    for finding in payload["findings"]:
+        typer.echo(f"{finding['severity']:7} {finding['code']} {finding['path']} - {finding['message']}")

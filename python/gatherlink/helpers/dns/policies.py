@@ -40,9 +40,10 @@ class DnsResolverPolicy:
     """
     DNS helper policy compiled for the local resolver endpoint.
 
-    Tunnel and DoH modes are represented here from day one so config and
-    diagnostics have a stable place to grow. The first implementation executes
-    direct UDP/TCP upstreams and reports unsupported modes clearly.
+    Direct and tunnel upstreams execute in v1. Tunnel means the DNS helper sends
+    a normal DNS UDP query to a configured local Gatherlink service endpoint.
+    DoH remains represented for policy compatibility and fails closed until it
+    is explicitly promoted.
     """
 
     strategy: str = "race_first_valid"

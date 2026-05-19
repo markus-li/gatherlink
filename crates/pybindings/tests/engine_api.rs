@@ -12,7 +12,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 fn recv_with_retry(socket: &UdpSocket, buffer: &mut [u8]) -> (usize, std::net::SocketAddr) {
-    for _ in 0..20 {
+    let mut last_timeout = None;
+    for _ in 0..100 {
         match socket.recv_from(buffer) {
             Ok(received) => return received,
             Err(error)
@@ -21,12 +22,18 @@ fn recv_with_retry(socket: &UdpSocket, buffer: &mut [u8]) -> (usize, std::net::S
                     std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                 ) =>
             {
+                last_timeout = Some(error);
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("failed to receive UDP datagram: {error}"),
         }
     }
-    socket.recv_from(buffer).unwrap()
+    panic!(
+        "timed out waiting for UDP datagram after retries: {}",
+        last_timeout
+            .map(|error| error.to_string())
+            .unwrap_or_else(|| "no receive attempt was made".to_owned())
+    )
 }
 
 #[test]

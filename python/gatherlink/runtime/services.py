@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import time
@@ -135,6 +136,17 @@ class ServiceRegistry:
             self._stop_process_service(service, pid)
         self.mark_stopped(service.name)
         return service
+
+    def prune_stopped(self) -> list[str]:
+        """Remove stopped process-managed service records from the registry."""
+        removed: list[str] = []
+        for service in self.list():
+            if service.manager != "process" or service.is_running():
+                continue
+            service_dir = self._service_dir(service.name)
+            shutil.rmtree(service_dir, ignore_errors=True)
+            removed.append(service.name)
+        return removed
 
     def _stop_process_service(self, service: ServiceRecord, pid: int) -> None:
         """

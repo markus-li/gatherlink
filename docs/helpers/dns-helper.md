@@ -11,7 +11,9 @@ First scope:
 
 - local resolver endpoint
 - cache and serve-stale behavior
-- upstream policy that can use direct, tunnel, or DoH choices
+- upstream policy that can use direct or Gatherlink-tunnel choices for v1
+- DoH policy shape may exist, but DoH execution is deferred unless explicitly
+  promoted later
 - IDNA-aware name handling
 - DNSSEC support
 - diagnostics for upstream choice, cache state, and validation failures
@@ -20,12 +22,18 @@ Implemented first slice:
 
 - `gatherlink helpers dns-serve --listen 127.0.0.1:5353 --upstream 1.1.1.1:53`
   exposes a local UDP resolver endpoint
+- `--tunnel-upstream peer-dns=127.0.0.1:55153` sends DNS wire queries to a
+  configured local Gatherlink UDP service endpoint; Gatherlink then carries
+  that datagram to the peer's DNS exit/service target
 - DNS packets are parsed and rendered with `dnspython`; Gatherlink does not
   hand-roll DNS wire parsing
 - cache keys use IDNA-aware canonical names, query type, and class
 - answers are cached by TTL and may be served stale for a bounded window
-- direct upstreams execute now; tunnel and DoH are represented in policy and
-  report as not implemented until their transports are wired
+- direct upstreams execute now
+- Gatherlink tunnel upstream execution is implemented in the helper and must be
+  included in VM acceptance before a v1 tag
+- DoH is represented in policy and reports as not implemented until its
+  transport is wired
 - DNSSEC policy is explicit: `off`, `allow_unsigned`, or `require_ad`; the
   first implementation treats upstream `AD` as validation evidence and exposes
   failures in diagnostics rather than silently degrading
@@ -36,7 +44,7 @@ Library decision:
 - prefer base `dnspython` for initial resolver/packet/cache work
 - include `dnspython[dnssec,idna]` when implementing the DNS helper, because
   DNSSEC support should be part of the helper and IDNA matters
-- add `dnspython[doh]` when implementing DNS-over-HTTPS
+- add `dnspython[doh]` only when implementing DNS-over-HTTPS
 - do not hand-roll DNS packet parsing
 
 Viability notes:
@@ -70,6 +78,7 @@ IDNA posture:
 
 Not-yet scope:
 
+- DNS-over-HTTPS unless explicitly promoted after v1
 - enterprise DNS policy engine
 - replacing existing DNS servers
 - making core transport depend on DNS helper availability

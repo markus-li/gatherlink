@@ -10,6 +10,7 @@ Gatherlink itself.
 ## Common Uses
 
 - Run a UDP service over one or more paths: `docs/user/core-service.md`
+- Start from common config shapes: `docs/user/config-cookbook.md`
 - Use a local SOCKS5 proxy through Gatherlink: `docs/user/socks5.md`
 - Run WireGuard over Gatherlink transport: `docs/user/wireguard.md`
 - Check status and fix common problems: `docs/user/troubleshooting.md`
@@ -40,6 +41,8 @@ gatherlink config validate configs/examples/windows-two-node-a.json
 
 - Gatherlink runs unprivileged for normal UDP service transport.
 - Lab setup may need root when it creates test network namespaces or shaping.
-- Static crypto is for MVP/lab use. Future releases will add the full session
-  handshake.
+- Authenticated Noise-generated security material is the normal secure path.
+  Static crypto remains an explicit lab/manual fallback.
 - SOCKS5 and WireGuard are the most useful helper paths at this stage.
+- Day-to-day operation is covered in `docs/operations/v1-operator-runbook.md`.
+- Scenario troubleshooting is covered in `docs/operations/v1-troubleshooting-guide.md`.

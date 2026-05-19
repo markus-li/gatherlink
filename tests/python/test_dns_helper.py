@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import socket
+import threading
+
 import dns.flags
 import dns.message
 import dns.name
@@ -11,6 +14,7 @@ from gatherlink.cli.main import app
 from gatherlink.diagnostics import DiagnosticsBus
 from gatherlink.helpers.dns import DnsHelperResolver, DnsResolverPolicy, DnsUpstream
 from gatherlink.helpers.dns.domain_sets import normalize_qname
+from gatherlink.helpers.dns.resolver import query_tunnel_upstream
 from typer.testing import CliRunner
 
 
@@ -153,6 +157,89 @@ def test_dns_helper_emits_diagnostics_for_upstream_failure() -> None:
     assert event.details["upstream"] == "direct:test@192.0.2.53:53"
 
 
+def test_dns_helper_tunnel_upstream_uses_gatherlink_service_endpoint() -> None:
+    calls = []
+
+    def fake_tunnel(query, upstream):
+        calls.append(upstream)
+        response = dns.message.make_response(query)
+        question = query.question[0]
+        response.answer.append(dns.rrset.from_text(question.name, 60, "IN", "A", "192.0.2.50"))
+        return response
+
+    resolver = DnsHelperResolver(
+        policy=DnsResolverPolicy(
+            upstreams=[
+                DnsUpstream(
+                    name="peer-dns",
+                    kind="tunnel",
+                    address="127.0.0.1",
+                    port=55153,
+                    timeout_seconds=0.5,
+                )
+            ]
+        ),
+        tunnel_upstream_resolver=fake_tunnel,
+    )
+    query = dns.message.make_query("tunnel.example.", dns.rdatatype.A)
+
+    result = resolver.resolve_wire(query.to_wire())
+    response = dns.message.from_wire(result.response_wire)
+
+    assert response.rcode() == dns.rcode.NOERROR
+    assert response.answer[0][0].address == "192.0.2.50"
+    assert result.diagnostic.upstream == "tunnel:peer-dns@127.0.0.1:55153"
+    assert calls[0].timeout_seconds == 0.5
+
+
+def test_dns_helper_tunnel_upstream_sends_dns_datagram_to_service_endpoint() -> None:
+    ready = threading.Event()
+
+    def serve_once(sock: socket.socket) -> None:
+        ready.set()
+        query_wire, address = sock.recvfrom(4096)
+        query = dns.message.from_wire(query_wire)
+        response = dns.message.make_response(query)
+        question = query.question[0]
+        response.answer.append(dns.rrset.from_text(question.name, 60, "IN", "A", "192.0.2.51"))
+        sock.sendto(response.to_wire(), address)
+        sock.close()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    thread = threading.Thread(target=serve_once, args=(sock,))
+    thread.start()
+    ready.wait(timeout=1)
+
+    query = dns.message.make_query("udp-tunnel.example.", dns.rdatatype.A)
+    response = query_tunnel_upstream(
+        query,
+        DnsUpstream(name="peer-dns", kind="tunnel", address="127.0.0.1", port=port, timeout_seconds=1),
+    )
+    thread.join(timeout=1)
+
+    assert response.answer[0][0].address == "192.0.2.51"
+
+
+def test_dns_helper_doh_upstream_fails_closed_with_diagnostics() -> None:
+    bus = DiagnosticsBus()
+    resolver = DnsHelperResolver(
+        policy=DnsResolverPolicy(upstreams=[DnsUpstream(name="deferred", kind="doh", address="1.1.1.1")]),
+        diagnostics_bus=bus,
+    )
+    query = dns.message.make_query("doh.example.", dns.rdatatype.A)
+
+    result = resolver.resolve_wire(query.to_wire())
+    response = dns.message.from_wire(result.response_wire)
+
+    assert response.rcode() == dns.rcode.SERVFAIL
+    assert result.diagnostic.error == "all configured DNS upstreams failed"
+    assert bus.queued_events == 1
+    assert bus._events[0].code == "dns.upstream_failed"
+    assert "not implemented" in bus._events[0].details["error"]
+
+
 def test_dnssec_require_ad_accepts_authenticated_response() -> None:
     def fake_upstream(query, upstream):
         response = dns.message.make_response(query)
@@ -211,3 +298,36 @@ def test_dns_helper_cli_wires_jsonl_diagnostics(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     assert captured["listen"] == ("127.0.0.1", 5354)
     assert '"code":"dns.upstream_failed"' in output.read_text(encoding="utf-8")
+
+
+def test_dns_helper_cli_parses_tunnel_upstream(monkeypatch) -> None:
+    captured = {}
+
+    class FakeServer:
+        def __init__(self, _listen, resolver):
+            captured["resolver"] = resolver
+
+        def serve_forever(self):
+            return None
+
+    monkeypatch.setattr("gatherlink.cli.helpers.DnsUdpServer", FakeServer)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "helpers",
+            "dns-serve",
+            "--listen",
+            "127.0.0.1:5354",
+            "--tunnel-upstream",
+            "peer-dns=127.0.0.1:55153,timeout=0.5",
+        ],
+    )
+
+    upstream = captured["resolver"].policy.upstreams[0]
+    assert result.exit_code == 0
+    assert upstream.kind == "tunnel"
+    assert upstream.name == "peer-dns"
+    assert upstream.address == "127.0.0.1"
+    assert upstream.port == 55153
+    assert upstream.timeout_seconds == 0.5

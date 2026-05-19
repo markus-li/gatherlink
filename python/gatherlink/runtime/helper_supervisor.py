@@ -9,6 +9,7 @@ from pathlib import Path
 from gatherlink.config.runtime import (
     RuntimeConfig,
     RuntimeDnsHelperConfig,
+    RuntimeDnsUpstreamConfig,
     RuntimeHelperConfig,
     RuntimeSocks5HelperConfig,
     RuntimeTcpForwardHelperConfig,
@@ -71,7 +72,13 @@ def _helper_command(helper: RuntimeHelperConfig) -> list[str] | None:
     """Return the CLI command for helpers that are startable in v1."""
     base = [sys.executable, "-m", "gatherlink.cli.main", "helpers"]
     if isinstance(helper, RuntimeDnsHelperConfig):
-        return [*base, "dns-serve", "--listen", helper.listen]
+        command = [*base, "dns-serve", "--listen", helper.listen]
+        for upstream in helper.upstreams:
+            option = "--tunnel-upstream" if upstream.kind == "tunnel" else "--upstream"
+            if upstream.kind == "doh":
+                option = "--doh-upstream"
+            command.extend([option, _format_upstream(upstream)])
+        return command
     if isinstance(helper, RuntimeSocks5HelperConfig):
         if not helper.service_listen:
             raise ValueError(f"socks5 helper service {helper.service} must have a local listen endpoint")
@@ -105,7 +112,7 @@ def _helper_command(helper: RuntimeHelperConfig) -> list[str] | None:
 
 def _supports_diagnostics(helper: RuntimeHelperConfig) -> bool:
     """Return whether the helper CLI supports the shared JSONL diagnostics flag."""
-    return isinstance(helper, RuntimeSocks5HelperConfig | RuntimeTcpForwardHelperConfig)
+    return isinstance(helper, RuntimeDnsHelperConfig | RuntimeSocks5HelperConfig | RuntimeTcpForwardHelperConfig)
 
 
 def _helper_metadata(runtime_config: RuntimeConfig, helper: RuntimeHelperConfig) -> dict[str, str]:
@@ -118,3 +125,9 @@ def _helper_metadata(runtime_config: RuntimeConfig, helper: RuntimeHelperConfig)
     if service_listen:
         metadata["gatherlink_service"] = str(service_listen)
     return metadata
+
+
+def _format_upstream(upstream: RuntimeDnsUpstreamConfig) -> str:
+    """Return the helper CLI upstream argument without losing IPv6 delimiters."""
+    host = f"[{upstream.address}]" if ":" in upstream.address and not upstream.address.startswith("[") else upstream.address
+    return f"{upstream.name}={host}:{upstream.port},timeout={upstream.timeout_seconds:g}"

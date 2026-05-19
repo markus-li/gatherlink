@@ -172,9 +172,12 @@ def run_rust_transport_smoke(
     from gatherlink.dataplane.rust_backend import bind_core_dataplane
 
     path_names = [path.name for path in config.paths] or ["path-a"]
-    path_pairs = [(_reserve_udp_endpoint(), _reserve_udp_endpoint()) for _path in path_names]
-    remote_target = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    remote_target.bind(("127.0.0.1", 0))
+    family = config.paths[0].family if config.paths else "ipv4"
+    loopback_host = "::1" if family == "ipv6" else "127.0.0.1"
+    socket_family = socket.AF_INET6 if family == "ipv6" else socket.AF_INET
+    path_pairs = [(_reserve_udp_endpoint(loopback_host), _reserve_udp_endpoint(loopback_host)) for _path in path_names]
+    remote_target = socket.socket(socket_family, socket.SOCK_DGRAM)
+    remote_target.bind((loopback_host, 0))
     remote_target.settimeout(2.0)
     remote_target_text = _socket_addr_text(remote_target.getsockname())
     client_config = GatherlinkConfig(
@@ -186,7 +189,9 @@ def run_rust_transport_smoke(
             PathConfig(name=name, interface="lo", transport_bind=client, transport_remote=server)
             for name, (client, server) in zip(path_names, path_pairs)
         ],
-        services=[ServiceConfig(name="udp-main", listen="127.0.0.1:0", target=remote_target_text)],
+        services=[
+            ServiceConfig(name="udp-main", listen=_socket_addr_text((loopback_host, 0)), target=remote_target_text)
+        ],
     )
     server_config = GatherlinkConfig(
         schema_version=1,
@@ -196,11 +201,13 @@ def run_rust_transport_smoke(
             PathConfig(name=name, interface="lo", transport_bind=server, transport_remote=client)
             for name, (client, server) in zip(path_names, path_pairs)
         ],
-        services=[ServiceConfig(name="udp-main", listen="127.0.0.1:0", target=remote_target_text)],
+        services=[
+            ServiceConfig(name="udp-main", listen=_socket_addr_text((loopback_host, 0)), target=remote_target_text)
+        ],
     )
     client = bind_core_dataplane(expand_config(client_config))
     server = bind_core_dataplane(expand_config(server_config))
-    app_sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    app_sender = socket.socket(socket_family, socket.SOCK_DGRAM)
     client_listen = client.service_local_addr("udp-main")
     forwarded_packets = 0
     delivered_packets = 0
@@ -238,22 +245,32 @@ def _drain_rust_path_frames(dataplane, *, attempts: int = 20) -> int:
     return delivered_packets
 
 
-def _reserve_udp_endpoint() -> str:
+def _reserve_udp_endpoint(host: str = "127.0.0.1") -> str:
     """Reserve and release one loopback UDP endpoint for a same-process smoke."""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("127.0.0.1", 0))
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_DGRAM)
+    sock.bind((host, 0))
     endpoint = _socket_addr_text(sock.getsockname())
     sock.close()
     return endpoint
 
 
-def _socket_addr_text(sockaddr: tuple[str, int]) -> str:
-    """Render an IPv4 socket address for the Rust/PyO3 DTO parser."""
-    return f"{sockaddr[0]}:{sockaddr[1]}"
+def _socket_addr_text(sockaddr: tuple) -> str:
+    """Render an IPv4 or bracketed IPv6 socket address for Rust/PyO3 DTO parsing."""
+    host = str(sockaddr[0])
+    port = int(sockaddr[1])
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]:{port}"
+    return f"{host}:{port}"
 
 
 def _parse_socket_addr(value: str) -> tuple[str, int]:
-    """Parse the IPv4 socket address form emitted by the current PyO3 bridge."""
+    """Parse IPv4 host:port or bracketed IPv6 [host]:port socket text."""
+    if value.startswith("["):
+        host, separator, port = value[1:].partition("]:")
+        if not separator:
+            raise ValueError(f"invalid bracketed IPv6 socket address: {value}")
+        return host, int(port)
     host, port = value.rsplit(":", 1)
     return host, int(port)
 
@@ -789,7 +806,9 @@ def _announce_lab_control_metadata(
     control_state: _LabControlState | None = None,
 ) -> None:
     """Announce shared control metadata and print the lab-visible summary."""
-    metadata = control_state.control_metadata if control_state is not None else _control_metadata.empty_control_metadata()
+    metadata = (
+        control_state.control_metadata if control_state is not None else _control_metadata.empty_control_metadata()
+    )
     announcement = announce_control_metadata(
         dataplane,
         runtime_config,

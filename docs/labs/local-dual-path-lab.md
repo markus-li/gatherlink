@@ -52,7 +52,9 @@ small documented range, for example:
 
 IPv6 must be supported from day one. The lab may start with IPv4 paths for the
 first shell script, but the topology and config model must not assume IPv4-only
-addresses. A follow-up lab scenario should mirror the same shape with IPv6.
+addresses. `configs/lab/local-dual-path-ipv6.json` mirrors the same Rust-backed
+transport smoke over IPv6 loopback, while namespace/veth shaping remains focused
+on the IPv4 local lab until a real IPv6 VM/network acceptance run is available.
 
 ## Commands
 

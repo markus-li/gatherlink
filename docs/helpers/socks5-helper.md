@@ -84,6 +84,21 @@ Implemented first slice:
   interface remains the boundary between SOCKS5 policy and Gatherlink stream
   transport
 
+Acceptance proof:
+
+- `tools/socks5_gatherlink_acceptance.py` starts two local Gatherlink core
+  services, the SOCKS5 helper, the companion stream exit, and the status HTTP
+  helper, then fetches the status HTTP page through SOCKS5 over the Gatherlink
+  UDP service transport
+- `tools/hyperv/run_socks5_vm_acceptance.sh` runs the same shape across the
+  two-Debian-VM Hyper-V lab once VM inventory and host keys are available
+- client-side helper stream services must use `return_mode:
+  "learned-single-source"` so replies return to the helper stream source rather
+  than to a fixed service target
+- production `socks5-serve` requires `--gatherlink-service` unless
+  `--lab-direct` is explicitly selected, so missing tunnel wiring is a startup
+  configuration error
+
 ## Deferred
 
 - SOCKS5 UDP ASSOCIATE

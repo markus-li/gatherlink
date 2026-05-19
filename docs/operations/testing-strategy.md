@@ -22,6 +22,8 @@ Suggested default development verification:
   smoke tests
 - Python/config/helper changes: `.venv/bin/pytest -q`, plus helper-specific CLI
   or lab configs
+- operator/diagnostics changes: `.venv/bin/pytest -q` plus
+  `gatherlink doctor --config CONFIG` and any relevant JSONL validation
 - scheduler changes: unit tests, simulation tests, and at least one multi-path
   lab/config run
 - security/envelope changes: Rust crypto tests, Python security tests, encrypted

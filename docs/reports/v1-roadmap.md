@@ -41,8 +41,14 @@ Treat these docs as source of truth before changing code:
 - `docs/runtime/config-runtime-state.md`
 - `docs/runtime/state-persistence.md`
 - `docs/helpers/helper-priorities.md`
+- `docs/architecture/source-map.md`
+- `docs/operations/v1-operator-runbook.md`
+- `docs/operations/v1-troubleshooting-guide.md`
+- `docs/operations/diagnostics-dictionary.md`
 - `docs/labs/real-vm-acceptance.md`
 - `docs/operations/testing-strategy.md`
+- `docs/operations/v1-release-checklist.md`
+- `docs/reports/v1-code-audit-followups.md`
 
 ## Standing Rules
 
@@ -50,7 +56,8 @@ Treat these docs as source of truth before changing code:
 - No plaintext routing.
 - No `route_id`.
 - Helpers never become core.
-- Static crypto is MVP/lab only, not final v1 security.
+- Authenticated sessions are the normal secure path; static crypto is explicit
+  lab/manual fallback only.
 - Operator/status output comes from structured facts.
 - OS-specific behavior must go through compatibility backends.
 - REST is an experimental local helper/control-plane sidecar, not core runtime.
@@ -159,7 +166,9 @@ architecture.
 - Require an explicit danger flag for non-loopback bind.
 - Mark it `EXPERIMENTAL`.
 - Let read APIs continue while the helper runs.
-- Expire write APIs after one hour unless restarted from CLI.
+- Expose write-window metadata now; any future write APIs must expire after one
+  hour unless restarted from CLI. Until concrete write endpoints are added,
+  mutation requests must fail closed.
 - Return structured facts, not secret material.
 
 ### Pass Group 8: Helper V1 Hardening
@@ -192,20 +201,31 @@ when practical, collect diagnostics, stop services, and write a report.
 
 ### Pass Group 10: V1 Acceptance
 
-Before declaring v1:
+Before declaring a local v1 release candidate:
 
 - `cargo test` passes repeatedly
 - `.venv/bin/pytest -q` passes
 - helper smoke passes
 - WSL MVP acceptance passes
-- real two-Debian-VM acceptance passes
-- WireGuard over Gatherlink works
-- SOCKS5 over Gatherlink works
-- DNS helper works
+- DNS helper works with direct upstream
+- DNS helper tunnel upstream works over Gatherlink and is proven in the VM
+  environment
 - TCP forward works
 - service start/status/monitor/close works
 - diagnostics JSONL is parseable and useful
 - invalid encrypted packets silent-drop and count locally
+- VM acceptance dry run renders and validates configs without contacting VMs
+
+Before tagging `v1.0.0`:
+
+- real two-Debian-VM acceptance passes with project-owner-provided access
+- WireGuard-over-Gatherlink is proven in the real VM environment or explicitly
+  documented as operator-run WireGuard using Gatherlink-provided UDP service
+  endpoints
+- SOCKS5 over Gatherlink is proven in the real VM environment
+- VM test reporting records the state of live rekey automation, trust-root UX,
+  DoH/full local DNSSEC, WireGuard lifecycle automation, and
+  multi-hop relay policy automation
 - soak testing runs in a real environment
 - user docs are short, accurate, and scenario-based
 

@@ -2,6 +2,7 @@ import json
 import stat
 from pathlib import Path
 
+from gatherlink.persistence.audit import audit_persistent_state
 from gatherlink.persistence.sealed import open_secret_json, seal_secret_json
 from gatherlink.persistence.store import (
     GatherlinkStatePaths,
@@ -12,6 +13,9 @@ from gatherlink.persistence.store import (
     redact_secrets,
 )
 from gatherlink.platform.debian import DebianCompatibilityBackend
+from gatherlink.secrets.bundles import sign_document
+from gatherlink.secrets.identity import IdentityPublicRecord, IdentityRecord
+from gatherlink.security.keys import NodeIdentity
 
 
 def test_state_paths_use_debian_layout() -> None:
@@ -192,3 +196,75 @@ def test_persistent_state_store_public_summary_lists_names_without_values(tmp_pa
     summary_json = json.dumps(summary)
     assert "not-listed" not in summary_json
     assert "ed25519_private" not in summary_json
+
+
+def test_persistent_state_audit_validates_authority_without_secret_values(tmp_path: Path) -> None:
+    paths = GatherlinkStatePaths(
+        config_dir=tmp_path / "config",
+        state_dir=tmp_path / "state",
+        runtime_dir=tmp_path / "run",
+        log_dir=tmp_path / "log",
+    )
+    store = PersistentStateStore(paths)
+    identity = NodeIdentity.generate()
+    store.write_private_identity("node-a", IdentityRecord.from_identity(identity).export_dict())
+    store.write_trust_root("root-a", IdentityPublicRecord.from_identity(identity).export_dict())
+    store.write_signed_bundle(
+        "topology", sign_document(identity, "GATHERLINK_TEST_AUDIT", {"generation": 1}).export_dict()
+    )
+    store.write_sealed_secret(
+        "node-a",
+        seal_secret_json({"x25519_private": "super-secret"}, passphrase="passphrase", label="node").export_dict(),
+    )
+    store.write_hint("path-health", {"usable": True})
+
+    report = audit_persistent_state(paths)
+    payload = json.dumps(report.export_dict(), sort_keys=True)
+
+    assert report.ok is True
+    assert "state.identity.ok" in payload
+    assert "state.trust_root.ok" in payload
+    assert "state.bundle.ok" in payload
+    assert "state.sealed_secret.ok" in payload
+    assert "super-secret" not in payload
+    assert "x25519_private" not in payload
+
+
+def test_persistent_state_audit_fails_for_broad_private_permissions(tmp_path: Path) -> None:
+    paths = GatherlinkStatePaths(
+        config_dir=tmp_path / "config",
+        state_dir=tmp_path / "state",
+        runtime_dir=tmp_path / "run",
+        log_dir=tmp_path / "log",
+    )
+    identity = NodeIdentity.generate()
+    atomic_write_json(
+        paths.identity_path("node-a"),
+        IdentityRecord.from_identity(identity).export_dict(),
+        mode=0o644,
+    )
+
+    report = audit_persistent_state(paths)
+
+    assert report.ok is False
+    assert report.findings[0].code == "state.permission.too_broad"
+
+
+def test_persistent_state_audit_warns_for_corrupt_hints_unless_strict(tmp_path: Path) -> None:
+    paths = GatherlinkStatePaths(
+        config_dir=tmp_path / "config",
+        state_dir=tmp_path / "state",
+        runtime_dir=tmp_path / "run",
+        log_dir=tmp_path / "log",
+    )
+    hint_path = paths.hint_path("broken")
+    hint_path.parent.mkdir(parents=True, exist_ok=True)
+    hint_path.write_text("{not-json", encoding="utf-8")
+
+    report = audit_persistent_state(paths)
+    strict_report = audit_persistent_state(paths, strict_hints=True)
+
+    assert report.ok is True
+    assert report.findings[0].severity == "warning"
+    assert strict_report.ok is False
+    assert strict_report.findings[0].severity == "error"

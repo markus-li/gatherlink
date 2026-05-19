@@ -6,6 +6,8 @@ The current MVP path has three operator surfaces:
 
 - `gatherlink services status NAME` for one live service snapshot
 - `gatherlink services monitor NAME...` for continuously refreshed counters
+- `gatherlink doctor` for local readiness checks over configs, JSONL
+  diagnostics, state layout, service registry health, and the Rust binding
 - JSONL diagnostics from the diagnostics event bus
 
 Stable event codes live in `docs/operations/diagnostics-events.md`. Producers
@@ -27,6 +29,21 @@ MVP producer coverage includes:
 The service monitor is derived from the live service IPC status shape, not by
 parsing logs. JSONL is the first durable sink. Future sinks such as Prometheus,
 WebSocket, or a local API should consume the same event DTOs.
+
+`gatherlink doctor` is an operator-side verifier, not a dataplane component. It
+prints redacted structured facts and can emit JSON with `--json`:
+
+```bash
+gatherlink doctor \
+  --config node-a.json \
+  --diagnostics-jsonl .gatherlink/services/core.node-a/diagnostics.jsonl \
+  --json
+```
+
+The command should remain boring: it validates local files, state paths,
+service registry readability, and whether the compiled Rust binding is
+importable. It must not expose keys, tokens, passwords, or private endpoint
+material.
 
 When adding diagnostics:
 

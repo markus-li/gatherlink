@@ -112,3 +112,26 @@ runtime policy.
 non-authoritative. They may speed startup or inform scheduling, but signed
 topology, explicit config, and authenticated control context must still decide
 what is allowed.
+
+## State audit
+
+Operators can inspect local state without printing secret material:
+
+```bash
+gatherlink secrets state-audit --state-dir .gatherlink/state
+gatherlink secrets state-audit --state-dir .gatherlink/state --json
+```
+
+The audit checks:
+
+- private identities are owner-only and internally consistent
+- trust roots are valid public identity records
+- signed bundles verify
+- sealed-secret envelopes are owner-only and readable without opening them
+- non-authoritative hints and endpoint caches are parseable JSON
+
+Corrupt non-authoritative hints are warnings by default because runtime should
+be able to ignore them and continue from explicit config. Use `--strict-hints`
+when packaging or release checks should treat those warnings as errors. The
+audit output is redacted and reports sealed artifacts only as envelope metadata,
+never plaintext.

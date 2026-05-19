@@ -336,7 +336,19 @@ All failure branches before authentication must converge on silent drop.
 
 Obfuscation/framing sits below the aggregation protocol and above the carrier.
 The aggregation protocol should not care whether the frame was transported over
-raw UDP, stealth UDP, QUIC DATAGRAM, WSS/TLS, or TCP/TLS fallback.
+raw UDP, stealth UDP, direct QUIC DATAGRAM, HTTP/3 DATAGRAM, WSS/TLS, or
+TCP/TLS fallback.
+
+All carriers transport the same Gatherlink UDP-format carrier packet. Direct
+QUIC DATAGRAM, HTTP/3 DATAGRAM, future TCP/TLS, future WSS, and obfuscation
+profiles are outer wrappers only: they must not change Gatherlink headers,
+encryption, replay protection, routing context, aggregation behavior, or service
+semantics.
+
+At the receiving sink, the carrier unwraps its outer transport and immediately
+hands the recovered Gatherlink packet to normal receive handling. A packet that
+arrives through direct QUIC DATAGRAM or HTTP/3 DATAGRAM must become
+indistinguishable from the same packet arriving through raw UDP after unwrap.
 
 ## age boundary
 

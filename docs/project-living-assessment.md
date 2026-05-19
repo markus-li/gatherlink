@@ -39,6 +39,7 @@ Canonical docs to consult before changing this file:
 - `docs/helpers/helper-priorities.md`
 - `docs/operations/testing-strategy.md`
 - `docs/reports/v1-roadmap.md`
+- `docs/reports/v1.1-roadmap.md`
 
 ## Executive Summary
 
@@ -76,6 +77,10 @@ Since the previous assessment, several important implementation steps landed:
 - Local secret UX now includes passphrase-sealed JSON envelopes with
   `secret-seal`, `secret-inspect`, and `secret-open`; opened output is
   owner-only and CLI output remains redacted.
+- Persisted state now has an operator-safe `gatherlink secrets state-audit`
+  command that checks local identities, trust roots, signed bundles,
+  sealed-secret envelopes, endpoint caches, and runtime hints without printing
+  secret material.
 
 The strongest part of the project is the boundary discipline:
 
@@ -119,8 +124,17 @@ deployment mileage before a release tag:
 - helper services exist, including SOCKS5/TCP stream-over-Gatherlink adapters,
   structured helper diagnostics, a shared companion UDP stream exit, and TCP
   forward acceptance coverage through that adapter/exit path
-- carrier modules beyond local UDP path sockets are placeholders and remain
-  outside the current v1 target unless explicitly promoted later
+- carrier and obfuscation expansion remains future work; empty placeholder
+  modules were removed so the code tree does not imply QUIC/WSS/TCP or
+  obfuscation implementations exist
+- empty future-only Python modules for unused CLI groups, diagnostics sinks,
+  path/peer managers, unused time sources, the unused age wrapper, and generic
+  shared/config placeholders, empty hook modules, and an empty lab fixtures
+  module were removed so deferred design notes stay in docs instead of
+  pretending to be implemented code
+- generic service registration no longer imports lab scenario models; it reads
+  only minimal lab registration facts so lab behavior remains isolated under
+  the lab CLI/package
 - live scheduler reapply is wired into the managed runner with cadence,
   diagnostics, and validation, but still needs longer production soak tests
 - Python and Rust tests are green after the managed runner, status HTTP helper,
@@ -139,6 +153,12 @@ committed example keys. It still needs project-owner-provided VM access,
 generated session material, and distinct Debian VM network identities before it
 can be counted as a passed v1
 gate.
+
+A host-specific Hyper-V two-Debian-VM lab also exists under `tools/hyperv/` and
+has passed the current acceptance runner. That proves the project can run across
+two distinct Debian VMs on this Windows host, but the release checklist still
+requires a final recorded VM acceptance report that includes the remaining
+VM-gated helper/security checks and soak notes before tagging v1.
 
 The v1 release should be a real Git tag, expected to be `v1.0.0`, after the v1
 acceptance gates pass.
@@ -174,7 +194,7 @@ Python tests:
 .venv/bin/pytest -q
 ```
 
-Result: passed on the latest full local run, currently `298 passed`.
+Result: passed on the latest full local run, currently `315 passed`.
 
 The config CLI JSON path now redacts both canonical and runtime operator views.
 `config show --runtime --json` is accepted, the runtime marker is asserted under
@@ -188,17 +208,33 @@ Additional verification in this pass:
 
 ```text
 gatherlink lab helpers-smoke
-gatherlink lab rust-smoke configs/lab/local-dual-path.json --count 8
-gatherlink lab rust-smoke configs/lab/local-dual-path-encrypted.json --count 8
-gatherlink lab rust-smoke configs/lab/local-three-path.json --count 8
-gatherlink lab cleanup/up/smoke/apply-network-mode/send/cleanup configs/lab/local-dual-path.json
-gatherlink lab cleanup/up/smoke/apply-network-mode/send/cleanup configs/lab/local-dual-path-encrypted.json
-gatherlink lab cleanup/up/smoke/send/cleanup configs/lab/local-three-path.json
+gatherlink lab rust-smoke configs/lab/local-dual-path.json --count 4
+gatherlink lab rust-smoke configs/lab/local-dual-path-encrypted.json --count 4
+gatherlink lab rust-smoke configs/lab/local-three-path.json --count 4
+gatherlink lab rust-smoke configs/lab/local-dual-path-ipv6.json --count 4
+tools/vm_acceptance/run_acceptance.sh --dry-run
+gatherlink doctor
+gatherlink config validate configs/examples/minimal-client.json
+gatherlink config validate configs/examples/minimal-server.json
+gatherlink config validate configs/examples/minimal-ipv6-client.json
+gatherlink config validate configs/examples/minimal-ipv6-server.json
 ```
 
-Result: passed. The live lab pass included bidirectional traffic, normal
-saturated shaping, forced-drop shaping, latency/jitter skew, encrypted
-dual-path traffic, three-path traffic, and cleanup.
+Result: passed for the checks run in this assessment. The local Rust lab smoke
+covered dual-path, encrypted dual-path, three-path, and IPv6 dual-path packet
+movement. The VM acceptance dry run rendered authenticated-mode configs,
+validated them locally, wrote a report, and did not contact VMs.
+
+Hyper-V two-VM acceptance:
+
+```text
+tools/hyperv/run_gatherlink_vm_acceptance.sh
+```
+
+Result: passed on this host with the ignored local inventory/host-key values.
+The run syncs source by Git, starts two Debian VM services, sends traffic across
+three private Hyper-V paths, fails and recovers each path, validates monitor
+counters and diagnostics JSONL, and prunes stopped service records.
 
 WSL MVP acceptance gate:
 
@@ -259,7 +295,7 @@ Done:
   - service registry and monitoring CLI
   - bootstrap validation scaffolding
   - secrets/identity/static-session helpers
-  - helper implementations and stubs
+  - active helper implementations
 - Docs organized around canonical design boundaries and helper priorities.
 - Tests exist in both Rust and Python, with a meaningful amount of behavior
   covered.
@@ -369,9 +405,19 @@ real tests. The code generally respects the architecture contract.
 
 Needs change or care:
 
-- The carrier abstraction files for QUIC, WSS/TLS, TCP/TLS, stealth UDP, and
-  obfuscation are mostly placeholders. The real transport today is local UDP
-  path sockets.
+- The real transport today is local UDP path sockets. QUIC is now scoped for
+  v1.1, while WSS/TLS, TCP/TLS, stealth UDP, and obfuscation remain documented
+  future work rather than placeholder implementation modules.
+- All carrier expansion must transport the same Gatherlink UDP-format carrier
+  packet. Alternative carriers are outer wrappers only and must not change
+  headers, encryption, replay protection, routing context, aggregation behavior,
+  or service semantics.
+- Direct QUIC DATAGRAM and HTTP/3 DATAGRAM receive must unwrap at the sink and
+  then enter the normal Gatherlink UDP receive path. The unwrap path should be
+  fast and packet-time; Python keeps config, lifecycle, and diagnostics
+  ownership.
+- QUIC v1.1 testing must include direct QUIC, QUIC through a Traefik UDP reverse
+  proxy, and HTTP/3 DATAGRAM.
 - The runner still loops over services and catches receive timeouts; it is
   practical for smoke/lab use, but not yet a polished async/evented supervisor.
 - Relay-hop runtime state still needs implementation before untrusted relay
@@ -465,6 +511,7 @@ Done:
 - CLI areas include:
   - bootstrap
   - config
+  - doctor
   - helpers
   - lab
   - run
@@ -476,6 +523,9 @@ Done:
 - Runtime reload functions can recompile and reapply scheduler state.
 - Service registry exists for process/systemd managed service metadata.
 - Service attach/status/logs/monitor/close commands exist.
+- `gatherlink doctor` validates local readiness facts, including config
+  expansion, state layout, service registry readability, diagnostics JSONL
+  shape, and the Rust dataplane binding, without exposing secret material.
 - Monitor can request temporary higher-rate control metadata.
 - `gatherlink run service --diagnostics-jsonl PATH` can publish foreground
   runner diagnostics and startup failures to JSONL.
@@ -523,7 +573,9 @@ to avoid fantasy architecture and keep proving real packet behavior.
 
 Not complete:
 
-- Runnable IPv6 lab parity is still called out as future work.
+- Runnable IPv6 Rust transport smoke exists through
+  `configs/lab/local-dual-path-ipv6.json`; full IPv6 namespace/veth shaping and
+  real-network acceptance remain future/VM-gated work.
 - Some scenario kinds are accepted by model but marked `not_implemented`.
 - Lab setup may require root for namespaces/shaping, which is appropriate, but
   must remain separate from the normal Gatherlink service privilege model.
@@ -600,7 +652,8 @@ Done:
 - Helper smoke scenarios cover time, DNS, DNS negative/DNSSEC policy, TCP
   forward, SOCKS5, WireGuard planning, relay fabric, relay negative, and
   transport-boundary behavior.
-- Deferred helper areas exist mostly as stubs or design notes.
+- Deferred helper areas exist as docs/design notes, not production-looking
+  Python packages.
 
 Assessment:
 
@@ -610,16 +663,18 @@ The current helper code is useful scaffold and in some cases runnable.
 Important caveat:
 
 - SOCKS5 and TCP forwarding no longer silently default to direct TCP, which is
-  good. The first Gatherlink UDP stream adapter and companion exit exist. TCP
-  forward now has stream-adapter acceptance coverage in process; SOCKS5 still
-  needs the same breadth around the new helper process launch path.
+  good. The first Gatherlink UDP stream adapter and companion exit exist.
+  SOCKS5 now has a local cross-process proof that fetches the status HTTP helper
+  over Gatherlink through the SOCKS5 helper; the Hyper-V VM proof remains the
+  broader release-gate scenario.
 - The current helper UDP stream frames are JSON/base64 control/data frames over
   a configured Gatherlink UDP service. That is appropriate for the helper
   adapter slice, but it should be treated as a helper transport framing layer,
   not as a new core packet format.
 - DNSSEC currently trusts upstream AD-bit validation. Full local chain
   validation is not implemented yet.
-- DNS helper direct upstream works; tunnel and DoH upstream kinds are TODO.
+- DNS helper direct and Gatherlink-tunnel upstreams work in helper-owned Python
+  code; DoH remains deferred unless explicitly promoted.
 - Relay fabric discovery/health is separate from secure relay packet execution.
   Python relay authorization state exists, Rust has narrow hop AEAD and
   next-hop UDP primitives, and Python now has foreground/process-managed relay
@@ -701,7 +756,7 @@ explicit and acceptable.
 
 The test suite is real.
 
-`cargo test` passes, and the Python suite now runs 204 passing tests on the
+`cargo test` passes, and the Python suite now runs 306 passing tests on the
 current worktree. Tests cover meaningful behavior: fragmentation, batching,
 encrypted path packets, replay rejection, scheduler choices, runtime DTOs,
 helper policy, diagnostics DTO/bus/JSONL, helper smoke scenarios, and lab
@@ -760,11 +815,12 @@ them, but still need broader producer integration.
 
 ## What Is Bad Or Risky
 
-There is a lot of scaffold.
+There is still some scaffold.
 
-The module tree is broad. Some files are intentionally placeholders. This is not
-bad by itself, but it makes it easy to overestimate what is implemented. This
-assessment should keep marking features as scaffold, tested primitive, or
+The module tree is broad, but deferred helper code should not appear as
+production-looking placeholder packages. Empty carrier, obfuscation, synthetic
+helper, deferred helper, and dataplane placeholder modules have been removed.
+This assessment should keep marking features as scaffold, tested primitive, or
 production behavior.
 
 Diagnostics are still behind the rest of the system.
@@ -782,11 +838,11 @@ session state. The implementation now avoids preserving route id as a
 compatibility field in runtime DTOs, path config, scheduler reapply, transmit
 plans, tests, fixtures, and examples.
 
-Carrier breadth is mostly aspirational.
+Carrier breadth is intentionally aspirational.
 
 Raw UDP path sockets are real. QUIC, WSS/TLS, TCP/TLS, stealth UDP, and
-obfuscation modules are mostly placeholders. Do not imply they are working
-until they have tests and runnable paths.
+obfuscation do not have implementation modules in the active tree now. Do not
+imply they are working until they return with tests and runnable paths.
 
 Helper code can outpace helper operations.
 
@@ -853,7 +909,9 @@ Status:
 - two WSL instances have been prepared and the one-command acceptance gate
   carries counted encrypted UDP payloads from node A to node B over three shaped
   Gatherlink carrier paths
-- true two-VM acceptance remains an environment step, not a missing core path
+- Hyper-V two-Debian-VM acceptance now passes on this host; a final release
+  acceptance report still needs to record the remaining VM-gated helper/security
+  checks and soak status
 
 ### MVP P0: Diagnostics Event Bus
 
@@ -974,8 +1032,10 @@ Status:
 - lab configs/docs exist
 - local path tests exist
 - WSL acceptance gate exists as `tools/run_wsl_mvp_acceptance.ps1`
-- future work is to add a true two-VM run once Windows networking exposes two
-  distinct Debian VM addresses
+- Hyper-V two-VM acceptance exists under `tools/hyperv/` and has passed with
+  three private carrier paths
+- generic `tools/vm_acceptance/` remains the dry-run-first harness for
+  externally provided Debian VM access
 
 ### MVP P1: Helper Scope Guardrails
 
@@ -1035,12 +1095,12 @@ Done:
 - revocation generation enforcement
 - signed bundle persistence primitives
 - trust root export/import/list UX
+- audit-friendly local state inventory and permission checks
 
 Needed:
 
 - identity rotation with signed transition
 - bootstrap token redemption
-- audit-friendly state
 
 ### V1: Secure Relay Sessions
 
@@ -1089,10 +1149,11 @@ Done:
 - consistent `--json` outputs
 - structured "why" explanations
 - event-driven helper warnings
+- `gatherlink doctor` for redacted local readiness checks and diagnostics JSONL
+  validation
 
 Remaining:
 
-- `gatherlink doctor`
 - Prometheus/WebSocket later if useful
 
 ### V1: Debian Compatibility Backend
@@ -1119,8 +1180,10 @@ Done:
 - non-loopback bind only with an explicit danger flag
 - mark all REST docs and output as `EXPERIMENTAL`
 - read APIs can remain available while the helper is running
-- write APIs expire after one hour by default unless the helper is restarted
-  from CLI
+- write-window metadata is exposed now, and POST/mutation requests fail closed
+  after that window
+- concrete write APIs are intentionally unimplemented for the current v1
+  candidate
 - no secret key material in responses
 - same structured facts as CLI/status output
 
@@ -1143,21 +1206,52 @@ Needed:
 
 Needed:
 
-- real WSS/TLS fallback
-- real QUIC/datagram carrier if chosen
+- direct QUIC DATAGRAM carrier for v1.1
+- HTTP/3 DATAGRAM carrier for v1.1
+- CONNECT-UDP/MASQUE-style carrier as a v1.2-or-later candidate
+- real WSS/TLS fallback later if chosen
 - TCP/TLS behavior if needed
 - obfuscation profiles with tests
 - carrier discovery and ranking
 - path validation for real multi-WAN environments
 
+Invariant:
+
+Direct QUIC DATAGRAM, HTTP/3 DATAGRAM, and all later carriers transport the same
+Gatherlink UDP-format carrier packet. They are not alternate packet models.
+
+QUIC may be deployed behind UDP-capable L4 forwarding/proxying, such as Traefik
+UDP routers or Cloudflare Spectrum-style TCP/UDP proxying, as long as UDP/QUIC
+datagrams reach the Gatherlink sink unchanged enough to unwrap the original
+Gatherlink packet. Ordinary HTTP reverse proxy semantics are not sufficient.
+The first required proxy proof is the Traefik UDP lab in
+`docs/labs/quic-traefik-proxy.md`.
+
+Direct Gatherlink carrier exposure must remain supported for labs, tests, and
+operator-controlled deployments, but the recommended public internet posture is
+to place carriers behind Cloudflare Spectrum-style TCP/UDP protection and/or
+Traefik UDP forwarding when possible. Tests and sample configs should still
+provide direct no-proxy examples so the core carrier behavior can be proven
+without external infrastructure.
+
+HTTP/3 DATAGRAM is an additional v1.1 carrier variant. Its HTTP/3
+request/session machinery is carrier machinery only and must not become
+Gatherlink routing, identity, control, helper, or packet-format state.
+
+CONNECT-UDP/MASQUE-style proxying is a future carrier candidate, likely v1.2 or
+later. It should follow the same wrapper-only rule and should not be blended
+into the v1.1 HTTP/3 DATAGRAM carrier.
+
 ### V1: Helper Completion
 
 Needed:
 
-- DNS tunnel/DoH upstream support if still wanted
-- full local DNSSEC validation if upstream-AD is not enough
-- cross-process helper acceptance for the SOCKS5 Gatherlink UDP stream adapter
-  and companion exit
+- DNS tunnel upstream VM acceptance proof
+- DoH upstream support later if still wanted
+- full local DNSSEC validation later if upstream-AD is not enough
+- local cross-process helper acceptance for the SOCKS5 Gatherlink UDP stream
+  adapter and companion exit is implemented; VM proof should be run as a
+  release gate
 - cross-process helper acceptance for the TCP forward Gatherlink UDP stream
   adapter and companion exit
 - helper stream backpressure, timeout, and cross-process lab hardening
@@ -1204,10 +1298,12 @@ Needed:
 
 ## What Needs To Change Soon
 
-1. Broaden diagnostics producers before adding many more features.
+1. Keep diagnostics producer coverage growing with each feature.
 
-The bus and MVP producers exist now. The next job is broadening helper-specific
-producers so v1 features do not invent local status shapes.
+The bus and major v1 producers exist now, including core lifecycle, counters,
+reapply, shutdown, helper lifecycle, helper stream, status HTTP, transport
+security-drop, and relay diagnostics. New v1 work must keep using those stable
+event shapes instead of inventing local status formats.
 
 2. Keep the MVP runner path boring and green.
 
@@ -1219,9 +1315,9 @@ Keep that gate green before expanding outward.
 
 SOCKS5 and TCP forwarding now fail closed without a stream transport, which is
 good. The first Gatherlink UDP stream adapter and companion exit path now
-exist. The next step is making them operable through explicit helper config,
-supervision, diagnostics, and acceptance labs without turning them into generic
-local proxies.
+exist, and managed helper launch plans exist for DNS, SOCKS5, and TCP forward.
+The next work is real deployment mileage and scenario coverage, not moving
+proxy behavior into core.
 
 4. Do not market adaptive scheduling yet.
 
@@ -1230,70 +1326,105 @@ metrics, smoothing, bad-metric handling, and operator explanations.
 
 5. Keep static crypto clearly labeled.
 
-Static AEAD is useful and tested. It is not the final identity/session protocol.
+Static AEAD is useful and tested, but it remains explicit lab/manual fallback.
+Authenticated Noise-style session provisioning is the normal v1 secure path.
 
 ## Suggested Near-Term Priority Order
 
 1. Run the WSL MVP acceptance gate on every operational change.
-2. Move from WSL shared-namespace proof to true two-VM proof with distinct
-   network identities.
-3. Execute the real-VM acceptance harness with project-owner-provided inventory
+2. Execute the real-VM acceptance harness with project-owner-provided inventory
    and generated session material.
-4. Broaden diagnostics producer coverage for helper-specific events and relay
-   drops.
-5. Soak the live scheduler reapply loop under longer traffic and path-flap runs.
-6. Helper supervisor/config integration for the active helpers, especially the
-   Gatherlink UDP stream adapter and companion exit for SOCKS5/TCP helpers.
-7. Add live authenticated session rotation/rekey orchestration.
-8. Extend secure relay orchestration into real multi-hop acceptance once VM
+3. Soak the live scheduler reapply loop under longer traffic and path-flap runs.
+4. Exercise WireGuard and SOCKS5 over Gatherlink in the real VM environment
+   once access exists.
+5. Add live authenticated session rotation/rekey orchestration.
+6. Extend secure relay orchestration into real multi-hop acceptance once VM
    access exists.
+7. Continue helper and relay diagnostics polish as issues appear in VM/soak
+   runs.
 
 ## Feature Status Table
 
 | Area | Status | Notes |
 | --- | --- | --- |
 | Compact v1/v2 frames | Implemented and tested | Strong |
-| AEAD envelope | Implemented and tested | Static mode only |
-| Replay protection | Implemented and tested | Needs lifecycle/rekey later |
+| AEAD envelope | Implemented and tested | Static fallback and authenticated-session material both compile to compact AEAD facts |
+| Replay protection | Implemented and tested | Live rekey/rotation automation remains later hardening |
 | Rust UDP service dataplane | Implemented and tested | Real path sockets exist |
 | Multipath scheduling | Implemented primitives and live reapply loop | Needs longer soak and richer telemetry |
 | Batching | Implemented and tested | Good |
 | Fragmentation/reassembly | Implemented and tested | Good |
 | Dedupe | Implemented and tested | Good |
 | PyO3 bridge | Implemented and tested | Good |
-| Config validation/expansion | Implemented and tested | Needs helper expansion |
-| Runtime reload | Implemented for scheduler reapply | Broader config reload remains v1 |
+| Config validation/expansion | Implemented and tested | Current examples and lab configs validate |
+| Runtime reload | Implemented for scheduler reapply | Broader config reload is future/polish |
 | Service registry/monitor | Implemented and tested | WSL gate validates status/monitor/close |
 | Diagnostics event bus | Implemented and tested | Core lifecycle/counters/reapply/shutdown, helper lifecycle/stream/status HTTP, and crypto-drop producers exist; more scenario-level helper events remain |
-| Local lab | Implemented for MVP | Helper smoke, Rust smokes, and WSL MVP gate pass |
+| Local/VM lab | Implemented for MVP/v1 candidate | Helper smoke, IPv4/IPv6 Rust smokes, VM dry run, WSL MVP gate, Hyper-V two-VM core acceptance, stream-helper VM acceptance, and WireGuard VM endpoint proof pass |
 | Static identity/session material | Implemented | Lab/manual stepping stone |
-| Authenticated session planning/exchange | Implemented bridge | Signed ephemeral exchange and receiver-index split exist; Noise packet handshake remains |
+| Authenticated session planning/exchange | Implemented first slice | Noise IK config-facing exchange, signed ephemeral bridge, and receiver-index split exist; live rekey/rotation remains |
 | Signed topology/provisioning | Implemented | Trust-root lifecycle UX remains |
-| Relay sessions | Authorization model implemented | Hop AEAD/reseal and next-hop UDP primitive exist; production relay service orchestration remains |
-| Relay fabric discovery/health | Scaffolded | Helper first scope |
-| DNS helper | Implemented first slice | Direct upstream, cache, AD-bit DNSSEC |
-| SOCKS5 helper | Implemented first slice | Gatherlink UDP stream adapter, companion exit, config/runtime model, managed launch, and diagnostics exist; needs cross-process acceptance |
-| TCP forwarding helper | Implemented first slice | Gatherlink UDP stream adapter, companion exit, config/runtime model, managed launch, diagnostics, and stream-adapter acceptance coverage exist |
-| WireGuard helper | Implemented first slice | Planning/config helpers, smoke coverage, and structured plan diagnostics exist |
+| Relay sessions | Implemented first slice | Authorization model, hop AEAD/reseal, next-hop UDP primitive, and managed relay runner exist; multi-hop policy automation remains |
+| Relay fabric discovery/health | Implemented first helper slice | Discovery/health scope only |
+| DNS helper | Implemented first slice | Direct upstream, Gatherlink-tunnel upstream, cache, AD-bit DNSSEC, diagnostics, and managed-launch wiring exist; VM DNS tunnel proof remains a release gate |
+| SOCKS5 helper | Implemented first slice | Gatherlink UDP stream adapter, companion exit, config/runtime model, managed launch, diagnostics, local cross-process acceptance, and Hyper-V two-VM acceptance exist |
+| TCP forwarding helper | Implemented first slice | Gatherlink UDP stream adapter, companion exit, config/runtime model, managed launch, diagnostics, local stream-adapter acceptance, and Hyper-V two-VM stream-helper acceptance exist |
+| WireGuard helper | Implemented first slice | Planning/config helpers, smoke coverage, structured plan diagnostics, and Hyper-V two-VM endpoint/UDP transport proof exist; WireGuard interface lifecycle remains WireGuard/operator-owned |
 | Time helper | Implemented first slice | Narrow privileged helper |
-| QUIC/WSS/TCP carriers | Placeholder | Future |
-| Obfuscation profiles | Placeholder | Future |
-| Peer failover | Docs/scaffold | v1 |
-| Persistence | Implemented first v1 slice | Debian paths, identity/trust-root/bundle/cache/hint persistence, owner-only secret reads, and redaction proof exist; sealed secret UX remains |
-| Test status | Green on current worktree | Rust passes; Python has 284 passing tests; helper smoke, rust smoke labs, and WSL MVP acceptance pass |
+| Direct QUIC and HTTP/3 DATAGRAM carriers | Planned for v1.1 | Wrapper-only carrier work; same Gatherlink UDP-format packet |
+| CONNECT-UDP/MASQUE, WSS/TLS, TCP/TLS carriers | Not implemented | Future pipeline, not v1.1 |
+| Obfuscation profiles | Not implemented | Future |
+| Peer failover | Docs/scaffold | Future unless VM/soak findings force a small v1 subset |
+| Persistence | Implemented first v1 slice | Debian paths, identity/trust-root/bundle/cache/hint persistence, sealed secret UX, owner-only secret reads, state audit, and redaction proof exist |
+| Debian/GitHub release packaging | Planned for v1.1 | Basic GitHub release artifacts, checksums, install/upgrade notes, and sample configs; richer update channels and rollback automation stay future |
+| GitHub Wiki user docs | Planned for v1.1 | Automated package/release step publishes or prepares short `docs/user/` pages as release docs while keeping repository docs canonical |
+| Test status | Green on current worktree | Rust passes; Python has 318 passing tests; helper smoke, IPv4/IPv6 rust smoke labs, VM dry run, doctor, WSL MVP acceptance, SOCKS5/TCP stream-helper VM acceptance, WireGuard VM endpoint proof, and Hyper-V VM acceptance pass |
 
 ## Final Assessment
 
-Gatherlink is in a promising and unusually disciplined early implementation
-state. The core packet engine is real. The tests are meaningful. The docs have
-become a serious design system. The architecture boundary is strong enough to
-scale if it is protected.
+Gatherlink is now a v1 release candidate for the deliberately narrow
+personal/lab and small-site scope. The core two-VM Hyper-V acceptance and active
+stream/WireGuard helper VM proofs have passed. The remaining tag gates are:
 
-The project should now resist adding broad new feature areas. The next win is
-v1 integration depth: true two-VM proof, broader diagnostics producer coverage,
-helper supervision, longer scheduler soak, and eventually authenticated
-sessions.
+- DNS tunnel upstream proof in the two-VM environment
+- operator soak in a real environment
 
-If those land cleanly, v1 can build on a solid base: authenticated sessions,
-signed topology, secure relays, real control context, peer failover, and carrier
-expansion.
+The codebase is not waiting on another major architecture slice before those
+gates. Authenticated session provisioning, signed topology, secure relay-hop
+execution, local REST/status helper behavior, active helpers, diagnostics,
+persistence, Debian platform boundaries, local labs, and WSL acceptance all
+have runnable implementation and tests.
+
+Do not call this production v1 or tag `v1.0.0` until the DNS tunnel VM proof and
+soak have passed. The remaining non-blocking hardening items are live rekey/receiver-index
+rotation automation, richer trust-root lifecycle UX, DoH and full local DNSSEC
+if wanted, WireGuard lifecycle automation if wanted, multi-hop relay policy
+automation, and any fixes discovered during VM/soak runs. DNS tunnel support is
+implemented and should be proven in the VM environment.
+The VM test report must explicitly record whether those hardening areas were
+proven, skipped/not configured, or deferred for follow-up.
+Current source/docs alignment findings are tracked in
+`docs/reports/v1-code-audit-followups.md` so the code-building chat has one
+reusable handoff list.
+
+After v1 is tagged, `docs/reports/v1.1-roadmap.md` is the next roadmap. It keeps
+those hardening items in scope and adds direct QUIC DATAGRAM and HTTP/3 DATAGRAM
+as the first alternative carriers without weakening the current boundary rules:
+Python owns meaning and lifecycle, Rust executes compact facts, deferred helper
+ideas stay in docs until they have real behavior and tests, and routing remains
+authenticated with no plaintext labels or `route_id`.
+
+Post-v1.1 ideas that are worth keeping warm but are not assigned to a release
+live in `docs/reports/future-roadmap-pipeline.md`. That file is a pipeline, not
+implementation authorization.
+
+Packaging is split deliberately: v1.1 should produce usable Debian-focused
+GitHub release artifacts with checksums, install/upgrade notes, and no-proxy
+sample configs. Future work can expand that into signed package channels,
+automatic updates, and rollback automation after the release artifact shape has
+been proven.
+
+User documentation follows the same split: short `docs/user/` pages are
+canonical in the repository, and v1.1 should publish release-matched copies to
+the GitHub Wiki for easier browsing. That must be automated as part of the
+package/release workflow so it does not depend on a manual reminder.

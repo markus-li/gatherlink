@@ -12,19 +12,26 @@ gatherlink config validate node-a.json
 gatherlink config validate node-b.json
 ```
 
-3. Review the startup plan:
+3. Run a local readiness check:
+
+```bash
+gatherlink doctor --config node-a.json
+gatherlink doctor --config node-b.json
+```
+
+4. Review the startup plan:
 
 ```bash
 gatherlink run plan node-a.json
 ```
 
-4. Start the receiver side first:
+5. Start the receiver side first:
 
 ```bash
 gatherlink run start node-b.json --name core.node-b --scheduler-reapply-interval 5
 ```
 
-5. Start the sender side:
+6. Start the sender side:
 
 ```bash
 gatherlink run start node-a.json --name core.node-a --scheduler-reapply-interval 5

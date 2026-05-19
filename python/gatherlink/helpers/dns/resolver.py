@@ -60,14 +60,17 @@ class DnsHelperResolver:
     policy: DnsResolverPolicy = field(default_factory=DnsResolverPolicy)
     cache: DnsResponseCache | None = None
     upstream_resolver: UpstreamResolver | None = None
+    tunnel_upstream_resolver: UpstreamResolver | None = None
     diagnostics_bus: DiagnosticsBus | None = None
 
     def __post_init__(self) -> None:
-        """Install default cache and direct resolver dependencies."""
+        """Install default cache and resolver dependencies."""
         if self.cache is None:
             self.cache = DnsResponseCache(serve_stale_seconds=self.policy.serve_stale_seconds)
         if self.upstream_resolver is None:
             self.upstream_resolver = query_direct_upstream
+        if self.tunnel_upstream_resolver is None:
+            self.tunnel_upstream_resolver = query_tunnel_upstream
 
     def resolve_wire(self, query_wire: bytes) -> DnsResolutionResult:
         """Resolve a raw DNS query packet using cache, policy, and upstream diagnostics."""
@@ -156,9 +159,11 @@ class DnsHelperResolver:
     def _query_upstream(self, query: dns.message.Message, upstream: DnsUpstream) -> dns.message.Message:
         if upstream.kind == "direct":
             return self.upstream_resolver(query, upstream)
-        # TODO(dns-helper): Route tunnel queries through a Gatherlink service and
-        # DoH queries through dnspython's DoH support. Keeping the kind visible
-        # now prevents policy/config churn when those execution paths land.
+        if upstream.kind == "tunnel":
+            return self.tunnel_upstream_resolver(query, upstream)
+        # TODO(dns-helper): Route DoH queries through dnspython's DoH support
+        # only if DoH is explicitly promoted into v1.x scope. Keeping the kind
+        # visible now prevents policy/config churn without pretending it works.
         raise NotImplementedError(f"DNS upstream kind is not implemented yet: {upstream.kind}")
 
     def _error_response(
@@ -219,3 +224,20 @@ def query_direct_upstream(query: dns.message.Message, upstream: DnsUpstream) -> 
             timeout=upstream.timeout_seconds,
         )
     return response
+
+
+def query_tunnel_upstream(query: dns.message.Message, upstream: DnsUpstream) -> dns.message.Message:
+    """
+    Send one DNS query to a Gatherlink-carried UDP upstream endpoint.
+
+    The endpoint is normally a local Gatherlink UDP service listen address.
+    Gatherlink then carries the DNS datagram to the companion endpoint on the
+    peer. DNS helper policy stays in Python; Rust only sees ordinary service
+    datagrams and remains unaware of DNS semantics.
+    """
+    return dns.query.udp(
+        query,
+        upstream.address,
+        port=upstream.port,
+        timeout=upstream.timeout_seconds,
+    )

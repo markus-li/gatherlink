@@ -9,6 +9,8 @@ and historical reports.
 | If you are working on... | Start with | Then read |
 | --- | --- | --- |
 | Using Gatherlink | `docs/user/README.md` | `docs/user/troubleshooting.md` |
+| Common config shapes | `docs/user/config-cookbook.md` | `docs/runtime/configuration.md`, `docs/runtime/config-runtime-state.md` |
+| Operating a v1 node | `docs/operations/v1-operator-runbook.md` | `docs/operations/v1-troubleshooting-guide.md`, `docs/operations/diagnostics-dictionary.md` |
 | Packet layout or frame overhead | `docs/protocol/protocol.md` | `docs/protocol/protocol-notes.md`, `docs/protocol/security.md` |
 | Crypto, replay, identity, or stealth receive | `docs/protocol/security.md` | `docs/future/identity-and-topology.md`, `docs/protocol/relay-trust-model.md` |
 | Relay forwarding | `docs/protocol/relay-session-lifecycle.md` | `docs/helpers/relay-fabric.md`, `docs/protocol/relay-trust-model.md`, `docs/protocol/protocol.md` |
@@ -16,11 +18,13 @@ and historical reports.
 | Config loading or runtime state | `docs/runtime/config-runtime-state.md` | `docs/runtime/configuration.md`, `docs/architecture/architecture-contract.md` |
 | Helper scope and priority | `docs/helpers/helper-priorities.md` | the specific helper doc |
 | Dependency choice | `docs/operations/library-selection.md` | the feature/helper doc needing the dependency |
-| Diagnostics or operator status | `docs/operations/diagnostics-events.md` | `docs/operations/diagnostics.md`, `docs/architecture/api-surface.md` |
+| Diagnostics or operator status | `docs/operations/diagnostics-dictionary.md` | `docs/operations/diagnostics-events.md`, `docs/operations/diagnostics.md`, `docs/architecture/api-surface.md` |
 | Failure behavior | `docs/runtime/failure-model.md` | `docs/runtime/resource-guardrails.md`, `docs/runtime/state-persistence.md` |
 | Tests to write | `docs/operations/testing-strategy.md` | the relevant feature doc |
 | Labs and demos | `docs/labs/local-dual-path-lab.md` | `docs/labs/wsl-two-distro-lab.md`, `docs/labs/real-vm-acceptance.md`, `docs/labs/lab-demo.md`, `docs/protocol/plaintext-security-mode.md` |
-| Project status and next work | `docs/project-living-assessment.md` | `docs/reports/v1-roadmap.md`, `docs/operations/testing-strategy.md`, `docs/helpers/helper-priorities.md` |
+| Where code lives | `docs/architecture/source-map.md` | `docs/architecture/architecture-contract.md` |
+| Releasing v1 | `docs/operations/v1-release-checklist.md` | `docs/reports/v1-roadmap.md`, `docs/labs/real-vm-acceptance.md` |
+| Project status and next work | `docs/project-living-assessment.md` | `docs/reports/v1-roadmap.md`, `docs/reports/v1.1-roadmap.md`, `docs/reports/v1-code-audit-followups.md`, `docs/operations/testing-strategy.md`, `docs/helpers/helper-priorities.md` |
 
 ## Canonical Docs
 
@@ -31,6 +35,7 @@ These docs are current implementation guidance.
 User documentation is for people running Gatherlink, not developing it.
 
 - `docs/user/README.md`: short entry point for normal users
+- `docs/user/config-cookbook.md`: small common config shapes
 - `docs/user/core-service.md`: basic UDP service run path
 - `docs/user/socks5.md`: SOCKS5 helper usage
 - `docs/user/wireguard.md`: WireGuard-over-Gatherlink usage
@@ -43,6 +48,7 @@ User documentation is for people running Gatherlink, not developing it.
 - `docs/architecture/architecture.md`: concise architecture overview
 - `docs/architecture/design-principles.md`: project design principles
 - `docs/architecture/performance-philosophy.md`: where performance work belongs
+- `docs/architecture/source-map.md`: where code lives and which boundary owns it
 - `docs/architecture/api-surface.md`: expected public/local APIs
 - `docs/architecture/plugin-strategy.md`: extension/plugin stance
 
@@ -84,15 +90,32 @@ User documentation is for people running Gatherlink, not developing it.
 
 - `docs/operations/diagnostics-events.md`: structured events, stable event codes, JSONL first,
   helper warnings, and operator explanations
+- `docs/operations/diagnostics-dictionary.md`: operator meaning for common counters
+  and event codes
 - `docs/operations/diagnostics.md`: broader diagnostics guidance
+- `docs/operations/v1-operator-runbook.md`: day-to-day v1 start, inspect, stop,
+  and health checks
+- `docs/operations/v1-troubleshooting-guide.md`: scenario-based v1 diagnosis
+- `docs/operations/v1-release-checklist.md`: release gates before tagging v1
 - `docs/operations/testing-strategy.md`: unit, integration, relay, DNS, helper, and golden-vector
   test expectations
+- `docs/operations/user-documentation.md`: short user-doc style rules and
+  GitHub Wiki publishing posture
 - `docs/labs/wsl-two-distro-lab.md`: repeatable two-distro WSL lab with three
   loopback carrier LANs, tc shaping, managed services, and MVP acceptance
 - `docs/labs/real-vm-acceptance.md`: v1 real Debian VM acceptance target and
   simple deploy-script posture
+- `docs/labs/quic-traefik-proxy.md`: v1.1 direct QUIC DATAGRAM carrier lab
+  through Traefik UDP forwarding
+- `docs/labs/http3-datagram-carrier.md`: v1.1 HTTP/3 DATAGRAM carrier lab
 - `docs/reports/v1-roadmap.md`: v1 implementation order, multi-pass cleanup
   rule, and handoff instructions for code-building work
+- `docs/reports/v1-code-audit-followups.md`: source/docs alignment findings for
+  code-building handoff
+- `docs/reports/v1.1-roadmap.md`: v1.1 hardening and small-site operations
+  roadmap after VM acceptance and soak
+- `docs/reports/future-roadmap-pipeline.md`: post-v1.1 pipeline ideas that are
+  shaped but not assigned to a release
 - `docs/project-living-assessment.md`: living assessment of what is done, what
   remains for MVP/v1, risks, and current priority order
 - `docs/operations/appliance-update-strategy.md`: appliance update and rollback posture
@@ -121,9 +144,9 @@ and what is deferred.
 - overlay routing, overlay naming, loop prevention, access policy, and related
   full design notes
 
-Deferred docs may preserve design notes and interface placeholders, but they do
-not authorize implementation work unless `docs/helpers/helper-priorities.md` marks the
-helper active.
+Deferred docs may preserve design notes and future interface ideas, but they do
+not authorize runtime placeholder packages or implementation work unless
+`docs/helpers/helper-priorities.md` marks the helper active.
 
 ## Future Design Notes
 
@@ -168,7 +191,9 @@ If two docs disagree:
    receiver indexes.
 4. Prefer `docs/runtime/config-runtime-state.md` for config/runtime boundaries.
 5. Prefer `docs/helpers/helper-priorities.md` for helper scope and priority.
-6. Treat reports and study notes as historical unless a canonical doc cites
+6. Prefer `docs/operations/v1-operator-runbook.md` and
+   `docs/operations/v1-troubleshooting-guide.md` for current operator flows.
+7. Treat reports and study notes as historical unless a canonical doc cites
    them.
 
 ## Keeping Navigation Useful
@@ -187,6 +212,8 @@ User documentation must stay short, step-by-step, and scenario-based.
 
 - write for common real uses, not every possible feature
 - split usage by helper or workflow, especially SOCKS5 and WireGuard
+- link to `docs/user/config-cookbook.md` for config patterns
+- link to `docs/operations/v1-operator-runbook.md` for day-to-day operation
 - keep commands copyable and examples small
 - explain only what the user needs to run, check, and stop the service
 - put troubleshooting near the user path: status, logs, monitor, diagnostics

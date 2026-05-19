@@ -78,8 +78,9 @@ def encode_data_frame(sequence: int, path_id: int, payload: bytes) -> bytes:
     """
     Encapsulate normal UDP traffic in the same fixed v1 frame shape Rust defines.
 
-    The user packet is untouched inside the payload. Sequence, path id, and route metadata live in the Gatherlink path
-    frame, which is the layer where real loss and reordering telemetry belongs.
+    The user packet is untouched inside the payload. Sequence and path id live
+    in the Gatherlink path frame, which is the layer where real loss and
+    reordering telemetry belongs.
     """
     if sequence < 0 or sequence >= SEQUENCE_SPACE or path_id < 0 or path_id > _u16_max():
         raise ValueError("protocol data frame metadata value out of range")

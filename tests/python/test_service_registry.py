@@ -70,6 +70,35 @@ def test_service_registry_cleans_stale_process_pid(tmp_path: Path) -> None:
     assert not record.pid_file.exists()
 
 
+def test_service_registry_prunes_stopped_process_records(tmp_path: Path) -> None:
+    registry = ServiceRegistry(tmp_path / "services")
+    stopped = registry.register(
+        ServiceRecord(
+            name="core.stopped",
+            kind="core",
+            pid=999_999_999,
+            log_file=tmp_path / "stopped.log",
+        )
+    )
+    running = registry.register(
+        ServiceRecord(
+            name="core.running",
+            kind="core",
+            pid=os.getpid(),
+            log_file=tmp_path / "running.log",
+        )
+    )
+
+    assert registry.prune_stopped() == ["core.stopped"]
+
+    remaining = registry.list()
+    assert [service.name for service in remaining] == ["core.running"]
+    assert not (tmp_path / "services" / "core.stopped").exists()
+    assert (tmp_path / "services" / "core.running").exists()
+    assert stopped.name == "core.stopped"
+    assert running.name == "core.running"
+
+
 def test_service_ipc_status_and_stop(tmp_path: Path) -> None:
     registry = ServiceRegistry(tmp_path / "services")
     stop_event = Event()
@@ -348,6 +377,25 @@ def test_services_cli_monitor_handles_stopped_records_with_new_counter_columns(t
     assert "lab.stopped" in result.output
     assert "xdup" in result.output
     assert "ffail" in result.output
+
+
+def test_services_cli_prune_removes_stopped_records(tmp_path: Path, monkeypatch) -> None:
+    registry_path = tmp_path / "services"
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(registry_path))
+    ServiceRegistry(registry_path).register(
+        ServiceRecord(
+            name="core.stopped",
+            kind="core",
+            pid=999_999_999,
+            log_file=tmp_path / "stopped.log",
+        )
+    )
+
+    result = CliRunner().invoke(app, ["services", "prune"])
+
+    assert result.exit_code == 0
+    assert "pruned core.stopped" in result.output
+    assert "services: none" in CliRunner().invoke(app, ["services", "list"]).output
 
 
 def test_service_monitor_requests_temporary_control_cadence(tmp_path: Path, monkeypatch) -> None:

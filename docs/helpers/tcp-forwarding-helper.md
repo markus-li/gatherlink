@@ -43,6 +43,9 @@ Implemented first slice:
   smoke tests
 - `--gatherlink-service HOST:PORT` frames the TCP byte stream into a configured
   local Gatherlink UDP service endpoint
+- production `tcp-forward` refuses to start without `--gatherlink-service`
+  unless `--lab-direct` is explicitly selected, so missing tunnel wiring is a
+  startup configuration error
 - `gatherlink helpers stream-exit --listen HOST:PORT --allow-host TARGET --allow-port PORT`
   runs the companion UDP exit that opens the explicit remote TCP target and
   returns response bytes through Gatherlink
@@ -52,6 +55,9 @@ Implemented first slice:
   endpoint for supervisors
 - the remote Gatherlink exit helper and stream framing use the shared helper
   transport lifecycle rather than moving TCP behavior into Rust
+- `tools/hyperv/run_socks5_vm_acceptance.sh` also starts `tcp-forward` and
+  proves a VM A HTTP client can reach the VM B status HTTP helper through the
+  Gatherlink tunnel and companion stream exit
 
 ## Transport Model
 

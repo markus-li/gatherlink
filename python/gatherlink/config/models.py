@@ -41,6 +41,7 @@ SchedulerPolicy = Literal[
 ]
 ServicePriority = Literal["bulk", "normal", "high", "critical"]
 ServiceReturnMode = Literal["fixed", "learned-single-source"]
+DnsUpstreamKind = Literal["direct", "tunnel", "doh"]
 RESERVED_SERVICE_ID_END = 255
 USER_SERVICE_ID_START = RESERVED_SERVICE_ID_END + 1
 
@@ -161,12 +162,23 @@ class WireGuardHelperConfig(GatherlinkBaseModel):
     service: str
 
 
+class DnsHelperUpstreamConfig(GatherlinkBaseModel):
+    """One DNS helper upstream endpoint selected by Python policy."""
+
+    name: str
+    address: str
+    port: int = Field(default=53, ge=1, le=65535)
+    kind: DnsUpstreamKind = "direct"
+    timeout_seconds: float = Field(default=1.0, ge=0.1)
+
+
 class DnsHelperConfig(GatherlinkBaseModel):
     """Optional DNS helper configuration."""
 
     enabled: bool = True
     listen: str = "127.0.0.1:5353"
     strategy: str = "race_first_valid"
+    upstreams: list[DnsHelperUpstreamConfig] = Field(default_factory=list)
 
 
 class Socks5HelperConfig(GatherlinkBaseModel):

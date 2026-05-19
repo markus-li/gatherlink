@@ -12,7 +12,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
+from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus, drain_diagnostics_until_cancelled
 from gatherlink.helpers.transport import (
     HelperStreamTarget,
     HelperStreamTransport,
@@ -82,9 +82,17 @@ class TcpForwarder:
 
     async def serve_forever(self) -> None:
         """Run the forwarder until cancelled by its supervisor."""
-        server = await self.start()
-        async with server:
-            await server.serve_forever()
+        server = self._server or await self.start()
+        diagnostics_task: asyncio.Task[None] | None = None
+        if self.diagnostics_bus is not None:
+            diagnostics_task = asyncio.create_task(drain_diagnostics_until_cancelled(self.diagnostics_bus))
+        try:
+            async with server:
+                await server.serve_forever()
+        finally:
+            if diagnostics_task is not None:
+                diagnostics_task.cancel()
+                await asyncio.gather(diagnostics_task, return_exceptions=True)
 
     async def _handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.stats.accepted += 1

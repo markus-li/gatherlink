@@ -28,6 +28,10 @@ Implemented first slice:
   generated peer secrets
 - Gatherlink does not parse or implement WireGuard packets, routes, firewall
   policy, or interface lifecycle
+- `tools/hyperv/run_wireguard_vm_acceptance.sh` proves this contract in the
+  two-Debian-VM lab by rendering the WireGuard plan, sending UDP payloads to the
+  planned local Gatherlink endpoint, and verifying they exit at the peer-side
+  WireGuard UDP target port
 
 Library posture:
 

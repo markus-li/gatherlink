@@ -29,7 +29,8 @@ probably drifting and should be redesigned before it spreads.
 - No plaintext routing.
 - No `route_id`.
 - Helpers never become core.
-- Static crypto is MVP/lab only, not the final session protocol.
+- Authenticated sessions are the normal secure path; static crypto is explicit
+  lab/manual fallback only.
 - Every development slice gets focused unit tests and relevant lab proof.
 - Operator and status output comes from structured facts.
 - If a field is redundant after decrypt/context, remove it.
@@ -140,6 +141,22 @@ A physical link is an interface/source/gateway reality.
 A logical path is a carrier plus obfuscation profile over a physical link.
 
 One physical link may expose raw UDP, stealth UDP, QUIC datagram, WSS/TLS, and TCP/TLS fallback.
+
+Every carrier transports the same Gatherlink UDP-format carrier packet. Direct
+QUIC DATAGRAM, HTTP/3 DATAGRAM, future TCP/TLS, future WSS, and obfuscation
+profiles are outer wrappers only; they do not create alternate Gatherlink packet
+formats and do not change routing, encryption, replay, aggregation, or service
+semantics.
+
+HTTP/3 DATAGRAM request/session machinery belongs to the carrier only. It must
+not become Gatherlink control state, routing state, identity state, helper
+state, or a second packet model.
+
+On receive, an alternative carrier unwraps its outer transport and then feeds
+the recovered Gatherlink packet into the same receive path used by the UDP
+carrier. Packet-time unwrap work belongs in a fast component; Python may own
+configuration, lifecycle, and diagnostics, but not expensive per-packet carrier
+policy.
 
 A per-physical-link selector chooses the best N logical paths. The global scheduler then schedules
 over active logical paths.

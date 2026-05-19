@@ -1,1 +1,0 @@
-"""Gatherlink obfuscation package."""

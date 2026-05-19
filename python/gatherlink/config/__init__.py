@@ -4,6 +4,7 @@ from gatherlink.config.expansion import expand_config
 from gatherlink.config.loader import load_config_dict
 from gatherlink.config.models import (
     DnsHelperConfig,
+    DnsHelperUpstreamConfig,
     GatherlinkConfig,
     HelpersConfig,
     PathConfig,
@@ -17,6 +18,7 @@ from gatherlink.config.models import (
 from gatherlink.config.runtime import (
     RuntimeConfig,
     RuntimeDnsHelperConfig,
+    RuntimeDnsUpstreamConfig,
     RuntimePathConfig,
     RuntimeSecurityConfig,
     RuntimeServiceConfig,
@@ -30,11 +32,13 @@ from gatherlink.config.versions import CURRENT_SCHEMA_VERSION, supported_schema_
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
     "DnsHelperConfig",
+    "DnsHelperUpstreamConfig",
     "GatherlinkConfig",
     "HelpersConfig",
     "PathConfig",
     "RuntimeConfig",
     "RuntimeDnsHelperConfig",
+    "RuntimeDnsUpstreamConfig",
     "RuntimePathConfig",
     "RuntimeSecurityConfig",
     "RuntimeServiceConfig",

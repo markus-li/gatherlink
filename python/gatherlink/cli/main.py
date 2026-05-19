@@ -9,6 +9,7 @@ from pathlib import Path
 import typer
 
 from gatherlink.cli import bootstrap, config, helpers, lab, run, secrets, services, time
+from gatherlink.cli import doctor as doctor_cli
 from gatherlink.cli.lab import down as lab_down
 from gatherlink.cli.lab import status as lab_status
 from gatherlink.cli.lab import up as lab_up
@@ -23,6 +24,7 @@ app.add_typer(run.app, name="run")
 app.add_typer(secrets.app, name="secrets")
 app.add_typer(services.app, name="services")
 app.add_typer(time.app, name="time")
+app.command("doctor")(doctor_cli.doctor)
 
 
 @app.command("up")

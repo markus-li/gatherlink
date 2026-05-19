@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "name": "local-dual-path-ipv6",
+  "scenario": "local-dual-path",
+  "description": "IPv6 loopback version of the Rust-backed dual-path transport smoke.",
+  "security": {
+    "mode": "none"
+  },
+  "runtime_dir": ".lab/local-dual-path-ipv6",
+  "nodes": [
+    {
+      "name": "client",
+      "role": "client",
+      "config_path": "configs/examples/minimal-ipv6-client.json"
+    },
+    {
+      "name": "server",
+      "role": "server",
+      "config_path": "configs/examples/minimal-ipv6-server.json"
+    }
+  ],
+  "paths": [
+    {
+      "name": "path-a",
+      "family": "ipv6",
+      "client_address": "fd00:88:1::11",
+      "server_address": "fd00:88:1::12",
+      "subnet": "fd00:88:1::/64",
+      "default_max_speed": "50mbit"
+    },
+    {
+      "name": "path-b",
+      "family": "ipv6",
+      "client_address": "fd00:88:2::11",
+      "server_address": "fd00:88:2::12",
+      "subnet": "fd00:88:2::/64",
+      "default_max_speed": "25mbit"
+    }
+  ],
+  "traffic": {
+    "generator": "builtin",
+    "listen": "[::1]:55280",
+    "target": "[::1]:55180",
+    "duration_seconds": 10,
+    "bandwidth": "3mbit"
+  },
+  "reorder_policies": [
+    {
+      "node_pair": "client-server",
+      "max_hold": "150ms"
+    }
+  ]
+}

@@ -39,6 +39,9 @@ def test_dns_helper_expands_to_ordered_runtime_helper() -> None:
     assert helper.kind == "dns"
     assert helper.listen == "127.0.0.1:5353"
     assert helper.strategy == "race_first_valid"
+    assert helper.upstreams[0].name == "cloudflare"
+    assert helper.upstreams[0].kind == "direct"
+    assert helper.upstreams[0].address == "1.1.1.1"
 
 
 def test_socks5_helper_expands_service_transport_and_policy() -> None:

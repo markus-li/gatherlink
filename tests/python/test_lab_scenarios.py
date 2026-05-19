@@ -307,6 +307,21 @@ def test_lab_rust_smoke_cli_reports_production_transport_result(monkeypatch) -> 
     assert calls == [("local-dual-path", 2, "hello")]
 
 
+def test_lab_rust_transport_smoke_supports_ipv6_loopback() -> None:
+    from gatherlink.lab.runtime import run_rust_transport_smoke
+
+    scenario = load_lab_scenario_file(LAB_CONFIGS / "local-dual-path-ipv6.json")
+
+    result = run_rust_transport_smoke(scenario, count=2, payload="ipv6-rust-smoke")
+
+    assert result.packets == 2
+    assert result.paths == 2
+    assert result.forwarded_packets == 2
+    assert result.delivered_packets == 2
+    assert result.client_listen.startswith("[::1]:")
+    assert result.remote_target.startswith("[::1]:")
+
+
 def test_lab_send_cli_can_drive_both_directions(monkeypatch) -> None:
     from gatherlink.cli import lab as lab_cli
     from gatherlink.lab.runtime import UdpSendResult

@@ -2,6 +2,42 @@
 
 Start with these checks before reading design docs.
 
+For deeper scenario diagnosis, use `docs/operations/v1-troubleshooting-guide.md`.
+For event and counter meanings, use `docs/operations/diagnostics-dictionary.md`.
+
+## Quick Doctor Check
+
+Run the local readiness checker first when the failure is unclear:
+
+```bash
+gatherlink doctor --config node-a.json
+```
+
+For machine-readable output or diagnostics validation:
+
+```bash
+gatherlink doctor \
+  --config node-a.json \
+  --diagnostics-jsonl .gatherlink/services/core.node-a/diagnostics.jsonl \
+  --json
+```
+
+Doctor output is redacted. It checks local config expansion, the service
+registry, diagnostics JSONL shape, state paths, and whether the Rust dataplane
+binding is importable.
+
+## Check Persisted State
+
+If identity, trust-root, signed-bundle, or sealed-secret files may be wrong,
+run the redacted state audit:
+
+```bash
+gatherlink secrets state-audit --state-dir .gatherlink/state
+```
+
+Private identity and sealed-secret files must be owner-only. Corrupt runtime
+hints are warnings unless `--strict-hints` is used.
+
 ## Service Is Not Running
 
 1. List known services:
@@ -44,6 +80,33 @@ gatherlink services monitor core.node-a core.node-b --once
 ```
 
 Look for transmitted packets on one side and received packets on the other.
+Expected duplicate counters may increase when fanout sends more than one
+encrypted copy. That is normal when one copy is delivered and later copies are
+discarded.
+
+## DNS Is Not Resolving
+
+Direct DNS upstream mode and Gatherlink-tunnel upstream mode are available now.
+For tunnel mode, point `--tunnel-upstream` at the local Gatherlink UDP service
+listen endpoint that carries DNS to the peer.
+
+```bash
+gatherlink helpers dns-serve \
+  --listen 127.0.0.1:5353 \
+  --upstream 1.1.1.1:53 \
+  --diagnostics-jsonl .gatherlink/dns.jsonl
+```
+
+Tunnel example:
+
+```bash
+gatherlink helpers dns-serve \
+  --listen 127.0.0.1:5353 \
+  --tunnel-upstream peer-dns=127.0.0.1:55153,timeout=1 \
+  --diagnostics-jsonl .gatherlink/dns.jsonl
+```
+
+Check for `dns.policy_denied`, `dns.upstream_failed`, and `dns.dnssec_bogus`.
 
 ## Helper Is Denying Traffic
 
