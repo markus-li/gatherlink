@@ -634,10 +634,11 @@ Promotion requirements:
 Why it is interesting:
 
 - personal/lab users need boring install/update/rollback paths
-- v0.9.1 should provide GitHub release artifacts, but future releases may need
-  real channels and rollback machinery
-- v0.9.1 should automate publishing/preparing short user docs for the GitHub Wiki
-  as part of the package/release workflow
+- v0.9.1 provides GitHub release artifact preparation, but future releases may
+  need real channels and rollback machinery
+- v0.9.1 prepares short user docs for the GitHub Wiki as part of the
+  package/release workflow; future work can turn that into a fuller publish
+  pipeline
 
 Boundary:
 
@@ -647,8 +648,8 @@ Boundary:
 - rollback must be documented before automatic updates
 - v0.9.1 GitHub release packaging is the baseline, not the final update system
 - repository docs remain canonical even when copied to the GitHub Wiki
-- future improvements may harden the Wiki publishing automation, but v0.9.1 must
-  already avoid manual-only publishing
+- future improvements may harden the Wiki publishing automation beyond the
+  v0.9.1 prepared payload
 
 Promotion requirements:
 

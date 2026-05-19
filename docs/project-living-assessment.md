@@ -44,18 +44,18 @@ Canonical docs:
 
 ## Current Judgement
 
-Gatherlink is past the v0.9 tag and is functionally close to v0.9.1 for the
+Gatherlink is past the v0.9 tag and is at v0.9.1 release-candidate state for the
 same deliberately narrow Debian personal/lab and small-site scope. The current
 tree contains real v0.9.1 implementation slices for DNS-over-HTTPS upstreams,
 standard datagram carrier adapters, local release artifacts, lab bundle
 generation, topology diffing, session-rotation policy helpers, VM report JSON,
 and the guarded experimental local status write endpoint.
 
-The main remaining v0.9.1 work is release validation and evidence, not broad
-product design. Do not tag v0.9.1 until the local release gate has been rerun
-from a clean tree, the local editable install/package metadata reports 0.9.1,
-and any operator-run VM/proxy evidence is either attached to the release or
-clearly marked as deferred.
+The main remaining v0.9.1 work is final release hygiene, not broad product
+design. Do not tag v0.9.1 until the local release gate has been rerun from a
+clean tree, the local editable install/package metadata reports 0.9.1, release
+artifacts build and doctor-check successfully, and the recorded VM/proxy
+evidence is retained with the release notes.
 
 The core system has:
 
@@ -143,6 +143,8 @@ Added v0.9.1 local evidence in the current tree:
 - DNS-over-HTTPS helper upstream implementation and tests
 - QUIC DATAGRAM and HTTP/3 DATAGRAM carrier adapters with local byte-preserving
   smoke coverage
+- three-VM direct carrier and Traefik UDP-forwarded proxy carrier smoke evidence
+  for both QUIC DATAGRAM and HTTP/3 DATAGRAM
 - bridge tests proving non-UDP carriers fail closed if sent directly to the
   Rust UDP DTO path without Python carrier supervision
 - local release artifact tooling for tracked source archives, Python wheels,
@@ -162,8 +164,8 @@ Before tagging `v0.9.1`:
   `gatherlink doctor --release-artifacts`
 - confirm committed files contain no private VM hostnames, addresses, inventory
   paths, keys, or operator-only material
-- record any operator-run VM, proxy, or longer soak evidence that is being used
-  as release evidence
+- retain the operator-run VM/proxy carrier evidence referenced by
+  `docs/releases/v0.9.1.md`
 - tag from a clean source/docs-aligned tree
 
 ## Current Feature State
@@ -258,18 +260,20 @@ presented honestly as unaudited software for personal/lab and small-site use.
 
 ## Near-Term Priority
 
-1. Rerun the v0.9.1 local gate listed in `docs/releases/v0.9.1.md`.
+1. Rerun the v0.9.1 local gate listed in `docs/releases/v0.9.1.md` from a clean
+   tree.
 2. Refresh local package metadata and build/doctor-check v0.9.1 artifacts.
-3. Recheck release hygiene: secrets, private paths, README, `SECURITY.md`, and
+3. Retain the three-VM direct/proxied carrier evidence referenced by the release
+   notes.
+4. Recheck release hygiene: secrets, private paths, README, `SECURITY.md`, and
    release notes.
-4. Decide whether any VM/proxy carrier evidence is tag-blocking or explicitly
-   deferred.
 5. Tag `v0.9.1` only from a clean source/docs-aligned tree.
 
 ## Final Assessment
 
-Gatherlink is functionally close to v0.9.1 for its declared scope. The current
-tree backs the main v0.9.1 claims with code and tests, but the release should
-not be called done until the full local gate, artifact build/doctor check,
-metadata refresh, and final hygiene pass have been rerun against the current
-HEAD.
+Gatherlink is functionally at v0.9.1 release-candidate quality for its declared
+scope. The current tree backs the main v0.9.1 claims with code, tests, local
+carrier smokes, artifact tooling, and recorded VM/proxy carrier evidence, but
+the release should not be tagged until the full local gate, artifact
+build/doctor check, metadata refresh, and final hygiene pass have been rerun
+against the current HEAD.
