@@ -63,6 +63,20 @@ fn compact_v2_omits_visible_version_and_round_trips() {
 }
 
 #[test]
+fn owned_compact_v2_decode_reuses_plaintext_payload_buffer() {
+    let frame = Frame::data(11, 13, 17, b"hello-core".to_vec()).unwrap();
+    let encoded = frame.encode_v2().unwrap();
+
+    let decoded = Frame::decode_v2_owned(encoded).unwrap();
+
+    assert_eq!(decoded.kind, FrameKind::Data);
+    assert_eq!(decoded.service_id, 11);
+    assert_eq!(decoded.path_id, 13);
+    assert_eq!(decoded.sequence, 17);
+    assert_eq!(decoded.payload, b"hello-core");
+}
+
+#[test]
 fn rejects_empty_batch_frames() {
     let error = Frame::batch(11, 13, 17, &[]).unwrap_err();
 

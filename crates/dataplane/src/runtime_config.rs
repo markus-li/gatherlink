@@ -170,6 +170,7 @@ pub enum SchedulerMode {
     LeastQueue,
     EarliestCompletionFirst,
     BlockingEstimation,
+    OrderedMultipath,
     Balanced,
     Adaptive,
 }
@@ -193,6 +194,10 @@ pub struct PathSchedulerPrimitives {
     reorder_hold_us: u32,
     max_in_flight_packets: u16,
     max_in_flight_bytes: u32,
+    pacing_budget_bps: u64,
+    queue_depth_packets: u32,
+    queue_depth_bytes: u32,
+    queue_oldest_age_us: u64,
 }
 
 impl PathSchedulerPrimitives {
@@ -205,6 +210,10 @@ impl PathSchedulerPrimitives {
         reorder_hold_us: u32,
         max_in_flight_packets: u16,
         max_in_flight_bytes: u32,
+        pacing_budget_bps: u64,
+        queue_depth_packets: u32,
+        queue_depth_bytes: u32,
+        queue_oldest_age_us: u64,
     ) -> Self {
         Self {
             tx_capacity_bps,
@@ -214,6 +223,10 @@ impl PathSchedulerPrimitives {
             reorder_hold_us,
             max_in_flight_packets,
             max_in_flight_bytes,
+            pacing_budget_bps,
+            queue_depth_packets,
+            queue_depth_bytes,
+            queue_oldest_age_us,
         }
     }
 
@@ -250,6 +263,26 @@ impl PathSchedulerPrimitives {
     /// Byte concurrency limit selected by Python, or zero when unlimited.
     pub fn max_in_flight_bytes(&self) -> u32 {
         self.max_in_flight_bytes
+    }
+
+    /// Per-path pacing budget selected by Python, or zero when disabled.
+    pub fn pacing_budget_bps(&self) -> u64 {
+        self.pacing_budget_bps
+    }
+
+    /// Current queued packet count reported by the path transport.
+    pub fn queue_depth_packets(&self) -> u32 {
+        self.queue_depth_packets
+    }
+
+    /// Current queued byte count reported by the path transport.
+    pub fn queue_depth_bytes(&self) -> u32 {
+        self.queue_depth_bytes
+    }
+
+    /// Age of the oldest queued packet, in microseconds.
+    pub fn queue_oldest_age_us(&self) -> u64 {
+        self.queue_oldest_age_us
     }
 }
 

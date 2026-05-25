@@ -39,6 +39,21 @@ fn transport_keys_reject_replayed_counter() {
 }
 
 #[test]
+fn transport_keys_can_decrypt_packet_in_place() {
+    let client_to_server = [1u8; 32];
+    let server_to_client = [2u8; 32];
+    let mut client = TransportKeys::new(7, client_to_server, server_to_client);
+    let mut server = TransportKeys::new(7, server_to_client, client_to_server);
+
+    let mut packet = client.encrypt_frame(b"frame").unwrap();
+    let decrypted = server.decrypt_packet_in_place(&mut packet).unwrap();
+
+    assert_eq!(decrypted.receiver_index, 7);
+    assert_eq!(decrypted.counter, 0);
+    assert_eq!(&packet[decrypted.plaintext_range], b"frame");
+}
+
+#[test]
 fn transport_keys_use_distinct_local_and_remote_receiver_indexes() {
     let client_to_server = [1u8; 32];
     let server_to_client = [2u8; 32];

@@ -22,6 +22,9 @@ const TYPE_SERVICE_ENDPOINT_ASSERTION: u8 = 9;
 const TYPE_SERVICE_DISABLE: u8 = 10;
 const TYPE_PATH_MTU: u8 = 11;
 const TYPE_SERVICE_SCHEDULER_POLICY: u8 = 12;
+const TYPE_PATH_PRESSURE: u8 = 13;
+const TYPE_SCHEDULER_STATUS: u8 = 14;
+const TYPE_DATA_TRANSMIT_SAMPLE: u8 = 15;
 
 /// One control metaband message.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +53,12 @@ pub enum ControlMessage {
     ServiceDisable(ServiceDisable),
     /// Python-owned service scheduler policy FYI so the peer can install expected receive facts.
     ServiceSchedulerPolicy(ServiceSchedulerPolicy),
+    /// Receiver/local pressure telemetry for Python scheduler decisions.
+    PathPressure(PathPressure),
+    /// Local TX scheduler status for peer/operator diagnostics only.
+    SchedulerStatus(SchedulerStatus),
+    /// Sparse real-data transmit timing sample in the sender's shared clock domain.
+    DataTransmitSample(DataTransmitSample),
 }
 
 /// Sender-side path assignment report for a contiguous global sequence range.
@@ -79,6 +88,35 @@ impl PathAssignment {
 pub struct MissingRange {
     pub first_sequence: SequenceNumber,
     pub packet_count: u32,
+}
+
+/// Sender-side timing report for one sampled real data sequence range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DataTransmitSample {
+    pub path_id: PathId,
+    pub first_sequence: SequenceNumber,
+    pub packet_count: u32,
+    pub transmit_us: u64,
+}
+
+impl DataTransmitSample {
+    /// Build one real-data transmit timing sample for Python latency estimation.
+    pub fn new(
+        path_id: PathId,
+        first_sequence: SequenceNumber,
+        packet_count: u32,
+        transmit_us: u64,
+    ) -> Result<Self, ProtocolError> {
+        if packet_count == 0 || transmit_us == 0 {
+            return Err(ProtocolError::MalformedControl);
+        }
+        Ok(Self {
+            path_id,
+            first_sequence,
+            packet_count,
+            transmit_us,
+        })
+    }
 }
 
 impl MissingRange {
@@ -187,11 +225,21 @@ pub struct ServiceSchedulerPolicy {
     pub service_id: ServiceId,
     pub fanout: u16,
     pub fanout_below_bytes: u32,
+    pub flowlet_idle_us: u64,
+    pub flowlet_max_hold_us: u64,
+    pub path_run_datagrams: u32,
 }
 
 impl ServiceSchedulerPolicy {
     /// Build one service scheduler policy advertisement.
-    pub fn new(service_id: ServiceId, fanout: u16, fanout_below_bytes: u32) -> Result<Self, ProtocolError> {
+    pub fn new(
+        service_id: ServiceId,
+        fanout: u16,
+        fanout_below_bytes: u32,
+        flowlet_idle_us: u64,
+        flowlet_max_hold_us: u64,
+        path_run_datagrams: u32,
+    ) -> Result<Self, ProtocolError> {
         if service_id < USER_SERVICE_ID_START {
             return Err(ProtocolError::MalformedControl);
         }
@@ -199,6 +247,100 @@ impl ServiceSchedulerPolicy {
             service_id,
             fanout,
             fanout_below_bytes,
+            flowlet_idle_us,
+            flowlet_max_hold_us,
+            path_run_datagrams,
+        })
+    }
+}
+
+/// Optional local path pressure report for Python-owned scheduler feedback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathPressure {
+    pub path_id: PathId,
+    pub loss_ppm: u32,
+    pub queue_depth_packets: u32,
+    pub queue_depth_bytes: u32,
+    pub queue_oldest_age_us: u32,
+    pub send_failures: u32,
+    pub receive_gaps: u32,
+    pub reorder_depth_packets: u32,
+    pub local_drops: u32,
+    pub scheduler_in_flight_packets: u32,
+    pub scheduler_in_flight_bytes: u32,
+    pub scheduler_predicted_delivery_us: u32,
+    pub reorder_buffer_packets: u32,
+    pub reorder_buffer_oldest_age_us: u32,
+}
+
+impl PathPressure {
+    /// Build one path pressure report without attaching policy meaning in Rust.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        path_id: PathId,
+        loss_ppm: u32,
+        queue_depth_packets: u32,
+        queue_depth_bytes: u32,
+        queue_oldest_age_us: u32,
+        send_failures: u32,
+        receive_gaps: u32,
+        reorder_depth_packets: u32,
+        local_drops: u32,
+        scheduler_in_flight_packets: u32,
+        scheduler_in_flight_bytes: u32,
+        scheduler_predicted_delivery_us: u32,
+        reorder_buffer_packets: u32,
+        reorder_buffer_oldest_age_us: u32,
+    ) -> Result<Self, ProtocolError> {
+        if loss_ppm > 1_000_000 {
+            return Err(ProtocolError::MalformedControl);
+        }
+        Ok(Self {
+            path_id,
+            loss_ppm,
+            queue_depth_packets,
+            queue_depth_bytes,
+            queue_oldest_age_us,
+            send_failures,
+            receive_gaps,
+            reorder_depth_packets,
+            local_drops,
+            scheduler_in_flight_packets,
+            scheduler_in_flight_bytes,
+            scheduler_predicted_delivery_us,
+            reorder_buffer_packets,
+            reorder_buffer_oldest_age_us,
+        })
+    }
+}
+
+/// Local TX scheduler status advertised for diagnostics, not peer policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerStatus {
+    pub configured_mode: String,
+    pub effective_mode: String,
+    pub rust_mode: String,
+}
+
+impl SchedulerStatus {
+    /// Build scheduler status facts that peers may display but must not apply as policy.
+    pub fn new(
+        configured_mode: impl Into<String>,
+        effective_mode: impl Into<String>,
+        rust_mode: impl Into<String>,
+    ) -> Result<Self, ProtocolError> {
+        let configured_mode = configured_mode.into();
+        let effective_mode = effective_mode.into();
+        let rust_mode = rust_mode.into();
+        for value in [&configured_mode, &effective_mode, &rust_mode] {
+            if value.is_empty() || value.len() > 63 {
+                return Err(ProtocolError::MalformedControl);
+            }
+        }
+        Ok(Self {
+            configured_mode,
+            effective_mode,
+            rust_mode,
         })
     }
 }
@@ -623,11 +765,53 @@ fn encode_message(message: &ControlMessage) -> Result<(u8, Vec<u8>), ProtocolErr
             Ok((TYPE_SERVICE_DISABLE, value))
         }
         ControlMessage::ServiceSchedulerPolicy(policy) => {
-            let mut value = Vec::with_capacity(8);
+            let mut value = Vec::with_capacity(28);
             value.extend_from_slice(&policy.service_id.to_be_bytes());
             value.extend_from_slice(&policy.fanout.to_be_bytes());
             value.extend_from_slice(&policy.fanout_below_bytes.to_be_bytes());
+            value.extend_from_slice(&policy.flowlet_idle_us.to_be_bytes());
+            value.extend_from_slice(&policy.flowlet_max_hold_us.to_be_bytes());
+            value.extend_from_slice(&policy.path_run_datagrams.to_be_bytes());
             Ok((TYPE_SERVICE_SCHEDULER_POLICY, value))
+        }
+        ControlMessage::PathPressure(pressure) => {
+            let mut value = Vec::with_capacity(54);
+            value.extend_from_slice(&pressure.path_id.to_be_bytes());
+            value.extend_from_slice(&pressure.loss_ppm.to_be_bytes());
+            value.extend_from_slice(&pressure.queue_depth_packets.to_be_bytes());
+            value.extend_from_slice(&pressure.queue_depth_bytes.to_be_bytes());
+            value.extend_from_slice(&pressure.queue_oldest_age_us.to_be_bytes());
+            value.extend_from_slice(&pressure.send_failures.to_be_bytes());
+            value.extend_from_slice(&pressure.receive_gaps.to_be_bytes());
+            value.extend_from_slice(&pressure.reorder_depth_packets.to_be_bytes());
+            value.extend_from_slice(&pressure.local_drops.to_be_bytes());
+            value.extend_from_slice(&pressure.scheduler_in_flight_packets.to_be_bytes());
+            value.extend_from_slice(&pressure.scheduler_in_flight_bytes.to_be_bytes());
+            value.extend_from_slice(&pressure.scheduler_predicted_delivery_us.to_be_bytes());
+            value.extend_from_slice(&pressure.reorder_buffer_packets.to_be_bytes());
+            value.extend_from_slice(&pressure.reorder_buffer_oldest_age_us.to_be_bytes());
+            Ok((TYPE_PATH_PRESSURE, value))
+        }
+        ControlMessage::SchedulerStatus(status) => {
+            let values = [
+                status.configured_mode.as_bytes(),
+                status.effective_mode.as_bytes(),
+                status.rust_mode.as_bytes(),
+            ];
+            let mut value = Vec::with_capacity(values.iter().map(|item| item.len() + 1).sum());
+            for item in values {
+                value.push(item.len() as u8);
+                value.extend_from_slice(item);
+            }
+            Ok((TYPE_SCHEDULER_STATUS, value))
+        }
+        ControlMessage::DataTransmitSample(sample) => {
+            let mut value = Vec::with_capacity(22);
+            value.extend_from_slice(&sample.path_id.to_be_bytes());
+            value.extend_from_slice(&sample.first_sequence.to_be_bytes());
+            value.extend_from_slice(&sample.packet_count.to_be_bytes());
+            value.extend_from_slice(&sample.transmit_us.to_be_bytes());
+            Ok((TYPE_DATA_TRANSMIT_SAMPLE, value))
         }
     }
 }
@@ -768,17 +952,79 @@ fn decode_message(message_type: u8, value: &[u8]) -> Result<ControlMessage, Prot
             )?))
         }
         TYPE_SERVICE_SCHEDULER_POLICY => {
-            if value.len() != 8 {
+            if value.len() != 28 {
                 return Err(ProtocolError::MalformedControl);
             }
             Ok(ControlMessage::ServiceSchedulerPolicy(ServiceSchedulerPolicy::new(
                 read_u16(value, 0),
                 read_u16(value, 2),
                 read_u32(value, 4),
+                read_u64(value, 8),
+                read_u64(value, 16),
+                read_u32(value, 24),
+            )?))
+        }
+        TYPE_PATH_PRESSURE => {
+            if value.len() != 54 {
+                return Err(ProtocolError::MalformedControl);
+            }
+            Ok(ControlMessage::PathPressure(PathPressure::new(
+                read_u16(value, 0),
+                read_u32(value, 2),
+                read_u32(value, 6),
+                read_u32(value, 10),
+                read_u32(value, 14),
+                read_u32(value, 18),
+                read_u32(value, 22),
+                read_u32(value, 26),
+                read_u32(value, 30),
+                read_u32(value, 34),
+                read_u32(value, 38),
+                read_u32(value, 42),
+                read_u32(value, 46),
+                read_u32(value, 50),
+            )?))
+        }
+        TYPE_SCHEDULER_STATUS => {
+            let (configured_mode, first_cursor) = read_len_prefixed_string(value, 0)?;
+            let (effective_mode, second_cursor) = read_len_prefixed_string(value, first_cursor)?;
+            let (rust_mode, final_cursor) = read_len_prefixed_string(value, second_cursor)?;
+            if final_cursor != value.len() {
+                return Err(ProtocolError::MalformedControl);
+            }
+            Ok(ControlMessage::SchedulerStatus(SchedulerStatus::new(
+                configured_mode,
+                effective_mode,
+                rust_mode,
+            )?))
+        }
+        TYPE_DATA_TRANSMIT_SAMPLE => {
+            if value.len() != 22 {
+                return Err(ProtocolError::MalformedControl);
+            }
+            Ok(ControlMessage::DataTransmitSample(DataTransmitSample::new(
+                read_u16(value, 0),
+                read_u64(value, 2),
+                read_u32(value, 10),
+                read_u64(value, 14),
             )?))
         }
         _ => Err(ProtocolError::MalformedControl),
     }
+}
+
+fn read_len_prefixed_string(input: &[u8], offset: usize) -> Result<(&str, usize), ProtocolError> {
+    if offset >= input.len() {
+        return Err(ProtocolError::MalformedControl);
+    }
+    let value_len = usize::from(input[offset]);
+    let value_start = offset + 1;
+    let value_end = value_start + value_len;
+    if value_len == 0 || value_len > 63 || value_end > input.len() {
+        return Err(ProtocolError::MalformedControl);
+    }
+    let value = std::str::from_utf8(&input[value_start..value_end]).map_err(|_| ProtocolError::MalformedControl)?;
+    Ok((value, value_end))
 }
 
 fn optional_u32(value: u32) -> Option<u32> {

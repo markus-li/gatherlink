@@ -1,6 +1,6 @@
 [project]
 name = "gatherlink"
-version = "0.9.1"
+version = "0.9.2"
 description = "Carrier-aware multipath UDP transport"
 license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.12"
@@ -24,6 +24,7 @@ exclude = '''
 /(
     \.git
   | \.venv
+  | \.gatherlink
   | build
   | dist
   | migrations
@@ -38,6 +39,7 @@ target-version = "py312"
 exclude = [
   ".git",
   ".venv",
+  ".gatherlink",
   "build",
   "dist",
   "migrations",

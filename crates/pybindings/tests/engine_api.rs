@@ -6,6 +6,7 @@ use gatherlink_protocol::control::{
     ClockSyncMode, ControlMessage, ControlPayload, InternalClockSync, NtpState, PathCapacity, PathLatency,
     PathMetadata, ServiceEndpointAssertion, ServiceMetadata, SinkTime,
 };
+use gatherlink_protocol::frame::Frame;
 use gatherlink_pybindings::dto::{PyPathConfig, PySchedulerConfig, PyUdpServiceConfig};
 use gatherlink_pybindings::engine_api::PyCoreDataplane;
 use pyo3::prelude::*;
@@ -49,6 +50,12 @@ fn python_facing_dataplane_forwards_one_udp_payload() {
         0,
         1,
         0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
     )
     .unwrap();
     let mut dataplane = PyCoreDataplane::bind(vec![service]).unwrap();
@@ -89,6 +96,15 @@ fn python_facing_dataplane_forwards_one_udp_payload() {
                 .unwrap(),
             1
         );
+        assert!(
+            service
+                .get_item("last_tx_at_us")
+                .unwrap()
+                .unwrap()
+                .extract::<u64>()
+                .unwrap()
+                > 0
+        );
     });
 }
 
@@ -104,6 +120,12 @@ fn python_facing_status_exposes_received_control_metadata() {
         0,
         1,
         0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
     )
     .unwrap();
     let mut dataplane = PyCoreDataplane::bind(vec![service]).unwrap();
@@ -166,6 +188,18 @@ fn python_facing_status_exposes_received_control_metadata() {
                 .unwrap(),
             1
         );
+        assert!(
+            path_three
+                .get_item("last_rx_at_us")
+                .unwrap()
+                .unwrap()
+                .extract::<u64>()
+                .unwrap()
+                > 0
+        );
+        let service_path_stats_value = root.get_item("service_path_stats").unwrap().unwrap();
+        let service_path_stats = service_path_stats_value.downcast::<PyDict>().unwrap();
+        assert!(service_path_stats.is_empty());
 
         let control_value = root.get_item("control_metadata").unwrap().unwrap();
         let control_metadata = control_value.downcast::<PyDict>().unwrap();
@@ -182,6 +216,7 @@ fn python_facing_status_exposes_received_control_metadata() {
         let rx_value = path_three_control.get_item("rx").unwrap().unwrap();
         let rx = rx_value.downcast::<PyDict>().unwrap();
         assert_eq!(rx.get_item("frames").unwrap().unwrap().extract::<u64>().unwrap(), 1);
+        assert!(rx.get_item("last_at_us").unwrap().unwrap().extract::<u64>().unwrap() > 0);
         let security_drops_value = root.get_item("security_drops").unwrap().unwrap();
         let security_drops = security_drops_value.downcast::<PyDict>().unwrap();
         assert_eq!(
@@ -197,6 +232,100 @@ fn python_facing_status_exposes_received_control_metadata() {
 }
 
 #[test]
+fn python_facing_dataplane_can_pin_composed_payload_to_one_path() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let path_a_remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let path_b_remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+    path_a_remote
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    path_b_remote
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let service = PyUdpServiceConfig::new(
+        "udp-main".to_owned(),
+        target.local_addr().unwrap().to_string(),
+        Some("127.0.0.1:0".to_owned()),
+        100,
+        "fixed",
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
+    )
+    .unwrap();
+    let paths = vec![
+        PyPathConfig::new(
+            1,
+            1200,
+            false,
+            true,
+            "active",
+            1,
+            None,
+            None,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Some("127.0.0.1:0".to_owned()),
+            Some(path_a_remote.local_addr().unwrap().to_string()),
+            None,
+            None,
+        )
+        .unwrap(),
+        PyPathConfig::new(
+            2,
+            1200,
+            false,
+            true,
+            "active",
+            1,
+            None,
+            None,
+            None,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Some("127.0.0.1:0".to_owned()),
+            Some(path_b_remote.local_addr().unwrap().to_string()),
+            None,
+            None,
+        )
+        .unwrap(),
+    ];
+    let mut dataplane = PyCoreDataplane::bind_with_paths(vec![service], paths).unwrap();
+
+    let sent = dataplane
+        .transmit_service_payload_on_path(1, 2, b"path-pinned-clock-sync")
+        .unwrap();
+
+    assert_eq!(sent, 1);
+    assert!(path_a_remote.recv_from(&mut [0_u8; 1500]).is_err());
+    let mut buffer = [0_u8; 1500];
+    let (length, _source) = recv_with_retry(&path_b_remote, &mut buffer);
+    let frame = Frame::decode(&buffer[..length]).unwrap();
+    assert_eq!(frame.service_id, 1);
+    assert_eq!(frame.path_id, 2);
+    assert_eq!(frame.payload, b"path-pinned-clock-sync");
+}
+
+#[test]
 fn python_facing_dataplane_forwards_ipv6_udp_payload() {
     let target = UdpSocket::bind("[::1]:0").unwrap();
     target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
@@ -209,6 +338,12 @@ fn python_facing_dataplane_forwards_ipv6_udp_payload() {
         0,
         1,
         0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
     )
     .unwrap();
     let mut dataplane = PyCoreDataplane::bind(vec![service]).unwrap();
@@ -238,6 +373,12 @@ fn python_facing_dataplane_reapplies_target_update() {
         0,
         1,
         0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
     )
     .unwrap();
     let mut dataplane = PyCoreDataplane::bind(vec![service]).unwrap();
@@ -251,6 +392,12 @@ fn python_facing_dataplane_reapplies_target_update() {
         0,
         1,
         0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
     )
     .unwrap();
 
@@ -277,6 +424,12 @@ fn python_facing_dataplane_accepts_explicit_paths() {
         0,
         1,
         0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(service.priority(), 200);
@@ -290,11 +443,17 @@ fn python_facing_dataplane_accepts_explicit_paths() {
         0,
         1,
         0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
     )
     .unwrap();
     assert_eq!(peer_scoped.return_mode(), "peer-scoped-source");
     let path = PyPathConfig::new(
-        3, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None, None, None,
+        3, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None,
     )
     .unwrap();
     assert_eq!(path.tx_capacity_bps(), None);
@@ -328,6 +487,10 @@ fn python_facing_path_config_accepts_scheduler_primitives() {
         150_000,
         64,
         524_288,
+        750_000,
+        9,
+        65_536,
+        4_000,
         Some("127.0.0.1:10000".to_owned()),
         Some("127.0.0.1:10001".to_owned()),
         None,
@@ -343,6 +506,10 @@ fn python_facing_path_config_accepts_scheduler_primitives() {
     assert_eq!(path.reorder_hold_us(), 150_000);
     assert_eq!(path.max_in_flight_packets(), 64);
     assert_eq!(path.max_in_flight_bytes(), 524_288);
+    assert_eq!(path.pacing_budget_bps(), 750_000);
+    assert_eq!(path.queue_depth_packets(), 9);
+    assert_eq!(path.queue_depth_bytes(), 65_536);
+    assert_eq!(path.queue_oldest_age_us(), 4_000);
     assert_eq!(path.transport_bind().as_deref(), Some("127.0.0.1:10000"));
     assert_eq!(path.transport_remote().as_deref(), Some("127.0.0.1:10001"));
 }
@@ -360,15 +527,21 @@ fn python_facing_dataplane_accepts_scheduler_config() {
         0,
         1,
         0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
     )
     .unwrap();
     let paths = vec![
         PyPathConfig::new(
-            5, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None, None, None,
+            5, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None,
         )
         .unwrap(),
         PyPathConfig::new(
-            6, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None, None, None,
+            6, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None,
         )
         .unwrap(),
     ];
@@ -377,15 +550,18 @@ fn python_facing_dataplane_accepts_scheduler_config() {
     let service_addr = dataplane.service_local_addr("udp-main").unwrap();
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
 
-    sender.send_to(b"one", &service_addr).unwrap();
-    sender.send_to(b"two", &service_addr).unwrap();
-    let outcomes = dataplane.forward_available_for_service("udp-main", 2).unwrap();
+    let payload_a = vec![b'a'; 700];
+    let payload_b = vec![b'b'; 700];
+    sender.send_to(&payload_a, &service_addr).unwrap();
+    let first = dataplane.forward_one_for_service("udp-main").unwrap();
+    sender.send_to(&payload_b, &service_addr).unwrap();
+    let second = dataplane.forward_one_for_service("udp-main").unwrap();
 
-    let mut buffer = [0_u8; 8];
+    let mut buffer = [0_u8; 1024];
     recv_with_retry(&target, &mut buffer);
     recv_with_retry(&target, &mut buffer);
-    assert_eq!(outcomes[0].path_id(), 5);
-    assert_eq!(outcomes[1].path_id(), 6);
+    assert_eq!(first.path_id(), 5);
+    assert_eq!(second.path_id(), 6);
 }
 
 #[test]
@@ -400,10 +576,16 @@ fn python_facing_scheduler_reapply_preserves_bound_service_socket() {
         0,
         1,
         0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
     )
     .unwrap();
     let paths = vec![PyPathConfig::new(
-        5, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, None, None, None, None,
+        5, 1200, false, true, "active", 1, None, None, None, 0, 0, 0, 0, 0, 0, 0, 0, None, None, None, None,
     )
     .unwrap()];
     let scheduler = PySchedulerConfig::new("round_robin").unwrap();
@@ -422,6 +604,10 @@ fn python_facing_scheduler_reapply_preserves_bound_service_socket() {
         Some(2_000),
         0,
         2_000,
+        0,
+        0,
+        0,
+        0,
         0,
         0,
         None,
@@ -452,6 +638,12 @@ fn python_nonblocking_forward_returns_empty_when_app_socket_is_quiet() {
         0,
         1,
         0,
+        0,
+        0,
+        0,
+        "inherit",
+        None,
+        None,
     )
     .unwrap();
     let mut dataplane = PyCoreDataplane::bind(vec![service]).unwrap();
@@ -474,6 +666,7 @@ fn python_facing_scheduler_config_accepts_all_compiled_modes() {
         "least_queue",
         "earliest_completion_first",
         "blocking_estimation",
+        "ordered_multipath",
         "balanced",
         "adaptive",
     ] {

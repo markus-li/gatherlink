@@ -17,4 +17,5 @@ mod scheduler;
 pub mod security;
 pub mod sockets;
 pub mod transmit;
+mod udp_batch;
 pub mod udp_service;

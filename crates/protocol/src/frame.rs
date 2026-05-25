@@ -191,39 +191,67 @@ impl Frame {
 
     /// Encode this frame into compact v1 plaintext wire bytes.
     pub fn encode_v1(&self) -> Result<Vec<u8>, ProtocolError> {
-        let header_len = V1_HEADER_LEN + self.fragment.map_or(0, |_| FRAGMENT_METADATA_LEN);
-        let mut output = vec![0_u8; header_len + self.payload.len()];
-        output[0] = PROTOCOL_VERSION;
-        output[1] = self.kind.to_u8();
-        if self.fragment.is_some() {
-            output[1] |= FLAG_FRAGMENT_PRESENT;
-        }
-        write_u16(&mut output, 2, self.service_id);
-        write_u16(&mut output, 4, self.path_id);
-        write_u64(&mut output, 6, self.sequence);
-        if let Some(fragment) = self.fragment {
-            encode_fragment_metadata(fragment, &mut output[V1_HEADER_LEN..header_len]);
-        }
-        output[header_len..].copy_from_slice(&self.payload);
+        let mut output = Vec::with_capacity(self.encoded_v1_len());
+        self.encode_v1_into(&mut output)?;
         Ok(output)
     }
 
     /// Encode this frame into compact v2 bytes for AEAD plaintext.
     pub fn encode_v2(&self) -> Result<Vec<u8>, ProtocolError> {
-        let header_len = V2_HEADER_LEN + self.fragment.map_or(0, |_| FRAGMENT_METADATA_LEN);
-        let mut output = vec![0_u8; header_len + self.payload.len()];
-        output[0] = self.kind.to_u8();
-        if self.fragment.is_some() {
-            output[0] |= FLAG_FRAGMENT_PRESENT;
-        }
-        write_u16(&mut output, 1, self.service_id);
-        write_u16(&mut output, 3, self.path_id);
-        write_u64(&mut output, 5, self.sequence);
-        if let Some(fragment) = self.fragment {
-            encode_fragment_metadata(fragment, &mut output[V2_HEADER_LEN..header_len]);
-        }
-        output[header_len..].copy_from_slice(&self.payload);
+        let mut output = Vec::with_capacity(self.encoded_v2_len());
+        self.encode_v2_into(&mut output)?;
         Ok(output)
+    }
+
+    /// Return the encoded compact v1 length without allocating.
+    pub fn encoded_v1_len(&self) -> usize {
+        V1_HEADER_LEN + self.fragment.map_or(0, |_| FRAGMENT_METADATA_LEN) + self.payload.len()
+    }
+
+    /// Return the encoded compact v2 length without allocating.
+    pub fn encoded_v2_len(&self) -> usize {
+        V2_HEADER_LEN + self.fragment.map_or(0, |_| FRAGMENT_METADATA_LEN) + self.payload.len()
+    }
+
+    /// Append compact v1 bytes to an existing output buffer.
+    pub fn encode_v1_into(&self, output: &mut Vec<u8>) -> Result<(), ProtocolError> {
+        let start = output.len();
+        let header_len = V1_HEADER_LEN + self.fragment.map_or(0, |_| FRAGMENT_METADATA_LEN);
+        output.resize(start + header_len + self.payload.len(), 0);
+        let frame = &mut output[start..];
+        frame[0] = PROTOCOL_VERSION;
+        frame[1] = self.kind.to_u8();
+        if self.fragment.is_some() {
+            frame[1] |= FLAG_FRAGMENT_PRESENT;
+        }
+        write_u16(frame, 2, self.service_id);
+        write_u16(frame, 4, self.path_id);
+        write_u64(frame, 6, self.sequence);
+        if let Some(fragment) = self.fragment {
+            encode_fragment_metadata(fragment, &mut frame[V1_HEADER_LEN..header_len]);
+        }
+        frame[header_len..].copy_from_slice(&self.payload);
+        Ok(())
+    }
+
+    /// Append compact v2 bytes to an existing output buffer.
+    pub fn encode_v2_into(&self, output: &mut Vec<u8>) -> Result<(), ProtocolError> {
+        let start = output.len();
+        let header_len = V2_HEADER_LEN + self.fragment.map_or(0, |_| FRAGMENT_METADATA_LEN);
+        output.resize(start + header_len + self.payload.len(), 0);
+        let frame = &mut output[start..];
+        frame[0] = self.kind.to_u8();
+        if self.fragment.is_some() {
+            frame[0] |= FLAG_FRAGMENT_PRESENT;
+        }
+        write_u16(frame, 1, self.service_id);
+        write_u16(frame, 3, self.path_id);
+        write_u64(frame, 5, self.sequence);
+        if let Some(fragment) = self.fragment {
+            encode_fragment_metadata(fragment, &mut frame[V2_HEADER_LEN..header_len]);
+        }
+        frame[header_len..].copy_from_slice(&self.payload);
+        Ok(())
     }
 
     /// Decode one complete compact v1 frame from wire bytes.
@@ -267,6 +295,7 @@ impl Frame {
             return Err(ProtocolError::BufferTooSmall);
         }
         let kind_flags = input[0];
+        let kind = FrameKind::from_u8(kind_flags & KIND_MASK)?;
         let has_fragment = parse_kind_flags(kind_flags)?;
         let header_len = V2_HEADER_LEN + if has_fragment { FRAGMENT_METADATA_LEN } else { 0 };
         if input.len() < header_len {
@@ -278,13 +307,43 @@ impl Frame {
             None
         };
         Self::new(
-            FrameKind::from_u8(kind_flags & KIND_MASK)?,
+            kind,
             read_u16(input, 1),
             read_u16(input, 3),
             read_u64(input, 5),
             fragment,
             input[header_len..].to_vec(),
         )
+    }
+
+    /// Decode one owned compact v2 AEAD plaintext frame.
+    ///
+    /// The encrypted dataplane already has an owned plaintext buffer after
+    /// AEAD open. Reusing that allocation avoids allocating a second payload
+    /// buffer for every received user packet on the hot path.
+    pub fn decode_v2_owned(mut input: Vec<u8>) -> Result<Self, ProtocolError> {
+        if input.len() < V2_HEADER_LEN {
+            return Err(ProtocolError::BufferTooSmall);
+        }
+        let kind_flags = input[0];
+        let kind = FrameKind::from_u8(kind_flags & KIND_MASK)?;
+        let has_fragment = parse_kind_flags(kind_flags)?;
+        let header_len = V2_HEADER_LEN + if has_fragment { FRAGMENT_METADATA_LEN } else { 0 };
+        if input.len() < header_len {
+            return Err(ProtocolError::BufferTooSmall);
+        }
+        let fragment = if has_fragment {
+            Some(decode_fragment_metadata(&input[V2_HEADER_LEN..header_len])?)
+        } else {
+            None
+        };
+        let service_id = read_u16(&input, 1);
+        let path_id = read_u16(&input, 3);
+        let sequence = read_u64(&input, 5);
+        let payload_len = input.len() - header_len;
+        input.copy_within(header_len.., 0);
+        input.truncate(payload_len);
+        Self::new(kind, service_id, path_id, sequence, fragment, input)
     }
 }
 

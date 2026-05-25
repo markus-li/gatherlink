@@ -8,15 +8,38 @@ use std::collections::HashMap;
 use std::fmt;
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use gatherlink_protocol::ids::{is_reserved_service_id, PathId, ServiceId};
 
+use crate::udp_batch::{drain_udp_socket, send_udp_many};
+
+const UDP_SOCKET_BUFFER_BYTES: usize = 1024 * 1024 * 1024;
+
 /// Per-service fanout primitive selected by Python and executed by Rust.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceSchedulerConfig {
     fanout: u16,
     fanout_below_bytes: usize,
+    flowlet_idle_us: u64,
+    flowlet_max_hold_us: u64,
+    path_run_datagrams: usize,
+    path_policy: ServicePathPolicy,
+    allowed_path_ids: Vec<PathId>,
+    path_weights: Vec<(PathId, u16)>,
+}
+
+/// Per-service path selector primitive compiled by Python.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServicePathPolicy {
+    /// Use the node-wide compiled scheduler.
+    Inherit,
+    /// Pick the currently best eligible path by capacity, latency, loss, and configured order.
+    SingleBestPath,
+    /// Use the node-wide compiled path weights with an independent per-service round-robin cursor.
+    WeightedRoundRobin,
 }
 
 impl ServiceSchedulerConfig {
@@ -25,6 +48,12 @@ impl ServiceSchedulerConfig {
         Self {
             fanout: 1,
             fanout_below_bytes: 0,
+            flowlet_idle_us: 0,
+            flowlet_max_hold_us: 0,
+            path_run_datagrams: 0,
+            path_policy: ServicePathPolicy::Inherit,
+            allowed_path_ids: Vec::new(),
+            path_weights: Vec::new(),
         }
     }
 
@@ -35,10 +64,86 @@ impl ServiceSchedulerConfig {
     /// only to payloads whose size is at or below the threshold; larger payloads
     /// fall back to one normally scheduled path.
     pub const fn new(fanout: u16, fanout_below_bytes: usize) -> Self {
+        Self::new_with_flowlet(fanout, fanout_below_bytes, 0)
+    }
+
+    /// Build a service scheduler primitive with a flowlet stickiness timeout.
+    ///
+    /// `flowlet_idle_us == 0` disables stickiness. Otherwise, packets from the
+    /// same local service source keep using the same selected path until that
+    /// source has been idle for at least the configured duration.
+    pub const fn new_with_flowlet(fanout: u16, fanout_below_bytes: usize, flowlet_idle_us: u64) -> Self {
+        Self::new_with_bounded_flowlet(fanout, fanout_below_bytes, flowlet_idle_us, flowlet_idle_us)
+    }
+
+    /// Build a service scheduler primitive with idle and maximum stickiness bounds.
+    ///
+    /// `flowlet_max_hold_us` prevents a busy flow from pinning one path forever.
+    /// When the maximum hold expires, Rust asks the compiled path scheduler for a
+    /// fresh path even if the flow has not gone idle.
+    pub const fn new_with_bounded_flowlet(
+        fanout: u16,
+        fanout_below_bytes: usize,
+        flowlet_idle_us: u64,
+        flowlet_max_hold_us: u64,
+    ) -> Self {
+        Self::new_with_burst_run(fanout, fanout_below_bytes, flowlet_idle_us, flowlet_max_hold_us, 0)
+    }
+
+    /// Build a service scheduler primitive with an optional hot-burst path run.
+    ///
+    /// `path_run_datagrams == 0` keeps Rust's default execution batching. A
+    /// non-zero value is a Python-compiled primitive for order-sensitive helper
+    /// traffic that should consult the scheduler more frequently during a hot
+    /// service burst.
+    pub const fn new_with_burst_run(
+        fanout: u16,
+        fanout_below_bytes: usize,
+        flowlet_idle_us: u64,
+        flowlet_max_hold_us: u64,
+        path_run_datagrams: usize,
+    ) -> Self {
+        Self::new_with_path_policy(
+            fanout,
+            fanout_below_bytes,
+            flowlet_idle_us,
+            flowlet_max_hold_us,
+            path_run_datagrams,
+            ServicePathPolicy::Inherit,
+        )
+    }
+
+    /// Build a service scheduler primitive with an explicit path selector.
+    pub const fn new_with_path_policy(
+        fanout: u16,
+        fanout_below_bytes: usize,
+        flowlet_idle_us: u64,
+        flowlet_max_hold_us: u64,
+        path_run_datagrams: usize,
+        path_policy: ServicePathPolicy,
+    ) -> Self {
         Self {
             fanout,
             fanout_below_bytes,
+            flowlet_idle_us,
+            flowlet_max_hold_us,
+            path_run_datagrams,
+            path_policy,
+            allowed_path_ids: Vec::new(),
+            path_weights: Vec::new(),
         }
+    }
+
+    /// Attach a Python-compiled list of eligible path ids to this primitive.
+    pub fn with_allowed_path_ids(mut self, allowed_path_ids: Vec<PathId>) -> Self {
+        self.allowed_path_ids = allowed_path_ids;
+        self
+    }
+
+    /// Attach Python-compiled service-specific path weights to this primitive.
+    pub fn with_path_weights(mut self, path_weights: Vec<(PathId, u16)>) -> Self {
+        self.path_weights = path_weights;
+        self
     }
 
     /// Requested fanout count. Zero means every eligible path.
@@ -49,6 +154,48 @@ impl ServiceSchedulerConfig {
     /// Payload threshold for fanout, or zero when fanout always applies.
     pub const fn fanout_below_bytes(&self) -> usize {
         self.fanout_below_bytes
+    }
+
+    /// Idle timeout for service/source path stickiness, or zero when disabled.
+    pub const fn flowlet_idle_us(&self) -> u64 {
+        self.flowlet_idle_us
+    }
+
+    /// Maximum time a busy service/source may remain pinned to one path.
+    pub const fn flowlet_max_hold_us(&self) -> u64 {
+        self.flowlet_max_hold_us
+    }
+
+    /// Maximum hot-burst datagrams to keep on one path, or zero for default.
+    pub const fn path_run_datagrams(&self) -> usize {
+        self.path_run_datagrams
+    }
+
+    /// Per-service path selector selected by Python.
+    pub const fn path_policy(&self) -> ServicePathPolicy {
+        self.path_policy
+    }
+
+    /// Optional path ids this service may use. Empty means every eligible path.
+    pub fn allowed_path_ids(&self) -> &[PathId] {
+        &self.allowed_path_ids
+    }
+
+    /// Optional path weights this service should use. Empty means path defaults.
+    pub fn path_weights(&self) -> &[(PathId, u16)] {
+        &self.path_weights
+    }
+
+    /// Return whether this service may use a path id.
+    pub fn allows_path_id(&self, path_id: PathId) -> bool {
+        if !self.allowed_path_ids.is_empty() {
+            return self.allowed_path_ids.contains(&path_id);
+        }
+        self.path_weights.is_empty()
+            || self
+                .path_weights
+                .iter()
+                .any(|(weighted_path_id, weight)| *weighted_path_id == path_id && *weight > 0)
     }
 
     /// Return the fanout Rust should execute for a payload of this size.
@@ -215,7 +362,7 @@ impl UdpServiceConfig {
             self.target,
             self.priority,
             self.return_mode,
-            self.scheduler,
+            self.scheduler.clone(),
         )
     }
 
@@ -246,7 +393,7 @@ impl UdpServiceConfig {
 
     /// Service fanout primitive selected by Python.
     pub fn scheduler(&self) -> ServiceSchedulerConfig {
-        self.scheduler
+        self.scheduler.clone()
     }
 }
 
@@ -315,39 +462,48 @@ impl UserlandUdpService {
 
     /// Receive one UDP datagram from the userland service socket.
     pub fn recv_from(&self, buffer: &mut [u8]) -> Result<(usize, SocketAddr), UdpServiceError> {
-        self.socket.recv_from(buffer).map_err(UdpServiceError::ReceiveFailed)
+        self.socket
+            .set_nonblocking(false)
+            .map_err(UdpServiceError::ConfigureSocketFailed)?;
+        let result = self.socket.recv_from(buffer).map_err(UdpServiceError::ReceiveFailed);
+        self.socket
+            .set_nonblocking(true)
+            .map_err(UdpServiceError::ConfigureSocketFailed)?;
+        result
     }
 
     /// Receive one queued UDP datagram without blocking.
     pub fn try_recv_from(&self, buffer: &mut [u8]) -> Result<Option<(usize, SocketAddr)>, UdpServiceError> {
-        self.socket
-            .set_nonblocking(true)
-            .map_err(UdpServiceError::ConfigureSocketFailed)?;
-        let result = match self.socket.recv_from(buffer) {
+        match self.socket.recv_from(buffer) {
             Ok(received) => Ok(Some(received)),
             Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
             Err(error) => Err(UdpServiceError::ReceiveFailed(error)),
-        };
-        self.socket
-            .set_nonblocking(false)
-            .map_err(UdpServiceError::ConfigureSocketFailed)?;
-        result
+        }
+    }
+
+    /// Drain queued service datagrams through a borrowed-payload callback.
+    pub fn drain_datagrams<E, F>(
+        &self,
+        max_datagrams: usize,
+        mut handle: F,
+    ) -> Result<Result<usize, E>, UdpServiceError>
+    where
+        F: FnMut(&[u8], SocketAddr) -> Result<(), E>,
+    {
+        drain_udp_socket(&self.socket, max_datagrams, |datagram| {
+            handle(datagram.payload, datagram.source)
+        })
+        .map_err(UdpServiceError::ReceiveFailed)
     }
 
     /// Receive one queued reply from any peer-scoped app-facing source socket.
     pub fn try_recv_peer_scoped(&self, buffer: &mut [u8]) -> Result<Option<(u32, usize, SocketAddr)>, UdpServiceError> {
         for (peer_scope, socket) in &self.peer_sources {
-            socket
-                .set_nonblocking(true)
-                .map_err(UdpServiceError::ConfigureSocketFailed)?;
             let result = match socket.recv_from(buffer) {
                 Ok((length, source)) => Ok(Some((*peer_scope, length, source))),
                 Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
                 Err(error) => Err(UdpServiceError::ReceiveFailed(error)),
             };
-            socket
-                .set_nonblocking(false)
-                .map_err(UdpServiceError::ConfigureSocketFailed)?;
             if result.as_ref().is_ok_and(Option::is_some) {
                 return result;
             }
@@ -365,6 +521,11 @@ impl UserlandUdpService {
         self.socket
             .send_to(payload, target)
             .map_err(UdpServiceError::SendFailed)
+    }
+
+    /// Emit many UDP datagrams to one target with batched syscalls where available.
+    pub fn emit_many_to(&self, payloads: &[&[u8]], target: SocketAddr) -> Result<usize, UdpServiceError> {
+        send_udp_many(&self.socket, target, payloads).map_err(UdpServiceError::SendFailed)
     }
 
     /// Emit from a peer-specific local UDP source so app replies map back to that peer.
@@ -388,10 +549,14 @@ impl UserlandUdpService {
     }
 
     fn from_bound_socket(config: UdpServiceConfig, socket: UdpSocket) -> Result<Self, UdpServiceError> {
+        request_udp_socket_buffers(&socket);
         // Tests and future supervisors should fail predictably instead of
         // blocking forever when a service is miswired.
         socket
             .set_read_timeout(Some(Duration::from_millis(500)))
+            .map_err(UdpServiceError::ConfigureSocketFailed)?;
+        socket
+            .set_nonblocking(true)
             .map_err(UdpServiceError::ConfigureSocketFailed)?;
 
         Ok(Self {
@@ -404,8 +569,12 @@ impl UserlandUdpService {
     fn bind_peer_source(&self, target: SocketAddr) -> Result<UdpSocket, UdpServiceError> {
         let bind_addr = SocketAddr::new(target.ip(), 0);
         let socket = UdpSocket::bind(bind_addr).map_err(UdpServiceError::BindFailed)?;
+        request_udp_socket_buffers(&socket);
         socket
             .set_read_timeout(Some(Duration::from_millis(500)))
+            .map_err(UdpServiceError::ConfigureSocketFailed)?;
+        socket
+            .set_nonblocking(true)
             .map_err(UdpServiceError::ConfigureSocketFailed)?;
         Ok(socket)
     }
@@ -420,6 +589,35 @@ impl UserlandUdpService {
             .collect()
     }
 }
+
+#[cfg(unix)]
+fn request_udp_socket_buffers(socket: &UdpSocket) {
+    // TODO(perf): Best effort only. The Debian compatibility layer should make
+    // host sysctl caps visible, but Rust should still request enough queue
+    // depth for high-rate userland UDP service and carrier sockets.
+    let value = UDP_SOCKET_BUFFER_BYTES as libc::c_int;
+    let value_ptr = (&value as *const libc::c_int).cast::<libc::c_void>();
+    let value_len = std::mem::size_of_val(&value) as libc::socklen_t;
+    unsafe {
+        let _ = libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            value_ptr,
+            value_len,
+        );
+        let _ = libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            value_ptr,
+            value_len,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn request_udp_socket_buffers(_socket: &UdpSocket) {}
 
 /// Errors for the first userland UDP service layer.
 #[derive(Debug)]

@@ -6,8 +6,15 @@
 
 use std::io::ErrorKind;
 use std::net::{SocketAddr, UdpSocket};
+use std::ops::Range;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 use gatherlink_crypto::envelope::TransportKeys;
+
+use crate::udp_batch::{drain_udp_socket_mut, send_udp_many};
+
+const UDP_SOCKET_BUFFER_BYTES: usize = 1024 * 1024 * 1024;
 
 /// Compiled relay-hop facts accepted by the Rust executor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,13 +81,13 @@ pub enum RelayForwardError {
 pub enum RelayForwardOutcome {
     /// No packet was available on the relay socket.
     NoPacket,
-    /// One packet was authenticated, resealed, and sent to the next hop.
+    /// One packet was authenticated, unwrapped by one hop layer, and sent to the next hop.
     Forwarded {
         /// Source socket address of the received hop packet.
         source: SocketAddr,
         /// Authenticated hop packet bytes received from the previous hop.
         received_bytes: usize,
-        /// Resealed bytes sent to the next hop.
+        /// Opaque inner bytes sent to the next hop.
         emitted_bytes: usize,
     },
     /// One packet was rejected locally and no network response was emitted.
@@ -92,6 +99,21 @@ pub enum RelayForwardOutcome {
         /// Received packet size.
         received_bytes: usize,
     },
+}
+
+/// Aggregate result from a bounded relay socket drain.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RelayForwardBatch {
+    /// Authenticated hop packets accepted by this relay.
+    pub forwarded_packets: u64,
+    /// Packets dropped locally before any network response.
+    pub dropped_packets: u64,
+    /// Packets emitted to the compiled next hop.
+    pub emitted_packets: u64,
+    /// UDP bytes received by this relay drain.
+    pub received_bytes: u64,
+    /// UDP bytes emitted to the compiled next hop.
+    pub emitted_bytes: u64,
 }
 
 /// One relay executor decision.
@@ -122,12 +144,12 @@ impl RelaySessionExecutor {
         }
     }
 
-    /// Create executor state with packet-rate hop AEAD outer-envelope unwrap/reseal keys.
+    /// Create executor state with packet-rate hop AEAD outer-envelope unwrap keys.
     #[must_use]
     pub fn new_with_hop_keys(
         config: RelaySessionConfig,
-        next_hop_receiver_index: u32,
-        send_key: [u8; 32],
+        _next_hop_receiver_index: u32,
+        _send_key: [u8; 32],
         receive_key: [u8; 32],
     ) -> Self {
         let relay_receiver_index = config.relay_receiver_index;
@@ -136,8 +158,8 @@ impl RelaySessionExecutor {
             counters: RelaySessionCounters::default(),
             hop_keys: Some(TransportKeys::new_with_receiver_indexes(
                 relay_receiver_index,
-                next_hop_receiver_index,
-                send_key,
+                relay_receiver_index,
+                [0_u8; 32],
                 receive_key,
             )),
         }
@@ -163,47 +185,7 @@ impl RelaySessionExecutor {
         decision
     }
 
-    /// Authenticate one outer hop envelope, enforce limits, and reseal opaque bytes for the next hop.
-    ///
-    /// The outer hop plaintext is still the endpoint-encrypted packet. Relay
-    /// code must treat it as opaque bytes; only the final endpoint session can
-    /// decrypt endpoint service/frame contents.
-    pub fn rewrap_authenticated_hop_packet(
-        &mut self,
-        packet: &[u8],
-        now_unix_us: u64,
-    ) -> Result<Vec<u8>, RelayDropReason> {
-        let decrypted = {
-            let Some(hop_keys) = self.hop_keys.as_mut() else {
-                self.counters.dropped_packets = self.counters.dropped_packets.saturating_add(1);
-                return Err(RelayDropReason::HopCryptoUnavailable);
-            };
-            hop_keys.decrypt_packet(packet).map_err(|_error| {
-                self.counters.dropped_packets = self.counters.dropped_packets.saturating_add(1);
-                RelayDropReason::HopAuthFailed
-            })?
-        };
-        match self.check_packet(decrypted.receiver_index, decrypted.plaintext.len(), now_unix_us) {
-            RelayPacketDecision::Forward => {
-                self.counters.forwarded_packets = self.counters.forwarded_packets.saturating_add(1);
-                self.counters.forwarded_bytes = self
-                    .counters
-                    .forwarded_bytes
-                    .saturating_add(decrypted.plaintext.len() as u64);
-                self.hop_keys
-                    .as_mut()
-                    .ok_or(RelayDropReason::HopCryptoUnavailable)?
-                    .encrypt_frame(&decrypted.plaintext)
-                    .map_err(|_error| RelayDropReason::HopAuthFailed)
-            }
-            RelayPacketDecision::Drop(reason) => {
-                self.counters.dropped_packets = self.counters.dropped_packets.saturating_add(1);
-                Err(reason)
-            }
-        }
-    }
-
-    /// Authenticate one outer hop envelope and return the opaque endpoint packet without rewrapping it.
+    /// Authenticate one outer hop envelope and return the remaining opaque packet.
     ///
     /// This is the final-hop exit primitive: the relay/exit process may remove
     /// only the hop envelope it is authorized to see, then hand the still
@@ -226,6 +208,29 @@ impl RelaySessionExecutor {
         };
         match self.authorize_packet(decrypted.receiver_index, decrypted.plaintext.len(), now_unix_us) {
             RelayPacketDecision::Forward => Ok(decrypted.plaintext),
+            RelayPacketDecision::Drop(reason) => Err(reason),
+        }
+    }
+
+    /// Authenticate one outer hop envelope in-place and return the remaining opaque packet range.
+    pub fn unwrap_authenticated_hop_packet_in_place(
+        &mut self,
+        packet: &mut [u8],
+        now_unix_us: u64,
+    ) -> Result<Range<usize>, RelayDropReason> {
+        let decrypted = {
+            let Some(hop_keys) = self.hop_keys.as_mut() else {
+                self.counters.dropped_packets = self.counters.dropped_packets.saturating_add(1);
+                return Err(RelayDropReason::HopCryptoUnavailable);
+            };
+            hop_keys.decrypt_packet_in_place(packet).map_err(|_error| {
+                self.counters.dropped_packets = self.counters.dropped_packets.saturating_add(1);
+                RelayDropReason::HopAuthFailed
+            })?
+        };
+        let plaintext_len = decrypted.plaintext_range.len();
+        match self.authorize_packet(decrypted.receiver_index, plaintext_len, now_unix_us) {
+            RelayPacketDecision::Forward => Ok(decrypted.plaintext_range),
             RelayPacketDecision::Drop(reason) => Err(reason),
         }
     }
@@ -280,6 +285,8 @@ pub struct RelayHopForwarder {
     socket: UdpSocket,
     next_hop: SocketAddr,
     executor: RelaySessionExecutor,
+    receive_buffers: Vec<Vec<u8>>,
+    forward_ranges: Vec<(usize, Range<usize>)>,
 }
 
 impl RelayHopForwarder {
@@ -290,6 +297,7 @@ impl RelayHopForwarder {
         executor: RelaySessionExecutor,
     ) -> Result<Self, RelayForwardError> {
         let socket = UdpSocket::bind(listen).map_err(RelayForwardError::BindFailed)?;
+        request_udp_socket_buffers(&socket);
         socket
             .set_nonblocking(true)
             .map_err(RelayForwardError::ConfigureSocketFailed)?;
@@ -297,6 +305,8 @@ impl RelayHopForwarder {
             socket,
             next_hop,
             executor,
+            receive_buffers: Vec::new(),
+            forward_ranges: Vec::new(),
         })
     }
 
@@ -305,7 +315,7 @@ impl RelayHopForwarder {
         self.socket.local_addr().map_err(RelayForwardError::ReceiveFailed)
     }
 
-    /// Poll one relay-hop packet and forward it when it authenticates.
+    /// Poll one relay-hop packet, remove this hop envelope, and forward the remaining opaque packet.
     ///
     /// Invalid packets are dropped silently on the network. The returned outcome
     /// is only for local counters, diagnostics, and tests.
@@ -323,9 +333,12 @@ impl RelayHopForwarder {
             }
             Err(error) => return Err(RelayForwardError::ReceiveFailed(error)),
         };
-        let packet = &buffer[..received_len];
-        let resealed = match self.executor.rewrap_authenticated_hop_packet(packet, now_unix_us) {
-            Ok(resealed) => resealed,
+        buffer.truncate(received_len);
+        let inner_range = match self
+            .executor
+            .unwrap_authenticated_hop_packet_in_place(&mut buffer, now_unix_us)
+        {
+            Ok(range) => range,
             Err(reason) => {
                 return Ok(RelayForwardOutcome::Dropped {
                     source,
@@ -336,7 +349,7 @@ impl RelayHopForwarder {
         };
         let emitted_bytes = self
             .socket
-            .send_to(&resealed, self.next_hop)
+            .send_to(&buffer[inner_range], self.next_hop)
             .map_err(RelayForwardError::SendFailed)?;
         self.executor.record_emitted(emitted_bytes);
         Ok(RelayForwardOutcome::Forwarded {
@@ -344,6 +357,63 @@ impl RelayHopForwarder {
             received_bytes: received_len,
             emitted_bytes,
         })
+    }
+
+    /// Drain up to `max_packets` ready UDP packets without crossing back into Python per packet.
+    ///
+    /// Python still owns lifecycle, policy, and diagnostics cadence. This is only
+    /// a packet-speed primitive for a Python-compiled relay service.
+    pub fn try_forward_many(
+        &mut self,
+        max_packets: usize,
+        now_unix_us: u64,
+    ) -> Result<RelayForwardBatch, RelayForwardError> {
+        let mut batch = RelayForwardBatch::default();
+        if max_packets == 0 {
+            return Ok(batch);
+        }
+        self.forward_ranges.clear();
+        let drain_result = drain_udp_socket_mut(
+            &self.socket,
+            &mut self.receive_buffers,
+            max_packets,
+            |index, datagram| {
+                batch.received_bytes = batch.received_bytes.saturating_add(datagram.payload.len() as u64);
+                match self
+                    .executor
+                    .unwrap_authenticated_hop_packet_in_place(datagram.payload, now_unix_us)
+                {
+                    Ok(range) => self.forward_ranges.push((index, range)),
+                    Err(_reason) => {
+                        batch.dropped_packets = batch.dropped_packets.saturating_add(1);
+                    }
+                }
+                Ok::<(), RelayForwardError>(())
+            },
+        )
+        .map_err(RelayForwardError::ReceiveFailed)?;
+        match drain_result {
+            Ok(_count) => {}
+            Err(error) => return Err(error),
+        }
+        if self.forward_ranges.is_empty() {
+            return Ok(batch);
+        }
+        let packet_slices = self
+            .forward_ranges
+            .iter()
+            .map(|(index, range)| &self.receive_buffers[*index][range.clone()])
+            .collect::<Vec<_>>();
+        let emitted =
+            send_udp_many(&self.socket, self.next_hop, &packet_slices).map_err(RelayForwardError::SendFailed)?;
+        for (_index, range) in self.forward_ranges.iter().take(emitted) {
+            let packet_len = range.len();
+            self.executor.record_emitted(packet_len);
+            batch.forwarded_packets = batch.forwarded_packets.saturating_add(1);
+            batch.emitted_packets = batch.emitted_packets.saturating_add(1);
+            batch.emitted_bytes = batch.emitted_bytes.saturating_add(packet_len as u64);
+        }
+        Ok(batch)
     }
 
     /// Return current relay executor counters.
@@ -359,6 +429,8 @@ pub struct RelayHopExitForwarder {
     socket: UdpSocket,
     next_hop: SocketAddr,
     executor: RelaySessionExecutor,
+    receive_buffers: Vec<Vec<u8>>,
+    forward_ranges: Vec<(usize, Range<usize>)>,
 }
 
 impl RelayHopExitForwarder {
@@ -369,6 +441,7 @@ impl RelayHopExitForwarder {
         executor: RelaySessionExecutor,
     ) -> Result<Self, RelayForwardError> {
         let socket = UdpSocket::bind(listen).map_err(RelayForwardError::BindFailed)?;
+        request_udp_socket_buffers(&socket);
         socket
             .set_nonblocking(true)
             .map_err(RelayForwardError::ConfigureSocketFailed)?;
@@ -376,6 +449,8 @@ impl RelayHopExitForwarder {
             socket,
             next_hop,
             executor,
+            receive_buffers: Vec::new(),
+            forward_ranges: Vec::new(),
         })
     }
 
@@ -399,9 +474,12 @@ impl RelayHopExitForwarder {
             }
             Err(error) => return Err(RelayForwardError::ReceiveFailed(error)),
         };
-        let packet = &buffer[..length];
-        let inner = match self.executor.unwrap_authenticated_hop_packet(packet, now_unix_us) {
-            Ok(inner) => inner,
+        buffer.truncate(length);
+        let inner_range = match self
+            .executor
+            .unwrap_authenticated_hop_packet_in_place(&mut buffer, now_unix_us)
+        {
+            Ok(range) => range,
             Err(reason) => {
                 return Ok(RelayForwardOutcome::Dropped {
                     source,
@@ -412,7 +490,7 @@ impl RelayHopExitForwarder {
         };
         let emitted_bytes = self
             .socket
-            .send_to(&inner, self.next_hop)
+            .send_to(&buffer[inner_range], self.next_hop)
             .map_err(RelayForwardError::SendFailed)?;
         self.executor.record_emitted(emitted_bytes);
         Ok(RelayForwardOutcome::Forwarded {
@@ -422,8 +500,91 @@ impl RelayHopExitForwarder {
         })
     }
 
+    /// Drain up to `max_packets` ready final-hop packets.
+    ///
+    /// This keeps the relay-exit hot loop in Rust while leaving Python in
+    /// charge of service lifecycle and operator-facing meaning.
+    pub fn try_forward_many(
+        &mut self,
+        max_packets: usize,
+        now_unix_us: u64,
+    ) -> Result<RelayForwardBatch, RelayForwardError> {
+        let mut batch = RelayForwardBatch::default();
+        if max_packets == 0 {
+            return Ok(batch);
+        }
+        self.forward_ranges.clear();
+        let drain_result = drain_udp_socket_mut(
+            &self.socket,
+            &mut self.receive_buffers,
+            max_packets,
+            |index, datagram| {
+                batch.received_bytes = batch.received_bytes.saturating_add(datagram.payload.len() as u64);
+                match self
+                    .executor
+                    .unwrap_authenticated_hop_packet_in_place(datagram.payload, now_unix_us)
+                {
+                    Ok(range) => self.forward_ranges.push((index, range)),
+                    Err(_reason) => {
+                        batch.dropped_packets = batch.dropped_packets.saturating_add(1);
+                    }
+                }
+                Ok::<(), RelayForwardError>(())
+            },
+        )
+        .map_err(RelayForwardError::ReceiveFailed)?;
+        match drain_result {
+            Ok(_count) => {}
+            Err(error) => return Err(error),
+        }
+        if self.forward_ranges.is_empty() {
+            return Ok(batch);
+        }
+        let packet_slices = self
+            .forward_ranges
+            .iter()
+            .map(|(index, range)| &self.receive_buffers[*index][range.clone()])
+            .collect::<Vec<_>>();
+        let emitted =
+            send_udp_many(&self.socket, self.next_hop, &packet_slices).map_err(RelayForwardError::SendFailed)?;
+        for (_index, range) in self.forward_ranges.iter().take(emitted) {
+            let packet_len = range.len();
+            self.executor.record_emitted(packet_len);
+            batch.forwarded_packets = batch.forwarded_packets.saturating_add(1);
+            batch.emitted_packets = batch.emitted_packets.saturating_add(1);
+            batch.emitted_bytes = batch.emitted_bytes.saturating_add(packet_len as u64);
+        }
+        Ok(batch)
+    }
+
     /// Return current relay executor counters.
     pub fn counters(&self) -> RelaySessionCounters {
         self.executor.counters()
     }
 }
+
+#[cfg(unix)]
+fn request_udp_socket_buffers(socket: &UdpSocket) {
+    let value = UDP_SOCKET_BUFFER_BYTES as libc::c_int;
+    let value_ptr = (&value as *const libc::c_int).cast::<libc::c_void>();
+    let value_len = std::mem::size_of_val(&value) as libc::socklen_t;
+    unsafe {
+        let _ = libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            value_ptr,
+            value_len,
+        );
+        let _ = libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            value_ptr,
+            value_len,
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn request_udp_socket_buffers(_socket: &UdpSocket) {}

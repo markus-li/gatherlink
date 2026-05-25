@@ -35,7 +35,7 @@ pub(crate) fn fragment_datagram(datagram: &PlannedDatagram) -> Result<Vec<FrameP
         frames.push(FramePlan {
             frame,
             path: datagram.path.clone(),
-            datagrams: vec![datagram.clone()],
+            datagrams: vec![datagram.to_meta()],
             fragment_count,
         });
     }

@@ -26,6 +26,12 @@ class FakeUdpServiceConfig:
     service_id: int
     scheduler_fanout: int
     scheduler_fanout_below_bytes: int
+    scheduler_flowlet_idle_us: int
+    scheduler_flowlet_max_hold_us: int
+    scheduler_path_run_datagrams: int
+    scheduler_path_policy: str
+    scheduler_allowed_path_ids: list[int]
+    scheduler_path_weights: list[tuple[int, int]]
 
 
 @dataclass
@@ -43,6 +49,10 @@ class FakePathConfig:
     reorder_hold_us: int
     max_in_flight_packets: int
     max_in_flight_bytes: int
+    pacing_budget_bps: int
+    queue_depth_packets: int
+    queue_depth_bytes: int
+    queue_oldest_age_us: int
     transport_bind: str | None
     transport_remote: str | None
     relay_receiver_index: int | None
@@ -144,6 +154,7 @@ def test_runtime_config_converts_to_rust_binding_dtos() -> None:
                     "reorder_hold_us": 6_000,
                     "max_in_flight_packets": 32,
                     "max_in_flight_bytes": 262_144,
+                    "pacing_budget_bps": 500_000,
                 },
             )
         ],
@@ -155,10 +166,25 @@ def test_runtime_config_converts_to_rust_binding_dtos() -> None:
     dtos = build_rust_runtime_dtos(runtime_config, bindings=FakeBindings)
 
     assert isinstance(dtos, RustRuntimeDtos)
-    assert dtos.scheduler.mode == "capacity_aware"
+    assert dtos.scheduler.mode == "weighted_round_robin"
     assert dtos.security == FakeTransportSecurityConfig.none()
     assert dtos.services == [
-        FakeUdpServiceConfig("udp-main", "127.0.0.1:51820", "127.0.0.1:55180", 200, "fixed", 256, 1, 0),
+        FakeUdpServiceConfig(
+            "udp-main",
+            "127.0.0.1:51820",
+            "127.0.0.1:55180",
+            200,
+            "fixed",
+            256,
+            1,
+            0,
+            0,
+            0,
+            0,
+            "inherit",
+            [],
+            [],
+        ),
     ]
     assert dtos.paths == [
         FakePathConfig(
@@ -175,6 +201,10 @@ def test_runtime_config_converts_to_rust_binding_dtos() -> None:
             reorder_hold_us=6_000,
             max_in_flight_packets=32,
             max_in_flight_bytes=262_144,
+            pacing_budget_bps=500_000,
+            queue_depth_packets=0,
+            queue_depth_bytes=0,
+            queue_oldest_age_us=0,
             transport_bind="127.0.0.1:56001",
             transport_remote="127.0.0.1:56002",
             relay_receiver_index=None,

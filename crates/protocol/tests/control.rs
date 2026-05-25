@@ -1,7 +1,7 @@
 use gatherlink_protocol::control::{
-    ClockSyncMode, ControlMessage, ControlPayload, GlobalSequenceTracker, InternalClockSync, MissingRange, NtpState,
-    PathAssignment, PathCapacity, PathLatency, PathMetadata, PathMtu, ServiceDisable, ServiceEndpointAssertion,
-    ServiceMetadata, ServiceSchedulerPolicy, SinkTime,
+    ClockSyncMode, ControlMessage, ControlPayload, DataTransmitSample, GlobalSequenceTracker, InternalClockSync,
+    MissingRange, NtpState, PathAssignment, PathCapacity, PathLatency, PathMetadata, PathMtu, PathPressure,
+    SchedulerStatus, ServiceDisable, ServiceEndpointAssertion, ServiceMetadata, ServiceSchedulerPolicy, SinkTime,
 };
 use gatherlink_protocol::frame::{Frame, FrameKind};
 
@@ -31,7 +31,14 @@ fn control_payload_round_trips_telemetry_messages() {
         ControlMessage::ServiceMetadata(ServiceMetadata::new(256, "udp-main").unwrap()),
         ControlMessage::ServiceEndpointAssertion(ServiceEndpointAssertion::new(256, "127.0.0.1:51820").unwrap()),
         ControlMessage::ServiceDisable(ServiceDisable::new(256, "sink declined service").unwrap()),
-        ControlMessage::ServiceSchedulerPolicy(ServiceSchedulerPolicy::new(256, 2, 512).unwrap()),
+        ControlMessage::ServiceSchedulerPolicy(ServiceSchedulerPolicy::new(256, 2, 512, 50_000, 500_000, 64).unwrap()),
+        ControlMessage::PathPressure(
+            PathPressure::new(7, 1200, 3, 4096, 2500, 1, 2, 3, 4, 5, 8192, 12_000, 6, 2500).unwrap(),
+        ),
+        ControlMessage::SchedulerStatus(
+            SchedulerStatus::new("coordinated_adaptive", "flowlet_adaptive", "adaptive").unwrap(),
+        ),
+        ControlMessage::DataTransmitSample(DataTransmitSample::new(7, 2048, 16, 77_000_000).unwrap()),
     ])
     .unwrap();
 
@@ -39,6 +46,13 @@ fn control_payload_round_trips_telemetry_messages() {
     let decoded = ControlPayload::decode(&encoded).unwrap();
 
     assert_eq!(decoded, payload);
+}
+
+#[test]
+fn control_payload_rejects_invalid_pressure_and_scheduler_status() {
+    assert!(PathPressure::new(7, 1_000_001, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0).is_err());
+    assert!(SchedulerStatus::new("", "flowlet_adaptive", "adaptive").is_err());
+    assert!(SchedulerStatus::new("coordinated_adaptive", "x".repeat(64), "adaptive").is_err());
 }
 
 #[test]

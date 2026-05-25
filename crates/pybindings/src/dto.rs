@@ -10,7 +10,9 @@ use gatherlink_dataplane::runtime_config::{
     CorePathConfig, PathSchedulerPrimitives, PathSchedulerState, SchedulerConfig, SchedulerMode,
     TransportSecurityConfig, TransportSecuritySessionConfig,
 };
-use gatherlink_dataplane::udp_service::{ServiceReturnMode, ServiceSchedulerConfig, UdpServiceConfig};
+use gatherlink_dataplane::udp_service::{
+    ServicePathPolicy, ServiceReturnMode, ServiceSchedulerConfig, UdpServiceConfig,
+};
 use pyo3::prelude::*;
 
 use crate::errors::udp_error_to_py;
@@ -35,6 +37,12 @@ impl PyUdpServiceConfig {
         service_id = 0,
         scheduler_fanout = 1,
         scheduler_fanout_below_bytes = 0,
+        scheduler_flowlet_idle_us = 0,
+        scheduler_flowlet_max_hold_us = 0,
+        scheduler_path_run_datagrams = 0,
+        scheduler_path_policy = "inherit",
+        scheduler_allowed_path_ids = None,
+        scheduler_path_weights = None,
     ))]
     pub fn new(
         name: String,
@@ -45,6 +53,12 @@ impl PyUdpServiceConfig {
         service_id: u16,
         scheduler_fanout: u16,
         scheduler_fanout_below_bytes: usize,
+        scheduler_flowlet_idle_us: u64,
+        scheduler_flowlet_max_hold_us: u64,
+        scheduler_path_run_datagrams: usize,
+        scheduler_path_policy: &str,
+        scheduler_allowed_path_ids: Option<Vec<u16>>,
+        scheduler_path_weights: Option<Vec<(u16, u16)>>,
     ) -> PyResult<Self> {
         let target_addr = target
             .parse::<SocketAddr>()
@@ -55,7 +69,17 @@ impl PyUdpServiceConfig {
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
 
         let return_mode = parse_service_return_mode(return_mode)?;
-        let scheduler = ServiceSchedulerConfig::new(scheduler_fanout, scheduler_fanout_below_bytes);
+        let path_policy = parse_service_path_policy(scheduler_path_policy)?;
+        let scheduler = ServiceSchedulerConfig::new_with_path_policy(
+            scheduler_fanout,
+            scheduler_fanout_below_bytes,
+            scheduler_flowlet_idle_us,
+            scheduler_flowlet_max_hold_us,
+            scheduler_path_run_datagrams,
+            path_policy,
+        )
+        .with_allowed_path_ids(scheduler_allowed_path_ids.unwrap_or_default())
+        .with_path_weights(scheduler_path_weights.unwrap_or_default());
         let inner = UdpServiceConfig::new_with_scheduler(
             service_id,
             name,
@@ -108,6 +132,36 @@ impl PyUdpServiceConfig {
     pub fn scheduler_fanout_below_bytes(&self) -> usize {
         self.inner.scheduler().fanout_below_bytes()
     }
+
+    /// Service/source flowlet idle timeout selected by Python.
+    pub fn scheduler_flowlet_idle_us(&self) -> u64 {
+        self.inner.scheduler().flowlet_idle_us()
+    }
+
+    /// Maximum time a service/source may stay pinned to one path.
+    pub fn scheduler_flowlet_max_hold_us(&self) -> u64 {
+        self.inner.scheduler().flowlet_max_hold_us()
+    }
+
+    /// Hot-burst path run bound selected by Python.
+    pub fn scheduler_path_run_datagrams(&self) -> usize {
+        self.inner.scheduler().path_run_datagrams()
+    }
+
+    /// Per-service path selector primitive selected by Python.
+    pub fn scheduler_path_policy(&self) -> String {
+        format_service_path_policy(self.inner.scheduler().path_policy()).to_owned()
+    }
+
+    /// Optional service path ids selected by Python. Empty means all paths.
+    pub fn scheduler_allowed_path_ids(&self) -> Vec<u16> {
+        self.inner.scheduler().allowed_path_ids().to_vec()
+    }
+
+    /// Optional service-specific path weights selected by Python.
+    pub fn scheduler_path_weights(&self) -> Vec<(u16, u16)> {
+        self.inner.scheduler().path_weights().to_vec()
+    }
 }
 
 impl PyUdpServiceConfig {
@@ -132,6 +186,25 @@ fn format_service_return_mode(mode: ServiceReturnMode) -> &'static str {
         ServiceReturnMode::Fixed => "fixed",
         ServiceReturnMode::LearnedSingleSource => "learned-single-source",
         ServiceReturnMode::PeerScopedSource => "peer-scoped-source",
+    }
+}
+
+fn parse_service_path_policy(policy: &str) -> PyResult<ServicePathPolicy> {
+    match policy {
+        "inherit" => Ok(ServicePathPolicy::Inherit),
+        "single_best_path" => Ok(ServicePathPolicy::SingleBestPath),
+        "weighted_round_robin" => Ok(ServicePathPolicy::WeightedRoundRobin),
+        other => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "unknown service scheduler path policy: {other}"
+        ))),
+    }
+}
+
+fn format_service_path_policy(policy: ServicePathPolicy) -> &'static str {
+    match policy {
+        ServicePathPolicy::Inherit => "inherit",
+        ServicePathPolicy::SingleBestPath => "single_best_path",
+        ServicePathPolicy::WeightedRoundRobin => "weighted_round_robin",
     }
 }
 
@@ -160,6 +233,10 @@ impl PyPathConfig {
         reorder_hold_us = 0,
         max_in_flight_packets = 0,
         max_in_flight_bytes = 0,
+        pacing_budget_bps = 0,
+        queue_depth_packets = 0,
+        queue_depth_bytes = 0,
+        queue_oldest_age_us = 0,
         transport_bind = None,
         transport_remote = None,
         relay_receiver_index = None,
@@ -179,6 +256,10 @@ impl PyPathConfig {
         reorder_hold_us: u32,
         max_in_flight_packets: u16,
         max_in_flight_bytes: u32,
+        pacing_budget_bps: u64,
+        queue_depth_packets: u32,
+        queue_depth_bytes: u32,
+        queue_oldest_age_us: u64,
         transport_bind: Option<String>,
         transport_remote: Option<String>,
         relay_receiver_index: Option<u32>,
@@ -197,6 +278,10 @@ impl PyPathConfig {
             reorder_hold_us,
             max_in_flight_packets,
             max_in_flight_bytes,
+            pacing_budget_bps,
+            queue_depth_packets,
+            queue_depth_bytes,
+            queue_oldest_age_us,
         );
         let mut inner = CorePathConfig::new_with_scheduler_primitives(path_id, mtu, enabled, state, weight, primitives)
             .map_err(udp_error_to_py)?;
@@ -280,6 +365,26 @@ impl PyPathConfig {
         self.inner.primitives().max_in_flight_bytes()
     }
 
+    #[getter]
+    pub fn pacing_budget_bps(&self) -> u64 {
+        self.inner.primitives().pacing_budget_bps()
+    }
+
+    #[getter]
+    pub fn queue_depth_packets(&self) -> u32 {
+        self.inner.primitives().queue_depth_packets()
+    }
+
+    #[getter]
+    pub fn queue_depth_bytes(&self) -> u32 {
+        self.inner.primitives().queue_depth_bytes()
+    }
+
+    #[getter]
+    pub fn queue_oldest_age_us(&self) -> u64 {
+        self.inner.primitives().queue_oldest_age_us()
+    }
+
     pub fn transport_bind(&self) -> Option<String> {
         self.inner.transport_bind().map(|addr| addr.to_string())
     }
@@ -338,6 +443,7 @@ impl PySchedulerConfig {
             "least_queue" => SchedulerMode::LeastQueue,
             "earliest_completion_first" => SchedulerMode::EarliestCompletionFirst,
             "blocking_estimation" => SchedulerMode::BlockingEstimation,
+            "ordered_multipath" => SchedulerMode::OrderedMultipath,
             "balanced" => SchedulerMode::Balanced,
             "adaptive" => SchedulerMode::Adaptive,
             other => {
@@ -361,6 +467,7 @@ impl PySchedulerConfig {
             SchedulerMode::LeastQueue => "least_queue".to_owned(),
             SchedulerMode::EarliestCompletionFirst => "earliest_completion_first".to_owned(),
             SchedulerMode::BlockingEstimation => "blocking_estimation".to_owned(),
+            SchedulerMode::OrderedMultipath => "ordered_multipath".to_owned(),
             SchedulerMode::Balanced => "balanced".to_owned(),
             SchedulerMode::Adaptive => "adaptive".to_owned(),
         }

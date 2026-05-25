@@ -18,9 +18,20 @@ from gatherlink.security.envelope import (
     encrypt_frame_with_counter,
 )
 from gatherlink.security.handshake import (
+    HANDSHAKE_COOKIE_CIPHERTEXT_LEN,
+    HANDSHAKE_COOKIE_NONCE_LEN,
+    HANDSHAKE_COOKIE_REPLY_LEN,
+    HANDSHAKE_COOKIE_REPLY_PACKET_TYPE,
+    HANDSHAKE_INIT_PACKET_TYPE,
+    HANDSHAKE_MAC_LEN,
+    HANDSHAKE_RESPONSE_PACKET_TYPE,
     accept_handshake_initiation,
     complete_handshake_initiator,
     create_handshake_initiation,
+    decode_cookie_reply_packet,
+    decode_handshake_packet,
+    encode_cookie_reply_packet,
+    encode_handshake_packet,
 )
 from gatherlink.security.keys import NodeIdentity, node_id_from_ed25519_public, verify_document, x25519_shared_secret
 from gatherlink.security.noise import (
@@ -396,6 +407,67 @@ def test_authenticated_handshake_fails_closed_for_wrong_responder_or_tampering()
     )
     with pytest.raises(Exception):
         complete_handshake_initiator(initiator, pending, tampered, topology, now=now)
+
+
+def test_handshake_packet_shape_reserves_mac_trailer_for_cookie_admission() -> None:
+    noise_message = b"noise-init-payload"
+    mac1 = bytes(range(HANDSHAKE_MAC_LEN))
+    mac2 = bytes(reversed(range(HANDSHAKE_MAC_LEN)))
+
+    initiation = encode_handshake_packet(HANDSHAKE_INIT_PACKET_TYPE, noise_message, mac1=mac1)
+    response = encode_handshake_packet(HANDSHAKE_RESPONSE_PACKET_TYPE, noise_message, mac1=mac1, mac2=mac2)
+
+    decoded_initiation = decode_handshake_packet(initiation)
+    decoded_response = decode_handshake_packet(response)
+
+    assert initiation[0] == HANDSHAKE_INIT_PACKET_TYPE
+    assert decoded_initiation.noise_message == noise_message
+    assert decoded_initiation.mac1 == mac1
+    assert decoded_initiation.mac2 == bytes(HANDSHAKE_MAC_LEN)
+    assert response[0] == HANDSHAKE_RESPONSE_PACKET_TYPE
+    assert decoded_response.noise_message == noise_message
+    assert decoded_response.mac1 == mac1
+    assert decoded_response.mac2 == mac2
+
+
+def test_handshake_packet_shape_fails_closed_for_invalid_mac_or_type() -> None:
+    with pytest.raises(ValueError, match="packet_type"):
+        encode_handshake_packet(0x01, b"payload", mac1=bytes(HANDSHAKE_MAC_LEN))
+    with pytest.raises(ValueError, match="mac1"):
+        encode_handshake_packet(HANDSHAKE_INIT_PACKET_TYPE, b"payload", mac1=b"short")
+    with pytest.raises(ValueError, match="mac2"):
+        encode_handshake_packet(
+            HANDSHAKE_RESPONSE_PACKET_TYPE,
+            b"payload",
+            mac1=bytes(HANDSHAKE_MAC_LEN),
+            mac2=b"short",
+        )
+    with pytest.raises(ValueError, match="too short"):
+        decode_handshake_packet(b"\x10" + bytes(HANDSHAKE_MAC_LEN))
+    with pytest.raises(ValueError, match="unsupported"):
+        decode_handshake_packet(b"\x01" + bytes(HANDSHAKE_MAC_LEN * 2))
+
+
+def test_cookie_reply_packet_shape_is_fixed_for_future_retry_tokens() -> None:
+    request_mac1 = bytes([1]) * HANDSHAKE_MAC_LEN
+    nonce = bytes([2]) * HANDSHAKE_COOKIE_NONCE_LEN
+    encrypted_cookie = bytes([3]) * HANDSHAKE_COOKIE_CIPHERTEXT_LEN
+
+    packet = encode_cookie_reply_packet(request_mac1, nonce, encrypted_cookie)
+    decoded = decode_cookie_reply_packet(packet)
+
+    assert len(packet) == HANDSHAKE_COOKIE_REPLY_LEN
+    assert packet[0] == HANDSHAKE_COOKIE_REPLY_PACKET_TYPE
+    assert decoded.request_mac1 == request_mac1
+    assert decoded.nonce == nonce
+    assert decoded.encrypted_cookie == encrypted_cookie
+
+    with pytest.raises(ValueError, match="nonce"):
+        encode_cookie_reply_packet(request_mac1, b"short", encrypted_cookie)
+    with pytest.raises(ValueError, match="invalid cookie"):
+        decode_cookie_reply_packet(b"\x12")
+    with pytest.raises(ValueError, match="invalid cookie"):
+        decode_cookie_reply_packet(b"\x10" + packet[1:])
 
 
 def test_noise_ik_handshake_compiles_inverse_transport_keys_and_hides_static_identity() -> None:

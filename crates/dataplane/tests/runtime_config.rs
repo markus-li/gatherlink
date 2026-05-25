@@ -85,6 +85,10 @@ fn accepts_compiled_scheduler_primitives() {
         150_000,
         64,
         524_288,
+        750_000,
+        9,
+        65_536,
+        4_000,
     );
     let path = CorePathConfig::new_with_scheduler_primitives(9, 1200, true, PathSchedulerState::Active, 3, primitives)
         .unwrap();
@@ -97,6 +101,10 @@ fn accepts_compiled_scheduler_primitives() {
     assert_eq!(path.primitives().reorder_hold_us(), 150_000);
     assert_eq!(path.primitives().max_in_flight_packets(), 64);
     assert_eq!(path.primitives().max_in_flight_bytes(), 524_288);
+    assert_eq!(path.primitives().pacing_budget_bps(), 750_000);
+    assert_eq!(path.primitives().queue_depth_packets(), 9);
+    assert_eq!(path.primitives().queue_depth_bytes(), 65_536);
+    assert_eq!(path.primitives().queue_oldest_age_us(), 4_000);
 }
 
 #[test]

@@ -4,9 +4,11 @@ use std::time::{Duration, Instant};
 
 use gatherlink_dataplane::engine::{CoreDataplane, ForwardOutcome, ReapplyOutcome};
 use gatherlink_dataplane::runtime_config::{
-    CorePathConfig, CoreRuntimeConfig, PathSchedulerState, SchedulerConfig, SchedulerMode,
+    CorePathConfig, CoreRuntimeConfig, PathSchedulerPrimitives, PathSchedulerState, SchedulerConfig, SchedulerMode,
 };
-use gatherlink_dataplane::udp_service::UdpServiceConfig;
+use gatherlink_dataplane::udp_service::{
+    ServicePathPolicy, ServiceReturnMode, ServiceSchedulerConfig, UdpServiceConfig,
+};
 use gatherlink_protocol::control::{ControlMessage, ControlPayload, PathMetadata};
 
 fn forward_service_until(dataplane: &mut CoreDataplane, service_name: &str, expected: usize) -> Vec<ForwardOutcome> {
@@ -297,18 +299,15 @@ fn round_robin_scheduler_rotates_across_eligible_paths() {
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
     let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
 
-    for payload in [
-        b"one".as_slice(),
-        b"two".as_slice(),
-        b"three".as_slice(),
-        b"four".as_slice(),
-    ] {
+    let payloads = vec![vec![b'a'; 700], vec![b'b'; 700], vec![b'c'; 700], vec![b'd'; 700]];
+    let mut outcomes = Vec::new();
+    for payload in &payloads {
         sender.send_to(payload, service_addr).unwrap();
+        outcomes.push(dataplane.forward_one_for_service("udp-main").unwrap());
     }
-    let outcomes = forward_service_until(&mut dataplane, "udp-main", 4);
 
     for _ in 0..4 {
-        let mut buffer = [0_u8; 8];
+        let mut buffer = [0_u8; 1024];
         receive_target_datagram(&target, &mut buffer);
     }
     let path_ids = outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>();
@@ -319,6 +318,367 @@ fn round_robin_scheduler_rotates_across_eligible_paths() {
     assert_eq!(metrics.services["udp-main"].packets, 4);
     assert_eq!(metrics.paths[&10].packets, 2);
     assert_eq!(metrics.paths[&20].packets, 2);
+}
+
+#[test]
+fn service_flowlet_sticks_same_source_to_one_path() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new(10, 1200, false).unwrap(),
+            CorePathConfig::new(20, 1200, false).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    dataplane.set_service_scheduler(
+        256,
+        ServiceSchedulerConfig::new_with_bounded_flowlet(1, 0, 1_000_000, 1_000_000),
+    );
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+
+    let mut outcomes = Vec::new();
+    for payload in [b"a".as_slice(), b"bb".as_slice(), b"ccc".as_slice()] {
+        sender.send_to(payload, service_addr).unwrap();
+        outcomes.push(dataplane.forward_one_for_service("udp-main").unwrap());
+    }
+
+    assert!(outcomes.iter().all(|outcome| outcome.path_id == 10));
+}
+
+#[test]
+fn service_flowlet_max_hold_releases_path_selection() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new(10, 1200, false).unwrap(),
+            CorePathConfig::new(20, 1200, false).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    dataplane.set_service_scheduler(
+        256,
+        ServiceSchedulerConfig::new_with_bounded_flowlet(1, 0, 1_000_000, 1),
+    );
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+
+    sender.send_to(b"first", service_addr).unwrap();
+    let first = dataplane.forward_one_for_service("udp-main").unwrap();
+    thread::sleep(Duration::from_millis(1));
+    sender.send_to(b"second", service_addr).unwrap();
+    let second = dataplane.forward_one_for_service("udp-main").unwrap();
+
+    assert_eq!(first.path_id, 10);
+    assert_eq!(second.path_id, 20);
+}
+
+#[test]
+fn service_single_best_path_policy_overrides_node_round_robin() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new_with_scheduler_primitives(
+                10,
+                1200,
+                true,
+                PathSchedulerState::Active,
+                1,
+                PathSchedulerPrimitives::new(Some(100_000_000), None, Some(5_000), 0, 0, 0, 0, 0, 0, 0, 0),
+            )
+            .unwrap(),
+            CorePathConfig::new_with_scheduler_primitives(
+                20,
+                1200,
+                true,
+                PathSchedulerState::Active,
+                10,
+                PathSchedulerPrimitives::new(Some(500_000_000), None, Some(5_000), 0, 0, 0, 0, 0, 0, 0, 0),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    dataplane.set_service_scheduler(
+        256,
+        ServiceSchedulerConfig::new_with_path_policy(1, 0, 0, 0, 0, ServicePathPolicy::SingleBestPath),
+    );
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+
+    let mut outcomes = Vec::new();
+    for payload in [b"a".as_slice(), b"bb".as_slice(), b"ccc".as_slice()] {
+        sender.send_to(payload, service_addr).unwrap();
+        outcomes.push(dataplane.forward_one_for_service("udp-main").unwrap());
+    }
+
+    assert!(outcomes.iter().all(|outcome| outcome.path_id == 20));
+}
+
+#[test]
+fn service_weighted_policy_has_independent_cursor() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new_with_scheduler(10, 1200, true, PathSchedulerState::Active, 2).unwrap(),
+            CorePathConfig::new_with_scheduler(20, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    dataplane.set_service_scheduler(
+        256,
+        ServiceSchedulerConfig::new_with_path_policy(1, 0, 0, 0, 0, ServicePathPolicy::WeightedRoundRobin),
+    );
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+
+    let mut outcomes = Vec::new();
+    for payload in [b"a".as_slice(), b"bb".as_slice(), b"ccc".as_slice()] {
+        sender.send_to(payload, service_addr).unwrap();
+        outcomes.push(dataplane.forward_one_for_service("udp-main").unwrap());
+    }
+
+    assert_eq!(
+        outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>(),
+        vec![10, 20, 10],
+    );
+}
+
+#[test]
+fn service_allowed_paths_constrain_weighted_policy() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new_with_scheduler(10, 1200, true, PathSchedulerState::Active, 100).unwrap(),
+            CorePathConfig::new_with_scheduler(20, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+            CorePathConfig::new_with_scheduler(30, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    dataplane.set_service_scheduler(
+        256,
+        ServiceSchedulerConfig::new_with_path_policy(1, 0, 0, 0, 0, ServicePathPolicy::WeightedRoundRobin)
+            .with_allowed_path_ids(vec![20, 30]),
+    );
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+
+    let mut outcomes = Vec::new();
+    for payload in [b"a".as_slice(), b"bb".as_slice(), b"ccc".as_slice(), b"dddd".as_slice()] {
+        sender.send_to(payload, service_addr).unwrap();
+        outcomes.push(dataplane.forward_one_for_service("udp-main").unwrap());
+    }
+
+    assert_eq!(
+        outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>(),
+        vec![20, 30, 20, 30],
+    );
+}
+
+#[test]
+fn service_path_weights_override_node_weights_for_one_service() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new_with_scheduler(
+            256,
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+            100,
+            ServiceReturnMode::Fixed,
+            ServiceSchedulerConfig::new_with_path_policy(1, 0, 0, 0, 0, ServicePathPolicy::WeightedRoundRobin)
+                .with_path_weights(vec![(20, 1), (30, 3)]),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new_with_scheduler(10, 1200, true, PathSchedulerState::Active, 100).unwrap(),
+            CorePathConfig::new_with_scheduler(20, 1200, true, PathSchedulerState::Active, 100).unwrap(),
+            CorePathConfig::new_with_scheduler(30, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+
+    let mut outcomes = Vec::new();
+    for payload in [b"a".as_slice(), b"bb".as_slice(), b"ccc".as_slice(), b"dddd".as_slice()] {
+        sender.send_to(payload, service_addr).unwrap();
+        outcomes.push(dataplane.forward_one_for_service("udp-main").unwrap());
+    }
+
+    assert_eq!(
+        outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>(),
+        vec![30, 20, 30, 30],
+    );
+}
+
+#[test]
+fn burst_pressure_groups_normal_mtu_frames_before_rotating_paths() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new(10, 1200, false).unwrap(),
+            CorePathConfig::new(20, 1200, false).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    dataplane.set_service_scheduler(256, ServiceSchedulerConfig::new_with_burst_run(1, 0, 0, 0, 64));
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+    let payload = vec![b'n'; 1150];
+
+    let pressure_run = 64;
+    let packet_count = pressure_run + 6;
+
+    for _ in 0..packet_count {
+        sender.send_to(&payload, service_addr).unwrap();
+    }
+    let outcomes = forward_service_until(&mut dataplane, "udp-main", packet_count);
+
+    for _ in 0..packet_count {
+        let mut buffer = [0_u8; 1500];
+        assert_eq!(receive_target_datagram(&target, &mut buffer), payload.len());
+    }
+
+    let path_ids = outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>();
+    assert!(path_ids[..pressure_run].iter().all(|path_id| *path_id == 10));
+    assert!(path_ids[pressure_run..].iter().all(|path_id| *path_id == 20));
+    assert!(outcomes.iter().all(|outcome| outcome.batch_count == 0));
+
+    let metrics = dataplane.metrics_snapshot();
+    assert_eq!(metrics.paths[&10].packets, pressure_run as u64);
+    assert_eq!(metrics.paths[&20].packets, 6);
+}
+
+#[test]
+fn service_path_run_bound_limits_hot_burst_path_stickiness() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new(10, 1200, false).unwrap(),
+            CorePathConfig::new(20, 1200, false).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    dataplane.set_service_scheduler(256, ServiceSchedulerConfig::new_with_burst_run(1, 0, 0, 0, 8));
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+    let payload = vec![b'r'; 1150];
+
+    for _ in 0..20 {
+        sender.send_to(&payload, service_addr).unwrap();
+    }
+    let outcomes = forward_service_until(&mut dataplane, "udp-main", 20);
+
+    for _ in 0..20 {
+        let mut buffer = [0_u8; 1500];
+        assert_eq!(receive_target_datagram(&target, &mut buffer), payload.len());
+    }
+
+    let path_ids = outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>();
+    assert!(path_ids[..8].iter().all(|path_id| *path_id == 10));
+    assert!(path_ids[8..16].iter().all(|path_id| *path_id == 20));
+    assert!(path_ids[16..].iter().all(|path_id| *path_id == 10));
+}
+
+#[test]
+fn burst_pressure_fills_one_bounded_batch_before_rotating_paths() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new(10, 9000, false).unwrap(),
+            CorePathConfig::new(20, 9000, false).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+    let payload = vec![b'w'; 1150];
+
+    for _ in 0..12 {
+        sender.send_to(&payload, service_addr).unwrap();
+    }
+    let outcomes = forward_service_until(&mut dataplane, "udp-main", 12);
+
+    for _ in 0..12 {
+        let mut buffer = [0_u8; 1500];
+        assert_eq!(receive_target_datagram(&target, &mut buffer), payload.len());
+    }
+
+    let path_ids = outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>();
+    assert!(path_ids.iter().all(|path_id| *path_id == 10));
+    assert!(outcomes[..7].iter().all(|outcome| outcome.batch_count == 7));
+    assert!(outcomes[7..].iter().all(|outcome| outcome.batch_count == 5));
+
+    let metrics = dataplane.metrics_snapshot();
+    assert_eq!(metrics.paths[&10].packets, 12);
+    assert_eq!(metrics.paths[&20].packets, 0);
 }
 
 #[test]
@@ -343,22 +703,19 @@ fn round_robin_scheduler_honors_compiled_path_weights_and_disabled_paths() {
     let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
     let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
 
-    for payload in [
-        b"one".as_slice(),
-        b"two".as_slice(),
-        b"three".as_slice(),
-        b"four".as_slice(),
-    ] {
+    let payloads = vec![vec![b'a'; 700], vec![b'b'; 700], vec![b'c'; 700], vec![b'd'; 700]];
+    let mut outcomes = Vec::new();
+    for payload in &payloads {
         sender.send_to(payload, service_addr).unwrap();
+        outcomes.push(dataplane.forward_one_for_service("udp-main").unwrap());
     }
-    let outcomes = forward_service_until(&mut dataplane, "udp-main", 4);
 
     for _ in 0..4 {
-        let mut buffer = [0_u8; 8];
+        let mut buffer = [0_u8; 1024];
         receive_target_datagram(&target, &mut buffer);
     }
     let path_ids = outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>();
-    assert_eq!(path_ids, vec![10, 10, 20, 10]);
+    assert_eq!(path_ids, vec![10, 20, 10, 10]);
 }
 
 #[test]

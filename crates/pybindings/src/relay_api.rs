@@ -2,7 +2,7 @@
 //!
 //! Python owns relay authorization and lifecycle. This bridge exposes only the
 //! compiled socket/key/session facts that Rust needs to authenticate one hop,
-//! rewrap the opaque endpoint packet, and forward it to the next hop.
+//! remove that outer hop envelope, and forward the remaining opaque packet.
 
 use gatherlink_dataplane::relay::{
     RelayForwardError, RelayForwardOutcome, RelayHopExitForwarder, RelayHopForwarder, RelaySessionConfig,
@@ -109,6 +109,14 @@ impl PyRelayHopForwarder {
         Ok(output.into())
     }
 
+    /// Drain several ready relay-hop packets before returning to Python.
+    pub fn try_forward_many(&mut self, py: Python<'_>, max_packets: usize, now_unix_us: u64) -> PyResult<PyObject> {
+        let batch = py
+            .allow_threads(|| self.inner.try_forward_many(max_packets, now_unix_us))
+            .map_err(relay_error_to_py)?;
+        relay_batch_to_py(py, batch)
+    }
+
     /// Return relay-hop counters for monitoring and diagnostics.
     pub fn counters(&self, py: Python<'_>) -> PyResult<PyObject> {
         let counters = self.inner.counters();
@@ -177,6 +185,14 @@ impl PyRelayHopExitForwarder {
         relay_outcome_to_py(py, self.inner.try_forward_one(now_unix_us).map_err(relay_error_to_py)?)
     }
 
+    /// Drain several ready final-hop packets before returning to Python.
+    pub fn try_forward_many(&mut self, py: Python<'_>, max_packets: usize, now_unix_us: u64) -> PyResult<PyObject> {
+        let batch = py
+            .allow_threads(|| self.inner.try_forward_many(max_packets, now_unix_us))
+            .map_err(relay_error_to_py)?;
+        relay_batch_to_py(py, batch)
+    }
+
     /// Return relay-hop counters for monitoring and diagnostics.
     pub fn counters(&self, py: Python<'_>) -> PyResult<PyObject> {
         relay_counters_to_py(py, self.inner.counters())
@@ -239,5 +255,15 @@ fn relay_counters_to_py(
     output.set_item("dropped_packets", counters.dropped_packets)?;
     output.set_item("emitted_packets", counters.emitted_packets)?;
     output.set_item("emitted_bytes", counters.emitted_bytes)?;
+    Ok(output.into())
+}
+
+fn relay_batch_to_py(py: Python<'_>, batch: gatherlink_dataplane::relay::RelayForwardBatch) -> PyResult<PyObject> {
+    let output = PyDict::new_bound(py);
+    output.set_item("forwarded_packets", batch.forwarded_packets)?;
+    output.set_item("dropped_packets", batch.dropped_packets)?;
+    output.set_item("emitted_packets", batch.emitted_packets)?;
+    output.set_item("received_bytes", batch.received_bytes)?;
+    output.set_item("emitted_bytes", batch.emitted_bytes)?;
     Ok(output.into())
 }

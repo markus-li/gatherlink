@@ -1,15 +1,22 @@
 //! Sliding replay window for authenticated transport packet counters.
 
 /// Default number of transport counters tracked behind the highest seen value.
-pub const DEFAULT_REPLAY_WINDOW_BITS: u64 = 128;
+///
+/// Multipath traffic can legitimately arrive hundreds of thousands of packets
+/// behind the fastest path during saturation. This is still bounded replay
+/// defense: old counters outside the window and already-seen counters inside it
+/// are rejected, but normal multipath reorder does not collapse into crypto
+/// drops.
+pub const DEFAULT_REPLAY_WINDOW_BITS: usize = 1_048_576;
+const MAX_REPLAY_WINDOW_BITS: usize = 4_194_304;
 
 /// Fixed-size replay window for one receive direction.
 #[derive(Debug, Clone)]
 pub struct ReplayWindow {
     highest: u64,
-    bitmap: u128,
+    seen: Vec<Option<u64>>,
     initialized: bool,
-    window_bits: u64,
+    window_bits: usize,
 }
 
 impl Default for ReplayWindow {
@@ -19,14 +26,15 @@ impl Default for ReplayWindow {
 }
 
 impl ReplayWindow {
-    /// Create a replay window. Values above 128 are clamped to the local bitmap size.
+    /// Create a replay window. Oversized values are clamped to the local bounded storage limit.
     #[must_use]
-    pub fn new(window_bits: u64) -> Self {
+    pub fn new(window_bits: usize) -> Self {
+        let window_bits = window_bits.clamp(1, MAX_REPLAY_WINDOW_BITS);
         Self {
             highest: 0,
-            bitmap: 0,
+            seen: vec![None; window_bits],
             initialized: false,
-            window_bits: window_bits.clamp(1, 128),
+            window_bits,
         }
     }
 
@@ -35,26 +43,23 @@ impl ReplayWindow {
         if !self.initialized {
             self.initialized = true;
             self.highest = counter;
-            self.bitmap = 1;
+            self.mark_seen(counter);
             return true;
         }
         if counter > self.highest {
-            let shift = counter - self.highest;
-            self.bitmap = if shift >= 128 { 0 } else { self.bitmap << shift };
-            self.bitmap |= 1;
             self.highest = counter;
+            self.mark_seen(counter);
             return true;
         }
 
         let behind = self.highest - counter;
-        if behind >= self.window_bits || behind >= 128 {
+        if behind >= self.window_bits as u64 {
             return false;
         }
-        let mask = 1u128 << behind;
-        if self.bitmap & mask != 0 {
+        if self.is_seen(counter) {
             return false;
         }
-        self.bitmap |= mask;
+        self.mark_seen(counter);
         true
     }
 
@@ -62,5 +67,18 @@ impl ReplayWindow {
     #[must_use]
     pub fn highest(&self) -> Option<u64> {
         self.initialized.then_some(self.highest)
+    }
+
+    fn slot(&self, counter: u64) -> usize {
+        counter as usize % self.window_bits
+    }
+
+    fn is_seen(&self, counter: u64) -> bool {
+        self.seen[self.slot(counter)] == Some(counter)
+    }
+
+    fn mark_seen(&mut self, counter: u64) {
+        let slot = self.slot(counter);
+        self.seen[slot] = Some(counter);
     }
 }

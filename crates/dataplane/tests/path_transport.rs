@@ -6,12 +6,15 @@ use std::time::Duration;
 use gatherlink_crypto::envelope::{
     decrypt_packet_without_replay, ENCRYPTED_DATA_HEADER_LEN, PACKET_TYPE_ENCRYPTED_DATA_V1,
 };
-use gatherlink_dataplane::engine::{CoreDataplane, RemoteDeliverOutcome};
-use gatherlink_dataplane::relay::{RelayHopExitForwarder, RelayHopForwarder, RelaySessionConfig, RelaySessionExecutor};
+use gatherlink_dataplane::engine::{CoreDataplane, PacketBatchSummary, RemoteDeliverOutcome};
+use gatherlink_dataplane::relay::{RelayHopForwarder, RelaySessionConfig, RelaySessionExecutor};
 use gatherlink_dataplane::runtime_config::{
-    CorePathConfig, CoreRuntimeConfig, SchedulerConfig, TransportSecurityConfig, TransportSecuritySessionConfig,
+    CorePathConfig, CoreRuntimeConfig, PathSchedulerPrimitives, PathSchedulerState, SchedulerConfig,
+    TransportSecurityConfig, TransportSecuritySessionConfig,
 };
-use gatherlink_dataplane::udp_service::{ServiceReturnMode, UdpServiceConfig};
+use gatherlink_dataplane::udp_service::{
+    ServicePathPolicy, ServiceReturnMode, ServiceSchedulerConfig, UdpServiceConfig,
+};
 use gatherlink_protocol::control::{ControlMessage, ControlPayload, PathMetadata};
 use gatherlink_protocol::frame::{Frame, FrameKind};
 use gatherlink_protocol::ids::SERVICE_ID_REMOTE_STATUS;
@@ -39,6 +42,17 @@ fn receive_paths_with_retry(dataplane: &mut CoreDataplane, max_frames: usize) ->
         thread::sleep(Duration::from_millis(10));
     }
     dataplane.receive_available_from_paths(max_frames).unwrap()
+}
+
+fn receive_paths_summary_with_retry(dataplane: &mut CoreDataplane, max_frames: usize) -> PacketBatchSummary {
+    for _ in 0..20 {
+        let summary = dataplane.receive_available_from_paths_summary(max_frames).unwrap();
+        if summary.packets > 0 {
+            return summary;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    dataplane.receive_available_from_paths_summary(max_frames).unwrap()
 }
 
 fn wait_for_duplicate_counters(
@@ -108,6 +122,25 @@ fn path_bind_only(path_id: u16, bind: SocketAddr) -> CorePathConfig {
         .with_transport_bind(bind)
 }
 
+fn path_bind_only_with_reorder_hold(path_id: u16, bind: SocketAddr, reorder_hold_us: u32) -> CorePathConfig {
+    CorePathConfig::new_with_scheduler_primitives(
+        path_id,
+        1200,
+        true,
+        PathSchedulerState::Active,
+        1,
+        PathSchedulerPrimitives::new(None, None, None, 0, reorder_hold_us, 0, 0, 0, 0, 0, 0),
+    )
+    .unwrap()
+    .with_transport_bind(bind)
+}
+
+fn path_with_mtu(path_id: u16, max_payload: usize, bind: SocketAddr, remote: SocketAddr) -> CorePathConfig {
+    CorePathConfig::new(path_id, max_payload, false)
+        .unwrap()
+        .with_transport(bind, remote)
+}
+
 fn secure_config(
     services: Vec<UdpServiceConfig>,
     paths: Vec<CorePathConfig>,
@@ -171,6 +204,93 @@ fn path_transport_sends_encoded_gatherlink_frame_not_raw_payload() {
     assert_eq!(frame.payload, b"wireguard-like-payload");
     assert_eq!(outcome.path_id, 42);
     assert_eq!(outcome.payload_len, b"wireguard-like-payload".len());
+}
+
+#[test]
+fn summary_path_transport_sends_multiple_carrier_frames() {
+    let path_bind = reserve_loopback_addr();
+    let path_remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+    path_remote.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", target.local_addr().unwrap())],
+        vec![path(42, path_bind, path_remote.local_addr().unwrap())],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let app_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+    let payloads = (0..4)
+        .map(|index| {
+            let mut payload = vec![b'x'; 700];
+            payload[..9].copy_from_slice(format!("frame-{index:03}").as_bytes());
+            payload
+        })
+        .collect::<Vec<_>>();
+
+    for payload in &payloads {
+        app_sender.send_to(payload, service_addr).unwrap();
+    }
+    let summary = dataplane
+        .forward_available_for_service_nonblocking_summary("udp-main", payloads.len())
+        .unwrap();
+    assert_eq!(summary.packets, payloads.len());
+
+    for expected in &payloads {
+        let mut buffer = [0_u8; 1500];
+        let (length, _source) = recv_with_retry(&path_remote, &mut buffer);
+        let frame = Frame::decode(&buffer[..length]).unwrap();
+        assert_eq!(frame.kind, FrameKind::Data);
+        assert_eq!(frame.path_id, 42);
+        assert_eq!(frame.payload, *expected);
+    }
+}
+
+#[test]
+fn budget_summary_stops_after_byte_budget_boundary() {
+    let path_bind = reserve_loopback_addr();
+    let path_remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+    path_remote.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", target.local_addr().unwrap())],
+        vec![path(42, path_bind, path_remote.local_addr().unwrap())],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let app_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+    let payloads = (0..4)
+        .map(|index| {
+            let mut payload = vec![b'x'; 700];
+            payload[..9].copy_from_slice(format!("frame-{index:03}").as_bytes());
+            payload
+        })
+        .collect::<Vec<_>>();
+
+    for payload in &payloads {
+        app_sender.send_to(payload, service_addr).unwrap();
+    }
+    let summary = dataplane
+        .forward_available_for_service_budget_summary("udp-main", payloads.len(), 1_000)
+        .unwrap();
+    assert_eq!(summary.packets, 2);
+    assert_eq!(summary.bytes, 1_400);
+
+    for expected in &payloads[..2] {
+        let mut buffer = [0_u8; 1500];
+        let (length, _source) = recv_with_retry(&path_remote, &mut buffer);
+        let frame = Frame::decode(&buffer[..length]).unwrap();
+        assert_eq!(frame.kind, FrameKind::Data);
+        assert_eq!(frame.path_id, 42);
+        assert_eq!(frame.payload, *expected);
+    }
+
+    let summary = dataplane
+        .forward_available_for_service_budget_summary("udp-main", payloads.len(), 1_000)
+        .unwrap();
+    assert_eq!(summary.packets, 2);
+    assert_eq!(summary.bytes, 1_400);
 }
 
 #[test]
@@ -246,7 +366,6 @@ fn relay_wrapped_path_transport_sends_outer_hop_envelope() {
 fn relay_chain_carries_endpoint_packet_through_untrusted_middle_peer() {
     let b_path_bind = reserve_loopback_addr();
     let c_relay_listen = reserve_loopback_addr();
-    let a_exit_listen = reserve_loopback_addr();
     let a_path_bind = reserve_loopback_addr();
     let a_target = UdpSocket::bind("127.0.0.1:0").unwrap();
     a_target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
@@ -254,7 +373,6 @@ fn relay_chain_carries_endpoint_packet_through_untrusted_middle_peer() {
     let endpoint_b_to_a = [0x21_u8; 32];
     let endpoint_a_to_b = [0x22_u8; 32];
     let hop_b_to_c = [0x31_u8; 32];
-    let hop_c_to_a = [0x32_u8; 32];
 
     let b_config = CoreRuntimeConfig::new_with_paths_scheduler_and_security(
         vec![service("wireguard-main", "127.0.0.1:51821".parse().unwrap())],
@@ -284,7 +402,7 @@ fn relay_chain_carries_endpoint_packet_through_untrusted_middle_peer() {
     let mut a_core = CoreDataplane::bind(a_config).unwrap();
     let mut c_relay = RelayHopForwarder::bind(
         c_relay_listen,
-        a_exit_listen,
+        a_path_bind,
         RelaySessionExecutor::new_with_hop_keys(
             RelaySessionConfig {
                 relay_receiver_index: 701,
@@ -294,25 +412,8 @@ fn relay_chain_carries_endpoint_packet_through_untrusted_middle_peer() {
                 max_bytes: None,
             },
             801,
-            hop_c_to_a,
-            hop_b_to_c,
-        ),
-    )
-    .unwrap();
-    let mut a_exit = RelayHopExitForwarder::bind(
-        a_exit_listen,
-        a_path_bind,
-        RelaySessionExecutor::new_with_hop_keys(
-            RelaySessionConfig {
-                relay_receiver_index: 801,
-                expires_at_unix_us: 2_000,
-                max_packet_size: Some(1_200),
-                max_packets: None,
-                max_bytes: None,
-            },
-            801,
             [0_u8; 32],
-            hop_c_to_a,
+            hop_b_to_c,
         ),
     )
     .unwrap();
@@ -327,10 +428,6 @@ fn relay_chain_carries_endpoint_packet_through_untrusted_middle_peer() {
         c_relay.try_forward_one(1_000).unwrap(),
         gatherlink_dataplane::relay::RelayForwardOutcome::Forwarded { .. }
     ));
-    assert!(matches!(
-        a_exit.try_forward_one(1_000).unwrap(),
-        gatherlink_dataplane::relay::RelayForwardOutcome::Forwarded { .. }
-    ));
     let delivered = receive_paths_with_retry(&mut a_core, 8);
     let mut buffer = [0_u8; 128];
     let (length, _source) = recv_with_retry(&a_target, &mut buffer);
@@ -340,7 +437,6 @@ fn relay_chain_carries_endpoint_packet_through_untrusted_middle_peer() {
     assert_eq!(delivered[0].service, "wireguard-main");
     assert_eq!(delivered[0].path_id, 7);
     assert_eq!(c_relay.counters().forwarded_packets, 1);
-    assert_eq!(a_exit.counters().forwarded_packets, 1);
 }
 
 #[test]
@@ -384,6 +480,205 @@ fn two_dataplanes_forward_payload_over_path_transport_to_fixed_target() {
         server.metrics_snapshot().services.get("udp-main").unwrap().rx_packets,
         1
     );
+}
+
+#[test]
+fn path_transport_receive_drains_multiple_frames_from_one_hot_socket() {
+    let client_path_addr = reserve_loopback_addr();
+    let server_path_addr = reserve_loopback_addr();
+    let remote_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    remote_target
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+
+    let client_config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", remote_target.local_addr().unwrap())],
+        vec![path(7, client_path_addr, server_path_addr)],
+    )
+    .unwrap();
+    let server_config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", remote_target.local_addr().unwrap())],
+        vec![path(7, server_path_addr, client_path_addr)],
+    )
+    .unwrap();
+    let mut client = CoreDataplane::bind(client_config).unwrap();
+    let mut server = CoreDataplane::bind(server_config).unwrap();
+    let app_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let client_service_addr = client.service("udp-main").unwrap().local_addr().unwrap();
+
+    for index in 0..4 {
+        app_sender
+            .send_to(format!("hot-frame-{index}").as_bytes(), client_service_addr)
+            .unwrap();
+        client.forward_one_for_service("udp-main").unwrap();
+    }
+
+    thread::sleep(Duration::from_millis(20));
+    let delivered = server.receive_available_from_paths(4).unwrap();
+
+    assert_eq!(
+        delivered.len(),
+        4,
+        "a hot path socket should drain to the caller budget, not one frame per runner loop"
+    );
+    for index in 0..4 {
+        let mut buffer = [0_u8; 128];
+        let (length, _source) = recv_with_retry(&remote_target, &mut buffer);
+        assert_eq!(&buffer[..length], format!("hot-frame-{index}").as_bytes());
+    }
+}
+
+#[test]
+fn summary_path_receive_emits_batched_payloads_to_udp_target() {
+    let client_path_addr = reserve_loopback_addr();
+    let server_path_addr = reserve_loopback_addr();
+    let remote_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    remote_target
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+
+    let client_config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", remote_target.local_addr().unwrap())],
+        vec![path_with_mtu(7, 9000, client_path_addr, server_path_addr)],
+    )
+    .unwrap();
+    let server_config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", remote_target.local_addr().unwrap())],
+        vec![path_with_mtu(7, 9000, server_path_addr, client_path_addr)],
+    )
+    .unwrap();
+    let mut client = CoreDataplane::bind(client_config).unwrap();
+    let mut server = CoreDataplane::bind(server_config).unwrap();
+    let app_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let client_service_addr = client.service("udp-main").unwrap().local_addr().unwrap();
+    let payloads = (0..6)
+        .map(|index| {
+            let mut payload = vec![b'x'; 1150];
+            payload[..7].copy_from_slice(format!("pkt-{index:03}").as_bytes());
+            payload
+        })
+        .collect::<Vec<_>>();
+
+    for payload in &payloads {
+        app_sender.send_to(payload, client_service_addr).unwrap();
+    }
+    let forwarded = client
+        .forward_available_for_service_nonblocking_summary("udp-main", payloads.len())
+        .unwrap();
+    assert_eq!(forwarded.packets, payloads.len());
+    assert_eq!(forwarded.bytes, payloads.iter().map(Vec::len).sum::<usize>());
+
+    let received = receive_paths_summary_with_retry(&mut server, 8);
+    assert_eq!(received.packets, payloads.len());
+    assert_eq!(received.bytes, forwarded.bytes);
+
+    let mut received_payloads = Vec::new();
+    for _ in 0..payloads.len() {
+        let mut buffer = vec![0_u8; 1400];
+        let (length, _source) = recv_with_retry(&remote_target, &mut buffer);
+        received_payloads.push(buffer[..length].to_vec());
+    }
+    assert_eq!(received_payloads, payloads);
+    assert_eq!(
+        server.metrics_snapshot().services.get("udp-main").unwrap().rx_packets,
+        payloads.len() as u64
+    );
+}
+
+#[test]
+fn receiver_reorder_buffer_releases_oldest_when_hold_work_is_bounded() {
+    let path_bind = reserve_loopback_addr();
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_nonblocking(true).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", target.local_addr().unwrap())],
+        vec![path_bind_only_with_reorder_hold(42, path_bind, 5_000_000)],
+    )
+    .unwrap();
+    let mut receiver = CoreDataplane::bind(config).unwrap();
+    let path_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+    let first = Frame::data(256, 42, 1, b"first".to_vec()).unwrap().encode().unwrap();
+    path_sender.send_to(&first, path_bind).unwrap();
+    let first_summary = receive_paths_summary_with_retry(&mut receiver, 1);
+    assert_eq!(first_summary.packets, 1);
+
+    let mut buffer = [0_u8; 64];
+    let (length, _source) = recv_with_retry(&target, &mut buffer);
+    assert_eq!(&buffer[..length], b"first");
+
+    let mut released_packets = 0_u64;
+    let mut sent_in_chunk = 0_usize;
+    for sequence in 9000..17_300 {
+        let frame = Frame::data(256, 42, sequence, b"bounded".to_vec())
+            .unwrap()
+            .encode()
+            .unwrap();
+        path_sender.send_to(&frame, path_bind).unwrap();
+        sent_in_chunk += 1;
+        if sent_in_chunk == 256 {
+            released_packets += receive_paths_summary_with_retry(&mut receiver, sent_in_chunk).packets as u64;
+            sent_in_chunk = 0;
+        }
+    }
+    if sent_in_chunk > 0 {
+        released_packets += receive_paths_summary_with_retry(&mut receiver, sent_in_chunk).packets as u64;
+    }
+
+    assert!(
+        released_packets > 0,
+        "bounded reorder work should release old payloads instead of waiting for every missing sequence"
+    );
+}
+
+#[test]
+fn summary_path_receive_rotates_across_hot_path_sockets() {
+    let client_path_a = reserve_loopback_addr();
+    let server_path_a = reserve_loopback_addr();
+    let client_path_b = reserve_loopback_addr();
+    let server_path_b = reserve_loopback_addr();
+    let client_path_c = reserve_loopback_addr();
+    let server_path_c = reserve_loopback_addr();
+    let remote_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    remote_target
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+
+    let client_config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", remote_target.local_addr().unwrap())],
+        vec![
+            path(1, client_path_a, server_path_a),
+            path(2, client_path_b, server_path_b),
+            path(3, client_path_c, server_path_c),
+        ],
+    )
+    .unwrap();
+    let server_config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", remote_target.local_addr().unwrap())],
+        vec![
+            path(1, server_path_a, client_path_a),
+            path(2, server_path_b, client_path_b),
+            path(3, server_path_c, client_path_c),
+        ],
+    )
+    .unwrap();
+    let mut client = CoreDataplane::bind(client_config).unwrap();
+    let mut server = CoreDataplane::bind(server_config).unwrap();
+    let app_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let client_service_addr = client.service("udp-main").unwrap().local_addr().unwrap();
+
+    for index in 0..6 {
+        let mut payload = vec![b'x'; 700];
+        payload[..11].copy_from_slice(format!("fair-{index:06}").as_bytes());
+        app_sender.send_to(payload.as_slice(), client_service_addr).unwrap();
+        client.forward_one_for_service("udp-main").unwrap();
+    }
+
+    thread::sleep(Duration::from_millis(20));
+    let received = receive_paths_summary_with_retry(&mut server, 3);
+    assert_eq!(received.packets, 3);
+    let snapshot = server.metrics_snapshot();
+    assert_eq!(snapshot.paths.values().filter(|path| path.rx_packets == 1).count(), 3);
 }
 
 #[test]
@@ -750,6 +1045,91 @@ fn shared_sink_peer_scoped_sources_route_replies_to_the_right_authenticated_sour
 }
 
 #[test]
+fn peer_scoped_replies_honor_service_specific_path_policy() {
+    let source_path_a = reserve_loopback_addr();
+    let source_path_b = reserve_loopback_addr();
+    let sink_path_a = reserve_loopback_addr();
+    let sink_path_b = reserve_loopback_addr();
+    let app_server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    app_server.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let source_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    source_target
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let source_to_sink = [0x50_u8; 32];
+    let sink_to_source = [0x51_u8; 32];
+
+    let source_config = CoreRuntimeConfig::new_with_paths_scheduler_and_security(
+        vec![service("udp-main", source_target.local_addr().unwrap())],
+        vec![path(1, source_path_a, sink_path_a), path(2, source_path_b, sink_path_b)],
+        SchedulerConfig::default(),
+        TransportSecurityConfig::Static {
+            local_receiver_index: 301,
+            remote_receiver_index: 401,
+            send_key: source_to_sink,
+            receive_key: sink_to_source,
+        },
+    )
+    .unwrap();
+    let sink_service = UdpServiceConfig::new_with_scheduler(
+        0,
+        "udp-main",
+        Some("0.0.0.0:0".parse().unwrap()),
+        app_server.local_addr().unwrap(),
+        100,
+        ServiceReturnMode::PeerScopedSource,
+        ServiceSchedulerConfig::new_with_path_policy(1, 0, 0, 0, 0, ServicePathPolicy::WeightedRoundRobin)
+            .with_allowed_path_ids(vec![2])
+            .with_path_weights(vec![(2, 1)]),
+    )
+    .unwrap();
+    let sink_config = secure_multi_config(
+        vec![sink_service],
+        vec![path_bind_only(1, sink_path_a), path_bind_only(2, sink_path_b)],
+        vec![TransportSecuritySessionConfig::new(
+            401,
+            301,
+            sink_to_source,
+            source_to_sink,
+            vec![256],
+        )],
+    );
+    let mut source = CoreDataplane::bind(source_config).unwrap();
+    let mut sink = CoreDataplane::bind(sink_config).unwrap();
+    source.set_service_scheduler(256, ServiceSchedulerConfig::new(0, 0));
+    let app_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let source_service_addr = source.service("udp-main").unwrap().local_addr().unwrap();
+
+    app_sender.send_to(b"learn-both-paths", source_service_addr).unwrap();
+    source.forward_one_for_service("udp-main").unwrap();
+    let delivered = receive_paths_with_retry(&mut sink, 8);
+    assert_eq!(delivered.len(), 1);
+
+    let mut buffer = [0_u8; 128];
+    let (length, reply_addr) = recv_with_retry(&app_server, &mut buffer);
+    assert_eq!(&buffer[..length], b"learn-both-paths");
+    app_server.send_to(b"reply-on-path-b", reply_addr).unwrap();
+    let forwarded = {
+        let mut forwarded = Vec::new();
+        for _ in 0..20 {
+            forwarded = sink.forward_available_for_service_nonblocking("udp-main", 8).unwrap();
+            if !forwarded.is_empty() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        forwarded.into_iter().next().unwrap()
+    };
+    assert_eq!(forwarded.path_id, 2);
+    let replies = receive_paths_with_retry(&mut source, 8);
+    assert_eq!(replies.len(), 1);
+
+    let sink_snapshot = sink.metrics_snapshot();
+    assert_eq!(sink_snapshot.paths.get(&1).unwrap().tx_packets, 0);
+    assert_eq!(sink_snapshot.paths.get(&2).unwrap().tx_packets, 1);
+}
+
+#[test]
 fn user_service_fanout_is_deduped_before_udp_delivery() {
     let client_path_a = reserve_loopback_addr();
     let server_path_a = reserve_loopback_addr();
@@ -1111,4 +1491,44 @@ fn python_composed_service_payload_is_sent_through_one_scheduled_path_transport(
     assert_eq!(frame.payload, payload);
     assert!(path_b_remote.recv_from(&mut buffer).is_err());
     assert_eq!(dataplane.metrics_snapshot().control_metadata.sent.frames, 1);
+}
+
+#[test]
+fn python_composed_service_payload_can_be_pinned_to_one_path_transport() {
+    let path_a_bind = reserve_loopback_addr();
+    let path_a_remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let path_b_bind = reserve_loopback_addr();
+    let path_b_remote = UdpSocket::bind("127.0.0.1:0").unwrap();
+    path_a_remote
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    path_b_remote
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", target.local_addr().unwrap())],
+        vec![
+            path(1, path_a_bind, path_a_remote.local_addr().unwrap()),
+            path(2, path_b_bind, path_b_remote.local_addr().unwrap()),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let payload = br#"{"type":"path_clock_probe"}"#.to_vec();
+
+    let plans = dataplane
+        .transmit_service_payload_on_path(1, 2, payload.clone())
+        .unwrap();
+
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].path_id, 2);
+    assert!(path_a_remote.recv_from(&mut [0_u8; 1500]).is_err());
+    let mut buffer = [0_u8; 1500];
+    let (length, _source) = path_b_remote.recv_from(&mut buffer).unwrap();
+    let frame = Frame::decode(&buffer[..length]).unwrap();
+    assert_eq!(frame.kind, FrameKind::Data);
+    assert_eq!(frame.service_id, 1);
+    assert_eq!(frame.path_id, 2);
+    assert_eq!(frame.payload, payload);
 }
