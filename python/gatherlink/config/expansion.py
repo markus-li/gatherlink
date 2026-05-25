@@ -10,7 +10,13 @@ from __future__ import annotations
 
 from base64 import b64decode
 
-from gatherlink.config.models import USER_SERVICE_ID_START, GatherlinkConfig, ServiceConfig
+from gatherlink.config.models import (
+    USER_SERVICE_ID_START,
+    GatherlinkConfig,
+    SchedulerPolicy,
+    ServiceConfig,
+    ServiceTrafficClass,
+)
 from gatherlink.config.runtime import (
     RuntimeConfig,
     RuntimeDnsHelperConfig,
@@ -26,6 +32,11 @@ from gatherlink.config.runtime import (
     RuntimeWireGuardHelperConfig,
 )
 from gatherlink.scheduling.compiler import compile_scheduler, compile_service_priority
+from gatherlink.scheduling.policies import (
+    FLOWLET_ADAPTIVE_DEFAULT_IDLE_US,
+    FLOWLET_ADAPTIVE_DEFAULT_MAX_HOLD_US,
+    FLOWLET_ADAPTIVE_DEFAULT_PATH_RUN_DATAGRAMS,
+)
 
 
 def _service_by_name(services: list[ServiceConfig]) -> dict[str, ServiceConfig]:
@@ -109,7 +120,12 @@ def _expand_security(config: GatherlinkConfig, service_ids_by_name: dict[str, in
     )
 
 
-def _expand_services(config: GatherlinkConfig, service_ids: list[int]) -> list[RuntimeServiceConfig]:
+def _expand_services(
+    config: GatherlinkConfig,
+    service_ids: list[int],
+    *,
+    effective_scheduler_mode: SchedulerPolicy | None = None,
+) -> list[RuntimeServiceConfig]:
     """Copy services into runtime objects with the protocol made explicit."""
     return [
         RuntimeServiceConfig(
@@ -120,12 +136,175 @@ def _expand_services(config: GatherlinkConfig, service_ids: list[int]) -> list[R
             listen=service.listen,
             priority=service.priority,
             priority_value=compile_service_priority(service.priority),
+            traffic_class=_service_traffic_class(config, service),
             return_mode=service.return_mode,
-            scheduler_fanout=service.scheduler_fanout,
-            scheduler_fanout_below_bytes=service.scheduler_fanout_below_bytes,
+            scheduler_poll_batch_packets=service.scheduler_poll_batch_packets,
+            **compile_service_scheduler_primitives(
+                config,
+                service,
+                effective_scheduler_mode=effective_scheduler_mode,
+            ),
         )
         for index, service in enumerate(config.services)
     ]
+
+
+def _service_traffic_class(config: GatherlinkConfig, service: ServiceConfig) -> ServiceTrafficClass:
+    """
+    Return the Python-owned service traffic class for scheduler policy.
+
+    Explicit service config wins. Helper-derived values are defaults so
+    WireGuard split profiles can benefit from class-aware scheduling without
+    making Rust inspect or understand helper payloads.
+    """
+    if service.traffic_class != "unknown":
+        return service.traffic_class
+    wireguard = config.helpers.wireguard
+    if wireguard is None or not wireguard.enabled:
+        return "unknown"
+    if wireguard.mode == "dual_profile":
+        if service.name == wireguard.stable_service:
+            return "tcp_ordered"
+        if service.name == wireguard.fast_service:
+            return "udp_bulk"
+        return "unknown"
+    if service.name == wireguard.service:
+        return "tcp_ordered"
+    return "unknown"
+
+
+def compile_service_scheduler_primitives(
+    config: GatherlinkConfig,
+    service: ServiceConfig,
+    *,
+    effective_scheduler_mode: SchedulerPolicy | None = None,
+) -> dict[str, object]:
+    """
+    Compile Python-owned service scheduling policy into Rust primitives.
+
+    This helper is shared by initial config expansion and hot scheduler reapply.
+    That matters for coordinated/adaptive scheduling: Python may promote the
+    effective path policy to `flowlet_adaptive` after telemetry arrives, and the
+    matching per-service flowlet primitives must change at the same boundary.
+    """
+    return {
+        "scheduler_fanout": service.scheduler_fanout,
+        "scheduler_fanout_below_bytes": service.scheduler_fanout_below_bytes,
+        "scheduler_flowlet_idle_us": _service_flowlet_idle_us(
+            config,
+            service,
+            effective_scheduler_mode=effective_scheduler_mode,
+        ),
+        "scheduler_flowlet_max_hold_us": _service_flowlet_max_hold_us(
+            config,
+            service,
+            effective_scheduler_mode=effective_scheduler_mode,
+        ),
+        "scheduler_path_run_datagrams": _service_path_run_datagrams(
+            config,
+            service,
+            effective_scheduler_mode=effective_scheduler_mode,
+        ),
+        "scheduler_path_policy": service.scheduler_path_policy,
+        "scheduler_allowed_path_ids": _service_allowed_path_ids(config, service),
+        "scheduler_path_weights": _service_path_weights(config, service),
+    }
+
+
+def _service_allowed_path_ids(config: GatherlinkConfig, service: ServiceConfig) -> list[int]:
+    """Compile service path-name eligibility into compact runtime path ids."""
+    if not service.scheduler_allowed_paths:
+        return []
+    path_ids_by_name = {path.name: index for index, path in enumerate(config.paths)}
+    missing = [name for name in service.scheduler_allowed_paths if name not in path_ids_by_name]
+    if missing:
+        raise ValueError(f"service {service.name!r} references unknown scheduler_allowed_paths: {', '.join(missing)}")
+    return [path_ids_by_name[name] for name in service.scheduler_allowed_paths]
+
+
+def _service_path_weights(config: GatherlinkConfig, service: ServiceConfig) -> list[tuple[int, int]]:
+    """Compile service-specific path weights into compact runtime path-id pairs."""
+    if not service.scheduler_path_weights:
+        return []
+    path_ids_by_name = {path.name: index for index, path in enumerate(config.paths)}
+    allowed_names = set(service.scheduler_allowed_paths)
+    compiled: list[tuple[int, int]] = []
+    for path_name, weight in service.scheduler_path_weights.items():
+        if path_name not in path_ids_by_name:
+            raise ValueError(f"service {service.name!r} references unknown scheduler_path_weights path: {path_name}")
+        if allowed_names and path_name not in allowed_names:
+            raise ValueError(
+                f"service {service.name!r} scheduler_path_weights contains {path_name!r}, "
+                "which is not in scheduler_allowed_paths"
+            )
+        if weight < 1 or weight > 65535:
+            raise ValueError(
+                f"service {service.name!r} scheduler_path_weights[{path_name!r}] must be in range 1..65535"
+            )
+        compiled.append((path_ids_by_name[path_name], int(weight)))
+    return compiled
+
+
+def _service_flowlet_idle_us(
+    config: GatherlinkConfig,
+    service: ServiceConfig,
+    *,
+    effective_scheduler_mode: SchedulerPolicy | None = None,
+) -> int:
+    """
+    Compile flowlet policy into the service primitive Rust already executes.
+
+    Explicit per-service config wins. The global `flowlet_adaptive` policy only
+    fills in conservative defaults when the service did not opt into its own
+    flowlet timing.
+    """
+    if service.scheduler_flowlet_idle_us:
+        return service.scheduler_flowlet_idle_us
+    if _service_effective_mode(config, effective_scheduler_mode) == "flowlet_adaptive":
+        return FLOWLET_ADAPTIVE_DEFAULT_IDLE_US
+    return 0
+
+
+def _service_flowlet_max_hold_us(
+    config: GatherlinkConfig,
+    service: ServiceConfig,
+    *,
+    effective_scheduler_mode: SchedulerPolicy | None = None,
+) -> int:
+    """Return the compiled maximum hold for the flowlet service primitive."""
+    if service.scheduler_flowlet_max_hold_us:
+        return service.scheduler_flowlet_max_hold_us
+    if _service_effective_mode(config, effective_scheduler_mode) == "flowlet_adaptive":
+        return FLOWLET_ADAPTIVE_DEFAULT_MAX_HOLD_US
+    return 0
+
+
+def _service_path_run_datagrams(
+    config: GatherlinkConfig,
+    service: ServiceConfig,
+    *,
+    effective_scheduler_mode: SchedulerPolicy | None = None,
+) -> int:
+    """Return the compiled hot-burst path run bound for service scheduling."""
+    if service.scheduler_path_run_datagrams:
+        return service.scheduler_path_run_datagrams
+    if _service_effective_mode(config, effective_scheduler_mode) == "flowlet_adaptive":
+        return FLOWLET_ADAPTIVE_DEFAULT_PATH_RUN_DATAGRAMS
+    return 0
+
+
+def _service_effective_mode(
+    config: GatherlinkConfig,
+    effective_scheduler_mode: SchedulerPolicy | None,
+) -> SchedulerPolicy:
+    """
+    Return the scheduler mode service primitives should mirror.
+
+    Coordinated/adaptive is a Python meta-policy. Its current concrete decision
+    is supplied by the scheduler coordinator during hot reapply; without that
+    decision, initial expansion preserves the user-configured defaults.
+    """
+    return effective_scheduler_mode or config.scheduler.mode
 
 
 def _allocate_service_ids(services: list[ServiceConfig]) -> list[int]:
@@ -168,15 +347,36 @@ def _expand_helpers(
     ] = []
 
     if config.helpers.wireguard:
-        service = services[config.helpers.wireguard.service]
-        helpers.append(
-            RuntimeWireGuardHelperConfig(
-                enabled=config.helpers.wireguard.enabled,
-                service=service.name,
-                service_target=service.target,
-                service_listen=service.listen,
-            )
-        )
+        if config.helpers.wireguard.mode == "dual_profile":
+            for traffic_class, service_name in (
+                ("stable", config.helpers.wireguard.stable_service),
+                ("fast", config.helpers.wireguard.fast_service),
+            ):
+                if service_name is None:
+                    continue
+                service = services[service_name]
+                helpers.append(
+                    RuntimeWireGuardHelperConfig(
+                        enabled=config.helpers.wireguard.enabled,
+                        profile="dual_profile",
+                        traffic_class=traffic_class,
+                        service=service.name,
+                        service_target=service.target,
+                        service_listen=service.listen,
+                    )
+                )
+        else:
+            service_name = config.helpers.wireguard.service
+            if service_name is not None:
+                service = services[service_name]
+                helpers.append(
+                    RuntimeWireGuardHelperConfig(
+                        enabled=config.helpers.wireguard.enabled,
+                        service=service.name,
+                        service_target=service.target,
+                        service_listen=service.listen,
+                    )
+                )
 
     if config.helpers.dns:
         helpers.append(

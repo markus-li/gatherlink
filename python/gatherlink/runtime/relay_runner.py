@@ -25,6 +25,11 @@ from gatherlink.security.relay_sessions import RelayExecutorConfig
 from gatherlink.shared.models import GatherlinkBaseModel
 
 RELAY_IDLE_SLEEP_SECONDS = 0.001
+RELAY_DIAGNOSTIC_INTERVAL_SECONDS = 0.5
+# Keep policy and lifecycle in Python while avoiding oversized relay bursts
+# that can add queueing latency. Rust still drains bounded chunks and returns
+# compact counters for diagnostics.
+RELAY_BATCH_MAX_PACKETS = 256
 
 
 class RelayHopKeys(GatherlinkBaseModel):
@@ -193,35 +198,75 @@ def run_relay_service(
     iterations = 0
     forwarded_packets = 0
     dropped_packets = 0
+    pending_diagnostic_packets = 0
+    pending_diagnostic_bytes = 0
+    next_diagnostic_at = time.monotonic() + RELAY_DIAGNOSTIC_INTERVAL_SECONDS
 
     while not stop_event.is_set():
         if max_iterations is not None and iterations >= max_iterations:
             break
         iterations += 1
         state.iterations = iterations
-        outcome = forwarder.try_forward_one(_unix_us())
-        kind = outcome.get("kind") if isinstance(outcome, dict) else None
-        if kind == "forwarded":
-            forwarded_packets += 1
-            state.forwarded_packets = forwarded_packets
-            if diagnostics_bus is not None:
-                diagnostics_bus.publish(
-                    DiagnosticEvent.packet_forwarded(
-                        service=config.name,
-                        path=None,
-                        packets=1,
-                        bytes_forwarded=int(outcome.get("emitted_bytes", 0) or 0),
-                    )
-                )
-        elif kind == "dropped":
-            dropped_packets += 1
-            state.dropped_packets = dropped_packets
-            if diagnostics_bus is not None:
-                diagnostics_bus.publish(_relay_drop_event(config, outcome))
+        now_unix_us = _unix_us()
+        if hasattr(forwarder, "try_forward_many"):
+            batch = forwarder.try_forward_many(RELAY_BATCH_MAX_PACKETS, now_unix_us)
+            batch_forwarded = int(batch.get("forwarded_packets", 0) or 0)
+            batch_dropped = int(batch.get("dropped_packets", 0) or 0)
+            if batch_forwarded:
+                forwarded_packets += batch_forwarded
+                state.forwarded_packets = forwarded_packets
+                emitted_bytes = int(batch.get("emitted_bytes", 0) or 0)
+                state.emitted_packets += int(batch.get("emitted_packets", 0) or 0)
+                state.emitted_bytes += emitted_bytes
+                pending_diagnostic_packets += batch_forwarded
+                pending_diagnostic_bytes += emitted_bytes
+            if batch_dropped:
+                dropped_packets += batch_dropped
+                state.dropped_packets = dropped_packets
+            if not batch_forwarded and not batch_dropped:
+                time.sleep(config.poll_sleep_seconds)
         else:
-            time.sleep(config.poll_sleep_seconds)
-        if diagnostics_bus is not None:
+            outcome = forwarder.try_forward_one(now_unix_us)
+            kind = outcome.get("kind") if isinstance(outcome, dict) else None
+            if kind == "forwarded":
+                forwarded_packets += 1
+                state.forwarded_packets = forwarded_packets
+                pending_diagnostic_packets += 1
+                pending_diagnostic_bytes += int(outcome.get("emitted_bytes", 0) or 0)
+            elif kind == "dropped":
+                dropped_packets += 1
+                state.dropped_packets = dropped_packets
+                if diagnostics_bus is not None:
+                    if pending_diagnostic_packets:
+                        diagnostics_bus.publish(
+                            DiagnosticEvent.packet_forwarded(
+                                service=config.name,
+                                path=None,
+                                packets=pending_diagnostic_packets,
+                                bytes_forwarded=pending_diagnostic_bytes,
+                            )
+                        )
+                        pending_diagnostic_packets = 0
+                        pending_diagnostic_bytes = 0
+                    diagnostics_bus.publish(_relay_drop_event(config, outcome))
+            else:
+                time.sleep(config.poll_sleep_seconds)
+        now = time.monotonic()
+        if diagnostics_bus is not None and pending_diagnostic_packets and now >= next_diagnostic_at:
+            diagnostics_bus.publish(
+                DiagnosticEvent.packet_forwarded(
+                    service=config.name,
+                    path=None,
+                    packets=pending_diagnostic_packets,
+                    bytes_forwarded=pending_diagnostic_bytes,
+                )
+            )
+            pending_diagnostic_packets = 0
+            pending_diagnostic_bytes = 0
+            next_diagnostic_at = now + RELAY_DIAGNOSTIC_INTERVAL_SECONDS
+        if diagnostics_bus is not None and now >= next_diagnostic_at:
             diagnostics_bus.drain(limit=128)
+            next_diagnostic_at = now + RELAY_DIAGNOSTIC_INTERVAL_SECONDS
 
     counters = forwarder.counters()
     result = RelayRunnerResult(
@@ -238,6 +283,15 @@ def run_relay_service(
     state.forwarded_bytes = result.forwarded_bytes
     state.emitted_bytes = result.emitted_bytes
     if diagnostics_bus is not None:
+        if pending_diagnostic_packets:
+            diagnostics_bus.publish(
+                DiagnosticEvent.packet_forwarded(
+                    service=config.name,
+                    path=None,
+                    packets=pending_diagnostic_packets,
+                    bytes_forwarded=pending_diagnostic_bytes,
+                )
+            )
         diagnostics_bus.publish(
             DiagnosticEvent.shutdown(
                 reason="relay runner stopped",

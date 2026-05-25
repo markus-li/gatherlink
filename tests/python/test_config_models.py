@@ -112,6 +112,19 @@ def test_service_ids_must_be_user_range_and_unique() -> None:
         )
 
 
+def test_scheduler_accepts_traffic_bias_hint() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        role="client",
+        peer="remote",
+        scheduler={"mode": "coordinated_adaptive", "traffic_bias": "tcp"},
+        services=[{"name": "wireguard", "target": "127.0.0.1:51820"}],
+    )
+
+    assert config.scheduler.mode == "coordinated_adaptive"
+    assert config.scheduler.traffic_bias == "tcp"
+
+
 def test_security_sessions_must_have_unique_local_receiver_indexes() -> None:
     key = "ERERERERERERERERERERERERERERERERERERERERERE="
     with pytest.raises(ValueError, match="local_receiver_index values must be unique"):
@@ -210,6 +223,73 @@ def test_config_show_cli_preserves_runtime_redaction_marker() -> None:
     assert payload["security"]["receive_key"] == "[redacted:32 bytes]"
 
 
+def test_config_summary_cli_prints_stable_runtime_facts() -> None:
+    result = CliRunner().invoke(app, ["config", "summary", str(EXAMPLES / "dns-helper.json")])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["schema_version"] == 1
+    assert payload["runtime_model"] == "RuntimeConfig"
+    assert payload["counts"] == {"helpers": 1, "paths": 0, "security_sessions": 0, "services": 0}
+    assert payload["helpers"] == [{"enabled": True, "kind": "dns", "listen": "127.0.0.1:5353", "service": None}]
+    assert payload["security"]["mode"] == "none"
+    assert payload["scheduler"] == {
+        "active_paths": 0,
+        "disabled_paths": 0,
+        "draining_paths": 0,
+        "mode": "round_robin",
+        "path_count": 0,
+    }
+    golden = json.loads(Path("tests/fixtures/config-summary-dns-helper.json").read_text(encoding="utf-8"))
+    assert payload == golden
+
+
+def test_config_summary_cli_redacts_security_material() -> None:
+    result = CliRunner().invoke(app, ["config", "summary", str(EXAMPLES / "windows-two-node-a.json")])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["security"]["mode"] == "static"
+    assert payload["security"]["session_count"] == 1
+    assert payload["security"]["receiver_indexes"] == [101]
+    assert payload["security"]["remote_receiver_indexes"] == [101]
+    assert "send_key" not in result.output
+    assert "receive_key" not in result.output
+    assert "kJiywLJJjRWSIX7ZGttO1R7SKITfnefGyfsawZ5XNxI=" not in result.output
+
+
+def test_config_diff_cli_reports_redacted_runtime_changes(tmp_path) -> None:
+    current = tmp_path / "current.json"
+    candidate = tmp_path / "candidate.json"
+    base = {
+        "schema_version": 1,
+        "node": "node-a",
+        "role": "client",
+        "peer": "node-b",
+        "paths": [{"name": "path-a", "interface": "lo", "scheduler": {"tx_capacity_bps": 1_000_000}}],
+        "services": [{"name": "udp-main", "listen": "127.0.0.1:55180", "target": "127.0.0.1:51820"}],
+    }
+    current.write_text(json.dumps(base), encoding="utf-8")
+    candidate.write_text(
+        json.dumps(
+            {
+                **base,
+                "paths": [{"name": "path-a", "interface": "lo", "scheduler": {"tx_capacity_bps": 2_000_000}}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(app, ["config", "diff", str(current), str(candidate)])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["mode"] == "runtime"
+    assert payload["summary"]["different"] is True
+    assert any(item["path"] == "paths[0].scheduler.tx_capacity_bps" for item in payload["changed"])
+    assert "ERERERER" not in result.output
+
+
 def test_ipv6_example_config_preserves_bracketed_udp_endpoints() -> None:
     config = validate_config_file(EXAMPLES / "minimal-ipv6-client.json")
 
@@ -296,6 +376,31 @@ def test_service_priority_expands_into_runtime_priority_value() -> None:
     assert runtime.services[0].priority == "high"
     assert runtime.services[0].priority_value == 200
     assert runtime.services[0].service_id == 256
+
+
+def test_service_traffic_class_validates_known_values_only() -> None:
+    from gatherlink.config.errors import ConfigValidationError
+    from gatherlink.config.validation import validate_config_dict
+
+    data = load_config_dict(EXAMPLES / "minimal-client.json")
+    data["services"][0]["traffic_class"] = "inspect_wireguard_payloads"
+
+    with pytest.raises(ConfigValidationError) as exc:
+        validate_config_dict(data)
+
+    assert any("traffic_class" in ".".join(detail.location) for detail in exc.value.details)
+
+
+def test_service_poll_batch_packets_expands_into_runtime_service_budget() -> None:
+    from gatherlink.config import expand_config
+    from gatherlink.config.validation import validate_config_dict
+
+    data = load_config_dict(EXAMPLES / "minimal-client.json")
+    data["services"][0]["scheduler_poll_batch_packets"] = 64
+
+    runtime = expand_config(validate_config_dict(data))
+
+    assert runtime.services[0].scheduler_poll_batch_packets == 64
 
 
 def test_automatic_service_ids_skip_explicit_ids() -> None:

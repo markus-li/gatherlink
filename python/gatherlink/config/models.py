@@ -27,6 +27,8 @@ ConfigFormat = Literal[
     "tcp-forward-helper",
 ]
 PathSchedulerState = Literal["active", "busy", "drain", "disabled"]
+SchedulerTrafficBias = Literal["auto", "tcp", "udp"]
+ServiceSchedulerPathPolicy = Literal["inherit", "single_best_path", "weighted_round_robin"]
 SchedulerPolicy = Literal[
     "round_robin",
     "weighted_round_robin",
@@ -37,10 +39,18 @@ SchedulerPolicy = Literal[
     "least_queue",
     "earliest_completion_first",
     "blocking_estimation",
+    "ordered_multipath",
+    "ordered_multipath_capacity_aware",
+    "single_best_path",
+    "arrival_guarded_capacity",
+    "flowlet_adaptive",
+    "latency_guarded_capacity",
     "balanced",
     "adaptive",
+    "coordinated_adaptive",
 ]
 ServicePriority = Literal["bulk", "normal", "high", "critical"]
+ServiceTrafficClass = Literal["unknown", "tcp_ordered", "udp_bulk", "latency_sensitive", "control"]
 ServiceReturnMode = Literal["fixed", "learned-single-source", "peer-scoped-source"]
 DnsUpstreamKind = Literal["direct", "tunnel", "doh"]
 RESERVED_SERVICE_ID_END = 255
@@ -65,6 +75,7 @@ class PathSchedulerConfig(GatherlinkBaseModel):
     reorder_hold_us: int = Field(default=0, ge=0)
     max_in_flight_packets: int = Field(default=0, ge=0, le=65535)
     max_in_flight_bytes: int = Field(default=0, ge=0)
+    pacing_budget_bps: int = Field(default=0, ge=0)
 
 
 class PathRelayHopConfig(GatherlinkBaseModel):
@@ -96,6 +107,11 @@ class SchedulerConfig(GatherlinkBaseModel):
     # decisions belong in Python scoring modules and should compile down to path
     # weights, states, and primitive limits before Rust sees them.
     mode: SchedulerPolicy = "round_robin"
+    # This is intentionally a coarse operator/service hint. Python may bias a
+    # meta-policy such as coordinated_adaptive toward TCP-like order stability
+    # or UDP-like aggregation, while Rust still receives only primitive path
+    # state and weights.
+    traffic_bias: SchedulerTrafficBias = "auto"
 
 
 class PathConfig(GatherlinkBaseModel):
@@ -127,6 +143,11 @@ class ServiceConfig(GatherlinkBaseModel):
     service_id: int | None = Field(default=None, ge=USER_SERVICE_ID_START, le=65535)
     listen: str | None = None
     priority: ServicePriority = "normal"
+    # TODO(service-traffic-class): Python owns service meaning. Helpers or
+    # operator config may classify traffic before encryption so schedulers can
+    # choose conservative TCP-like or bulk UDP-like primitives without Rust
+    # inspecting payloads or learning helper semantics.
+    traffic_class: ServiceTrafficClass = "unknown"
     # TODO(service-scheduler-policy): These are Rust-executed primitives, not
     # user-facing policy. Python should map names like duplicate_small into
     # fanout values after it has considered service intent and path telemetry.
@@ -134,6 +155,30 @@ class ServiceConfig(GatherlinkBaseModel):
     # applies to every payload; otherwise larger payloads use one scheduled path.
     scheduler_fanout: int = Field(default=1, ge=0, le=65535)
     scheduler_fanout_below_bytes: int = Field(default=0, ge=0)
+    scheduler_flowlet_idle_us: int = Field(default=0, ge=0)
+    scheduler_flowlet_max_hold_us: int = Field(default=0, ge=0)
+    # TODO(service-qos): This is a Python-owned service budget primitive. It
+    # limits how many packets one service may drain per Rust bridge slot; zero
+    # keeps the global runner batch. Use it for automatic mixed-service tuning
+    # before adding heavier Rust-side queue policy.
+    scheduler_poll_batch_packets: int = Field(default=0, ge=0)
+    scheduler_path_run_datagrams: int = Field(default=0, ge=0)
+    # TODO(per-service-scheduler): This is still a compiled primitive, not a
+    # policy engine in Rust. Python decides when a service needs a path policy
+    # different from the node-wide scheduler, then Rust only executes this small
+    # selector. It is mainly used by dual WireGuard profiles where the stable
+    # service should stay conservative while the fast service can inherit an
+    # aggregation-friendly node policy.
+    scheduler_path_policy: ServiceSchedulerPathPolicy = "inherit"
+    # TODO(per-service-scheduler): This is an eligibility primitive compiled by
+    # Python. Use path names here so operator config stays readable; expansion
+    # converts them to compact path ids before Rust sees them.
+    scheduler_allowed_paths: list[str] = Field(default_factory=list)
+    # TODO(per-service-scheduler): These weights let Python compile an
+    # independent per-service path plan after considering both service intent
+    # and aggregate path pressure. Rust only executes the resulting path-id
+    # weights; it does not decide why one service prefers a different split.
+    scheduler_path_weights: dict[str, int] = Field(default_factory=dict)
     # TODO(service-return-policy): Fixed return ports are the common production
     # shape. The peer-scoped mode is for server-like helpers, including
     # WireGuard, that need one local app-facing UDP source per authenticated
@@ -215,11 +260,36 @@ def _paths_or_empty(value: list[dict] | None) -> list[dict]:
     return value or []
 
 
+def _scheduler_or_default(value: dict | None) -> dict:
+    """Preserve an explicit top-level scheduler policy, otherwise use defaults."""
+    return value or {}
+
+
 class WireGuardHelperConfig(GatherlinkBaseModel):
     """Optional WireGuard helper configuration."""
 
     enabled: bool = True
-    service: str
+    # The default helper shape stays a single WireGuard-over-Gatherlink service.
+    # The dual profile is an advanced performance optimization for operators who
+    # intentionally split TCP/default and UDP/high-throughput traffic before it
+    # enters WireGuard.
+    mode: Literal["single", "dual_profile"] = "single"
+    service: str | None = None
+    stable_service: str | None = None
+    fast_service: str | None = None
+
+    @model_validator(mode="after")
+    def validate_service_references(self) -> WireGuardHelperConfig:
+        """Require the service names needed by the selected WireGuard helper mode."""
+        if not self.enabled:
+            return self
+        if self.mode == "single" and not self.service:
+            raise ValueError("wireguard helper service is required in single mode")
+        if self.mode == "dual_profile" and (not self.stable_service or not self.fast_service):
+            raise ValueError("wireguard helper dual_profile requires stable_service and fast_service")
+        if self.stable_service and self.fast_service and self.stable_service == self.fast_service:
+            raise ValueError("wireguard helper stable_service and fast_service must be different")
+        return self
 
 
 class DnsHelperUpstreamConfig(GatherlinkBaseModel):
@@ -307,6 +377,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "security": FieldTransform(_security_or_default, source="security"),
             "paths": "paths",
             "services": "services",
+            "scheduler": FieldTransform(_scheduler_or_default, source="scheduler"),
             "helpers": FieldTransform({}),
         },
         "minimal-server": {
@@ -317,6 +388,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "security": FieldTransform(_security_or_default, source="security"),
             "paths": FieldTransform(_paths_or_empty, source="paths"),
             "services": "services",
+            "scheduler": FieldTransform(_scheduler_or_default, source="scheduler"),
             "helpers": FieldTransform({}),
         },
         "wireguard-client": {
@@ -327,6 +399,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "security": FieldTransform(_security_or_default, source="security"),
             "paths": "paths",
             "services": "services",
+            "scheduler": FieldTransform(_scheduler_or_default, source="scheduler"),
             "helpers": "helpers",
         },
         "wireguard-server": {
@@ -337,6 +410,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "security": FieldTransform(_security_or_default, source="security"),
             "paths": FieldTransform(_paths_or_empty, source="paths"),
             "services": "services",
+            "scheduler": FieldTransform(_scheduler_or_default, source="scheduler"),
             "helpers": FieldTransform({}),
         },
         "dns-helper": {
@@ -347,6 +421,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "security": FieldTransform(_security_or_default, source="security"),
             "paths": FieldTransform(_paths_or_empty, source="paths"),
             "services": FieldTransform([]),
+            "scheduler": FieldTransform(_scheduler_or_default, source="scheduler"),
             "helpers": "helpers",
         },
         "socks5-helper": {
@@ -357,6 +432,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "security": FieldTransform(_security_or_default, source="security"),
             "paths": "paths",
             "services": "services",
+            "scheduler": FieldTransform(_scheduler_or_default, source="scheduler"),
             "helpers": "helpers",
         },
         "tcp-forward-helper": {
@@ -367,6 +443,7 @@ class GatherlinkConfig(GatherlinkBaseModel):
             "security": FieldTransform(_security_or_default, source="security"),
             "paths": "paths",
             "services": "services",
+            "scheduler": FieldTransform(_scheduler_or_default, source="scheduler"),
             "helpers": "helpers",
         },
     }
@@ -398,8 +475,22 @@ class GatherlinkConfig(GatherlinkBaseModel):
         if len(path_names) != len(self.paths):
             raise ValueError("path names must be unique")
 
-        if self.helpers.wireguard and self.helpers.wireguard.service not in service_names:
-            raise ValueError("wireguard helper service must reference an existing service")
+        if self.helpers.wireguard:
+            wireguard_services = [
+                service
+                for service in (
+                    self.helpers.wireguard.service,
+                    self.helpers.wireguard.stable_service,
+                    self.helpers.wireguard.fast_service,
+                )
+                if service is not None
+            ]
+            unknown_wireguard_services = sorted(set(wireguard_services) - service_names)
+            if unknown_wireguard_services:
+                raise ValueError(
+                    "wireguard helper services must reference existing services: "
+                    + ", ".join(unknown_wireguard_services)
+                )
         if self.helpers.socks5 and self.helpers.socks5.service not in service_names:
             raise ValueError("socks5 helper service must reference an existing service")
         if self.helpers.tcp_forward and self.helpers.tcp_forward.service not in service_names:

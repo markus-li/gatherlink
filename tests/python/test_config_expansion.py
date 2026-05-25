@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gatherlink.config import expand_config, validate_config_file
+import pytest
+from gatherlink.config import expand_config, validate_config_dict, validate_config_file
 
 EXAMPLES = Path("configs/examples")
 
@@ -29,6 +30,31 @@ def test_wireguard_helper_expands_service_reference() -> None:
     assert helper.service == "wireguard-main"
     assert helper.service_target == "127.0.0.1:51820"
     assert helper.service_listen == "127.0.0.1:55180"
+    assert runtime.services[0].traffic_class == "tcp_ordered"
+
+
+def test_wireguard_dual_profile_expands_two_runtime_helpers() -> None:
+    config = validate_config_file(EXAMPLES / "wireguard-dual-profile-client.json")
+    runtime = expand_config(config)
+
+    assert [helper.kind for helper in runtime.helpers] == ["wireguard", "wireguard"]
+    assert [helper.profile for helper in runtime.helpers] == ["dual_profile", "dual_profile"]
+    assert [helper.traffic_class for helper in runtime.helpers] == ["stable", "fast"]
+    assert [helper.service for helper in runtime.helpers] == ["wireguard-stable", "wireguard-fast"]
+    assert runtime.services[0].priority == "high"
+    assert runtime.services[0].traffic_class == "tcp_ordered"
+    assert runtime.services[0].scheduler_poll_batch_packets == 128
+    assert runtime.services[1].priority == "bulk"
+    assert runtime.services[1].traffic_class == "udp_bulk"
+
+
+def test_explicit_service_traffic_class_wins_over_helper_default() -> None:
+    data = validate_config_file(EXAMPLES / "wireguard-client.json").model_dump(mode="json")
+    data["services"][0]["traffic_class"] = "latency_sensitive"
+
+    runtime = expand_config(validate_config_dict(data))
+
+    assert runtime.services[0].traffic_class == "latency_sensitive"
 
 
 def test_dns_helper_expands_to_ordered_runtime_helper() -> None:
@@ -138,3 +164,210 @@ def test_authenticated_security_compiles_to_rust_static_executor_and_redacts() -
     assert exported["security"]["source_mode"] == "authenticated"
     assert exported["security"]["send_key"] == "[redacted:32 bytes]"
     assert exported["security"]["receive_key"] == "[redacted:32 bytes]"
+
+
+def test_flowlet_adaptive_expands_service_flowlet_defaults() -> None:
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, SchedulerConfig, ServiceConfig
+    from gatherlink.scheduling.policies import (
+        FLOWLET_ADAPTIVE_DEFAULT_IDLE_US,
+        FLOWLET_ADAPTIVE_DEFAULT_MAX_HOLD_US,
+        FLOWLET_ADAPTIVE_DEFAULT_PATH_RUN_DATAGRAMS,
+    )
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="flowlet_adaptive"),
+        paths=[PathConfig(name="path-a", interface="gl-a")],
+        services=[ServiceConfig(name="udp-main", target="127.0.0.1:51820")],
+    )
+
+    runtime = expand_config(config)
+
+    assert runtime.scheduler.mode == "adaptive"
+    assert runtime.services[0].scheduler_flowlet_idle_us == FLOWLET_ADAPTIVE_DEFAULT_IDLE_US
+    assert runtime.services[0].scheduler_flowlet_max_hold_us == FLOWLET_ADAPTIVE_DEFAULT_MAX_HOLD_US
+    assert runtime.services[0].scheduler_path_run_datagrams == FLOWLET_ADAPTIVE_DEFAULT_PATH_RUN_DATAGRAMS
+
+
+def test_validated_config_preserves_top_level_scheduler_policy() -> None:
+    config = validate_config_dict(
+        {
+            "schema_version": 1,
+            "node": "local",
+            "role": "client",
+            "peer": "remote",
+            "scheduler": {"mode": "ordered_multipath"},
+            "paths": [
+                {
+                    "name": "path-a",
+                    "interface": "gl-a",
+                    "scheduler": {"tx_capacity_bps": 300_000_000, "reorder_hold_us": 50_000},
+                }
+            ],
+            "services": [{"name": "udp-main", "target": "127.0.0.1:51820"}],
+        }
+    )
+
+    runtime = expand_config(config)
+
+    assert runtime.scheduler.mode == "ordered_multipath"
+    assert runtime.paths[0].scheduler.max_in_flight_bytes == 3_750_000
+
+
+def test_explicit_service_flowlet_values_override_flowlet_adaptive_defaults() -> None:
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, SchedulerConfig, ServiceConfig
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="flowlet_adaptive"),
+        paths=[PathConfig(name="path-a", interface="gl-a")],
+        services=[
+            ServiceConfig(
+                name="udp-main",
+                target="127.0.0.1:51820",
+                scheduler_flowlet_idle_us=10_000,
+                scheduler_flowlet_max_hold_us=20_000,
+                scheduler_path_run_datagrams=64,
+            )
+        ],
+    )
+
+    runtime = expand_config(config)
+
+    assert runtime.services[0].scheduler_flowlet_idle_us == 10_000
+    assert runtime.services[0].scheduler_flowlet_max_hold_us == 20_000
+    assert runtime.services[0].scheduler_path_run_datagrams == 64
+
+
+def test_per_service_path_policy_expands_to_runtime_primitive() -> None:
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, ServiceConfig
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        paths=[PathConfig(name="path-a", interface="gl-a")],
+        services=[
+            ServiceConfig(
+                name="wireguard-stable",
+                target="127.0.0.1:51820",
+                scheduler_path_policy="single_best_path",
+            )
+        ],
+    )
+
+    runtime = expand_config(config)
+
+    assert runtime.services[0].scheduler_path_policy == "single_best_path"
+
+
+def test_per_service_allowed_paths_expand_to_runtime_path_ids() -> None:
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, ServiceConfig
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        paths=[
+            PathConfig(name="path-a", interface="gl-a"),
+            PathConfig(name="path-b", interface="gl-b"),
+            PathConfig(name="path-c", interface="gl-c"),
+        ],
+        services=[
+            ServiceConfig(
+                name="wireguard-fast",
+                target="127.0.0.1:51820",
+                scheduler_path_policy="weighted_round_robin",
+                scheduler_allowed_paths=["path-b", "path-c"],
+            )
+        ],
+    )
+
+    runtime = expand_config(config)
+
+    assert runtime.services[0].scheduler_allowed_path_ids == [1, 2]
+
+
+def test_per_service_path_weights_expand_to_runtime_path_weight_pairs() -> None:
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, ServiceConfig
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        paths=[
+            PathConfig(name="path-a", interface="gl-a"),
+            PathConfig(name="path-b", interface="gl-b"),
+            PathConfig(name="path-c", interface="gl-c"),
+        ],
+        services=[
+            ServiceConfig(
+                name="wireguard-fast",
+                target="127.0.0.1:51820",
+                scheduler_path_policy="weighted_round_robin",
+                scheduler_allowed_paths=["path-b", "path-c"],
+                scheduler_path_weights={"path-b": 3, "path-c": 7},
+            )
+        ],
+    )
+
+    runtime = expand_config(config)
+
+    assert runtime.services[0].scheduler_path_weights == [(1, 3), (2, 7)]
+
+
+def test_per_service_path_weights_reject_paths_outside_allowed_set() -> None:
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, ServiceConfig
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        paths=[
+            PathConfig(name="path-a", interface="gl-a"),
+            PathConfig(name="path-b", interface="gl-b"),
+        ],
+        services=[
+            ServiceConfig(
+                name="wireguard-fast",
+                target="127.0.0.1:51820",
+                scheduler_allowed_paths=["path-a"],
+                scheduler_path_weights={"path-b": 5},
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="not in scheduler_allowed_paths"):
+        expand_config(config)
+
+
+def test_per_service_allowed_paths_reject_unknown_path_names() -> None:
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, ServiceConfig
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        paths=[PathConfig(name="path-a", interface="gl-a")],
+        services=[
+            ServiceConfig(
+                name="wireguard-fast",
+                target="127.0.0.1:51820",
+                scheduler_allowed_paths=["path-missing"],
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="unknown scheduler_allowed_paths"):
+        expand_config(config)

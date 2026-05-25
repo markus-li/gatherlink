@@ -27,6 +27,8 @@ from gatherlink.runtime.services import (
     request_service,
     service_name,
 )
+from gatherlink.scheduling.metrics import PathSchedulerMetrics
+from gatherlink.scheduling.scoring import score_path
 
 app = typer.Typer(help="List managed services and attach to their logs.")
 AttachMode = Literal["raw", "aggregate"]
@@ -128,6 +130,37 @@ def status(name: str) -> None:
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
     typer.echo(json.dumps(response["status"], indent=2, sort_keys=True))
+
+
+@app.command("outcome")
+def outcome(
+    name: str,
+    service: str = typer.Option(..., "--service", help="Runtime service name the outcome belongs to."),
+    degraded: bool = typer.Option(False, "--degraded/--ok", help="Whether the service outcome is degraded."),
+    reason: str = typer.Option("", "--reason", help="Short operator-facing degradation reason."),
+) -> None:
+    """
+    Push live service outcome facts to a process-managed service over IPC.
+
+    This is for helper and benchmark tooling that knows application outcomes
+    such as TCP retransmit pain or UDP helper loss. The core runner keeps the
+    fact in Python memory and may use it in Python-owned service budgeting; Rust
+    only sees any compiled primitive changes.
+    """
+    try:
+        record = ServiceRegistry().resolve(name)
+        if record.manager == "systemd":
+            typer.echo(f"{record.name} is managed by systemd unit {record.systemd_unit}", err=True)
+            raise typer.Exit(1)
+        response = request_service(
+            record,
+            "service-outcome",
+            payload={"outcomes": [{"service": service, "degraded": degraded, "reason": reason}]},
+        )
+    except (ValueError, ServiceIpcError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(json.dumps(response["result"], indent=2, sort_keys=True))
 
 
 @app.command("attach")
@@ -335,6 +368,8 @@ def _aggregate_rows_for_service(
                 "duplicate_packets": "not_reported",
                 "send_failed_packets": "not_reported",
                 "fanout_send_failed_packets": "not_reported",
+                "queue_pressure": "not_reported",
+                "scheduler_health": "not_reported",
                 "reordered": "not_reported",
                 "reorder_needed": "not_reported",
                 "row_type": "service",
@@ -366,6 +401,8 @@ def _aggregate_rows_for_service(
                 "duplicate_packets": "not_reported",
                 "send_failed_packets": "not_reported",
                 "fanout_send_failed_packets": "not_reported",
+                "queue_pressure": "not_reported",
+                "scheduler_health": "not_reported",
                 "reordered": "not_reported",
                 "reorder_needed": "not_reported",
                 "row_type": "service",
@@ -523,12 +560,15 @@ def _row_from_status(
         "duplicate_packets": status.get("duplicate_packets", "not_reported"),
         "send_failed_packets": status.get("send_failed_packets", "not_reported"),
         "fanout_send_failed_packets": status.get("fanout_send_failed_packets", "not_reported"),
+        "queue_pressure": _queue_pressure_context(status),
+        "scheduler_health": _scheduler_health_context(status),
         "reordered": status.get("reordered_packets", "not_reported"),
         "reorder_needed": status.get("packets_needing_reorder", "not_reported"),
         "row_type": "service",
         "parent": "",
         "path": "",
         "control_metadata": status.get("control_metadata") if isinstance(status.get("control_metadata"), dict) else {},
+        "service_config": status.get("service_config") if isinstance(status.get("service_config"), list) else [],
         "system_time": _system_time_context(status.get("control_metadata")),
         "gatherlink_time": _gatherlink_time_context(status.get("control_metadata")),
         "ntp": _ntp_context(status.get("control_metadata")),
@@ -560,6 +600,8 @@ def _render_aggregate_rows(
         "dup",
         "fail",
         "ffail",
+        "queue",
+        "sch",
         "ooo",
         "reord",
         "context",
@@ -589,6 +631,8 @@ def _render_aggregate_rows(
             _compact_counter(row["duplicate_packets"]),
             _compact_counter(row["send_failed_packets"]),
             _compact_counter(row["fanout_send_failed_packets"]),
+            _compact_counter(row["queue_pressure"]),
+            _compact_counter(row["scheduler_health"]),
             _compact_counter(row["reordered"]),
             _compact_counter(row["reorder_needed"]),
             _truncate(str(row["extra"]), CONTEXT_WIDTH),
@@ -619,6 +663,10 @@ def _render_aggregate_rows(
     if service_control:
         lines.append("")
         lines.extend(service_control)
+    service_policy = _render_service_policy_rows(rows)
+    if service_policy:
+        lines.append("")
+        lines.extend(service_policy)
     path_control = _render_path_control_rows(rows)
     if path_control:
         lines.append("")
@@ -691,7 +739,24 @@ def _render_service_control_rows(rows: list[dict[str, object]]) -> list[str]:
     service_rows = [row for row in rows if row.get("row_type") == "service"]
     if not service_rows:
         return []
-    headers = ["service", "sys", "gl", "ntp", "ctx", "crx", "clock", "paths", "svc", "pol", "err", "off", "lat", "last"]
+    headers = [
+        "service",
+        "sys",
+        "gl",
+        "ntp",
+        "lsch",
+        "psch",
+        "ctx",
+        "crx",
+        "clock",
+        "paths",
+        "svc",
+        "pol",
+        "err",
+        "off",
+        "lat",
+        "last",
+    ]
     rendered_rows = [_service_control_cells(row) for row in service_rows]
     return _render_named_table("service time/control", headers, rendered_rows)
 
@@ -704,6 +769,8 @@ def _service_control_cells(row: dict[str, object]) -> list[str]:
         str(row["system_time"]),
         str(row["gatherlink_time"]),
         str(row["ntp"]),
+        _scheduler_mode_context(metadata.get("local_scheduler")),
+        _scheduler_mode_context(metadata.get("peer_scheduler")),
         _control_counter_summary(metadata.get("sent")),
         _control_counter_summary(metadata.get("received")),
         _truncate(_internal_clock_context(metadata.get("internal_clock")) or "-", 36),
@@ -726,6 +793,37 @@ def _render_path_control_rows(rows: list[dict[str, object]]) -> list[str]:
     return _render_named_table("path control", headers, rendered_rows)
 
 
+def _render_service_policy_rows(rows: list[dict[str, object]]) -> list[str]:
+    """Render Python-owned service meaning used by scheduler policy."""
+    rendered_rows: list[list[str]] = []
+    for row in rows:
+        if row.get("row_type") != "service":
+            continue
+        service_config = row.get("service_config")
+        if not isinstance(service_config, list):
+            continue
+        for item in service_config:
+            if not isinstance(item, dict):
+                continue
+            rendered_rows.append(
+                [
+                    str(row["service"]),
+                    str(item.get("name") or "-"),
+                    str(item.get("traffic_class") or "unknown"),
+                    str(item.get("priority") or "normal"),
+                    _truncate(str(item.get("listen") or "-"), 28),
+                    _truncate(str(item.get("target") or "-"), 28),
+                ]
+            )
+    if not rendered_rows:
+        return []
+    return _render_named_table(
+        "service policy",
+        ["runner", "service", "class", "prio", "listen", "target"],
+        rendered_rows,
+    )
+
+
 def _path_control_cells(row: dict[str, object]) -> list[str]:
     metadata = row.get("control_metadata")
     metadata = metadata if isinstance(metadata, dict) else {}
@@ -740,6 +838,18 @@ def _path_control_cells(row: dict[str, object]) -> list[str]:
         _path_mtu_context(metadata, path_name),
         _path_latency_context(metadata, path_name),
     ]
+
+
+def _scheduler_mode_context(value: object) -> str:
+    """Return configured/effective TX scheduler context for monitor tables."""
+    if not isinstance(value, dict):
+        return "-"
+    configured = str(value.get("configured_mode") or "-")
+    effective = str(value.get("effective_mode") or configured)
+    rust_mode = str(value.get("rust_mode") or "-")
+    if configured == effective:
+        return _truncate(configured, 22)
+    return _truncate(f"{configured}->{effective}/{rust_mode}", 22)
 
 
 def _render_named_table(title: str, headers: list[str], rows: list[list[str]]) -> list[str]:
@@ -816,6 +926,117 @@ def _data_units(decimal_units: bool) -> list[str]:
 
 def _bit_units(decimal_units: bool) -> list[str]:
     return ["bit", "Kbit", "Mbit", "Gbit", "Tbit"] if decimal_units else ["bit", "Kibit", "Mibit", "Gibit", "Tibit"]
+
+
+def _queue_pressure_context(status: dict[str, object]) -> str:
+    """Return compact queue pressure from status facts, or not_reported."""
+    packets = status.get("queue_depth_packets")
+    bytes_ = status.get("queue_depth_bytes")
+    age_us = status.get("queue_oldest_age_us")
+    if packets is None and bytes_ is None and age_us is None:
+        return "not_reported"
+    pieces = []
+    if packets is not None:
+        pieces.append(f"p={int(packets)}")
+    if bytes_ is not None:
+        pieces.append(f"b={_format_bytes(int(bytes_), human_units=True, decimal_units=False)}")
+    if age_us is not None:
+        pieces.append(f"a={_format_latency_us(int(age_us))}")
+    return "/".join(pieces) if pieces else "not_reported"
+
+
+def _scheduler_health_context(status: dict[str, object]) -> str:
+    """Return compact Python scheduler health for monitor rows when facts exist."""
+    if not _has_scheduler_status_facts(status):
+        return "not_reported"
+    packets = _status_int(status.get("packets"))
+    missed = _status_int(status.get("missed_packets")) + _status_int(status.get("qdisc_dropped_packets"))
+    denominator = packets + missed
+    loss_ppm = _status_int(status.get("loss_ppm"))
+    if denominator > 0 and "loss_ppm" not in status:
+        loss_ppm = min(1_000_000, missed * 1_000_000 // denominator)
+    metrics = PathSchedulerMetrics(
+        path_name=str(status.get("path") or "path"),
+        path_id=0,
+        tx_capacity_bps=_optional_status_int(status.get("tx_capacity_bps")),
+        rx_capacity_bps=_optional_status_int(status.get("rx_capacity_bps")),
+        tx_latency_current_us=_optional_status_int(status.get("tx_latency_current_us")),
+        tx_latency_mean_us=_optional_status_int(status.get("tx_latency_mean_us")),
+        rx_latency_current_us=_optional_status_int(status.get("rx_latency_current_us")),
+        rx_latency_mean_us=_optional_status_int(status.get("rx_latency_mean_us")),
+        loss_ppm=min(1_000_000, max(0, loss_ppm)),
+        queue_depth_packets=_status_int(status.get("queue_depth_packets")),
+        queue_depth_bytes=_status_int(status.get("queue_depth_bytes")),
+        queue_oldest_age_us=_status_int(status.get("queue_oldest_age_us")),
+        send_failures=_status_int(status.get("send_failed_packets")),
+        receive_gaps=_status_int(status.get("packets_needing_reorder")),
+        reorder_depth_packets=_status_int(status.get("reorder_depth_packets")),
+        local_drops=_status_int(status.get("qdisc_dropped_packets")) + _status_int(status.get("security_drop_packets")),
+        scheduler_in_flight_packets=_status_int(status.get("scheduler_in_flight_packets")),
+        scheduler_in_flight_bytes=_status_int(status.get("scheduler_in_flight_bytes")),
+        scheduler_predicted_delivery_us=_status_int(status.get("scheduler_predicted_delivery_us")),
+        reorder_buffer_packets=_status_int(status.get("reorder_buffer_packets")),
+        reorder_buffer_oldest_age_us=_status_int(status.get("reorder_buffer_oldest_age_us")),
+        socket_receive_buffer_bytes=_status_int(status.get("socket_receive_buffer_bytes")),
+        socket_send_buffer_bytes=_status_int(status.get("socket_send_buffer_bytes")),
+        socket_drain_quantum=_status_int(status.get("socket_drain_quantum")),
+        stale_control_age_us=_status_int(status.get("stale_control_age_us")),
+    )
+    score = score_path(metrics)
+    label = {"alive": "ok", "degraded": "deg", "down": "down"}[score.health]
+    reasons = [reason for reason in score.reasons if reason != "healthy"]
+    suffix = f":{','.join(reasons[:2])}" if reasons else ""
+    return f"{label}/s{score.score}/w{score.weight}{suffix}"
+
+
+def _has_scheduler_status_facts(status: dict[str, object]) -> bool:
+    """Return whether a status row carries enough facts to score without guesswork."""
+    return any(
+        key in status
+        for key in [
+            "tx_capacity_bps",
+            "rx_capacity_bps",
+            "tx_latency_current_us",
+            "tx_latency_mean_us",
+            "rx_latency_current_us",
+            "rx_latency_mean_us",
+            "loss_ppm",
+            "queue_depth_packets",
+            "queue_depth_bytes",
+            "queue_oldest_age_us",
+            "send_failed_packets",
+            "packets_needing_reorder",
+            "reorder_depth_packets",
+            "qdisc_dropped_packets",
+            "security_drop_packets",
+            "stale_control_age_us",
+            "scheduler_in_flight_packets",
+            "scheduler_in_flight_bytes",
+            "scheduler_predicted_delivery_us",
+            "reorder_buffer_packets",
+            "reorder_buffer_oldest_age_us",
+            "socket_receive_buffer_bytes",
+            "socket_send_buffer_bytes",
+            "socket_drain_quantum",
+        ]
+    )
+
+
+def _status_int(value: object) -> int:
+    """Convert monitor status facts to a non-negative integer."""
+    converted = _optional_status_int(value)
+    return converted if converted is not None else 0
+
+
+def _optional_status_int(value: object) -> int | None:
+    """Convert monitor status facts to an optional non-negative integer."""
+    if value is None or value == "not_reported":
+        return None
+    try:
+        converted = int(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0, converted)
 
 
 def _status_context(status: dict[str, object]) -> str:
@@ -925,6 +1146,8 @@ def _internal_clock_context(internal_clock: object) -> str:
     offset_us = internal_clock.get("offset_us")
     mean_offset_us = internal_clock.get("mean_offset_us")
     rtt_us = internal_clock.get("rtt_us")
+    error_budget_us = internal_clock.get("error_budget_us")
+    confidence = internal_clock.get("confidence")
     samples = internal_clock.get("samples")
     if role == "sink-authoritative":
         return "clk=sink"
@@ -936,7 +1159,9 @@ def _internal_clock_context(internal_clock: object) -> str:
     )
     rtt = _format_latency_us(int(rtt_us)) if rtt_us is not None else "-"
     sample_text = f" n={samples}" if samples else ""
-    return f"clk=off{offset} rtt={rtt}{sample_text}"
+    error_text = f" err={_format_latency_us(int(error_budget_us))}" if error_budget_us is not None else ""
+    confidence_text = f" {confidence}" if confidence else ""
+    return f"clk=off{offset} rtt={rtt}{error_text}{sample_text}{confidence_text}"
 
 
 def _path_control_context(control_metadata: object, path_name: str) -> str:
@@ -974,7 +1199,9 @@ def _control_counter_summary(counter: object) -> str:
         return "-"
     frames = int(counter.get("frames", 0) or 0)
     bytes_seen = int(counter.get("bytes", 0) or 0)
-    return f"{frames}/{_format_bytes(bytes_seen, human_units=True, decimal_units=False)}"
+    gap_us = int(counter.get("last_gap_us", 0) or 0)
+    gap = f"/g={_format_latency_us(gap_us)}" if gap_us > 0 else ""
+    return f"{frames}/{_format_bytes(bytes_seen, human_units=True, decimal_units=False)}{gap}"
 
 
 def _path_capacity_context(control_metadata: object, path_name: str) -> str:
@@ -1050,7 +1277,27 @@ def _path_latency_context(control_metadata: dict[str, object], path_name: str) -
     latency = _path_latency_for(control_metadata, path_name)
     if latency is None:
         return "-"
-    return f"tl={_latency_pair(latency, 'tx')} rl={_latency_pair(latency, 'rx')}"
+    source = str(latency.get("source") or "unknown")
+    if source == "rejected":
+        reason = str(latency.get("rejection_reason") or "sample")
+        return f"src=reject reason={reason} tl={_latency_pair(latency, 'tx')} rl={_latency_pair(latency, 'rx')}"
+    confidence = str(latency.get("confidence") or "-")
+    return (
+        f"src={_short_latency_source(source)} conf={confidence} "
+        f"tl={_latency_pair(latency, 'tx')} rl={_latency_pair(latency, 'rx')}"
+    )
+
+
+def _short_latency_source(source: str) -> str:
+    if source == "clock-synced-one-way":
+        return "clock"
+    if source == "data-traffic-one-way":
+        return "data"
+    if source == "reply-rtt-half":
+        return "rtt/2"
+    if source == "peer":
+        return "peer"
+    return source
 
 
 def _path_latency_for(control_metadata: dict[str, object], path_name: str) -> dict[str, object] | None:
@@ -1178,17 +1425,22 @@ def _aggregate_legend() -> list[str]:
         "  dup      unexpected duplicate user-service frames suppressed before application UDP emit",
         "  fail     path send failures observed by the Rust UDP transport",
         "  ffail    fanout-copy send failures; useful when an expected duplicate copy cannot be sent",
+        "  queue    scheduler-visible queue pressure as packets, bytes, and oldest queued age when known",
+        "  sch      Python scheduler health summary: ok/deg/down, score, weight, and leading reasons",
         "  ooo      out-of-order packets observed by the receiver",
         "  reord    packets that required reorder buffering",
         "  context  service-specific context such as target, listen, latest payload, or systemd unit",
         "  sys      local wall time reported by that service process",
         "  gl       Gatherlink time derived from latest sink-authoritative control metadata",
         "  ntp      sink-side NTP state, with source shown as state/source when direct NTP is active",
+        "  lsch     local TX scheduler status as configured/effective/Rust mode when they differ",
+        "  psch     peer TX scheduler status learned through control metadata; diagnostic only",
         "  ctx/crx  control metaband frames/bytes transmitted/received; aggregate in service table, per path below",
         "  clock    internal monotonic clock role, offset, mean offset, RTT, and sample count",
         "  paths    number of path-id/name mappings learned through control metadata",
         "  svc      number of service-id/name mappings learned through control metadata; endpoints stay in config",
         "  pol      number of peer service scheduler policies learned for Python-owned receive expectations",
+        "  class    Python-owned service traffic class used to compile scheduler policy; Rust receives only primitives",
         "  err      endpoint assertion mismatches that stopped traffic for a service",
         "  off      peer service-disable assertions currently advertised through control metadata",
         "  svc_off  compact context summary of peer-disabled services",

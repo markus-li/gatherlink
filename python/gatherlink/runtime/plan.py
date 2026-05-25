@@ -63,6 +63,7 @@ def _plan_service_steps(config: RuntimeConfig, *, first_order: int) -> list[Runt
                     "priority": service.priority,
                     "priority_value": service.priority_value,
                     "return_mode": service.return_mode,
+                    "scheduler_poll_batch_packets": service.scheduler_poll_batch_packets,
                 },
             )
         )

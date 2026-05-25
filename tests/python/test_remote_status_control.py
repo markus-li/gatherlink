@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from gatherlink.control.remote_status import (
+    REMOTE_STATUS_PENDING_TTL_SECONDS,
     RemoteStatusState,
     decode_message,
     encode_request,
@@ -103,6 +104,33 @@ def test_remote_status_handler_caches_response_for_monitor() -> None:
     assert state.cache["sink"]["request_id"] == 8
     assert state.cache["sink"]["source_path_id"] == 4
     assert state.cache["sink"]["status"] == {"running": True}
+
+
+def test_remote_status_response_acknowledges_pending_internal_request() -> None:
+    dataplane = FakeDataplane()
+    state = RemoteStatusState()
+    state.request(ttl_seconds=30)
+    assert send_request_if_due(dataplane, state)
+    request = decode_message(dataplane.transmitted[0][1])
+    assert request is not None
+    assert state.status()["pending_request_count"] == 1
+
+    event = FakeReservedEvent(SERVICE_ID_REMOTE_STATUS, 4, 9, encode_response(request.request_id, {"running": True}))
+    assert handle_event(event, dataplane=dataplane, state=state, peer_name="sink", status_provider=lambda: {})
+
+    status = state.status()
+    assert status["pending_request_count"] == 0
+    assert status["acknowledged_responses"] == 1
+
+
+def test_remote_status_expires_unacknowledged_internal_requests() -> None:
+    state = RemoteStatusState()
+    state.pending_requests[7] = -REMOTE_STATUS_PENDING_TTL_SECONDS * 2
+
+    status = state.status()
+
+    assert status["pending_request_count"] == 0
+    assert status["timed_out_requests"] == 1
 
 
 def test_remote_status_request_sends_only_when_enabled() -> None:

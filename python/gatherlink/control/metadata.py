@@ -33,6 +33,9 @@ def empty_control_metadata() -> dict[str, object]:
         "service_disable_count": 0,
         "service_scheduler_policies": {},
         "service_scheduler_policy_count": 0,
+        "local_scheduler": {},
+        "peer_scheduler": {},
+        "peer_scheduler_count": 0,
         "service_endpoint_mismatches": {},
         "service_endpoint_mismatch_count": 0,
         "path_capacity": {},
@@ -41,14 +44,24 @@ def empty_control_metadata() -> dict[str, object]:
         "path_latency_count": 0,
         "path_mtu": {},
         "path_mtu_count": 0,
+        "path_pressure": {},
+        "path_pressure_count": 0,
         "internal_clock": {
             "role": None,
             "offset_us": None,
             "mean_offset_us": None,
             "rtt_us": None,
             "mean_rtt_us": None,
+            "best_rtt_us": None,
+            "error_budget_us": None,
+            "confidence": None,
             "samples": 0,
             "path": None,
+            "path_samples": 0,
+            "path_mean_offset_us": None,
+            "path_mean_rtt_us": None,
+            "path_error_budget_us": None,
+            "path_confidence": None,
             "last_at": None,
         },
         "sink_time": {
@@ -202,6 +215,7 @@ def record_control_metadata_sent(
     path_capacity: dict[str, dict[str, int | str | None]],
     path_latency: dict[str, dict[str, int | str | None]],
     path_mtu: dict[str, dict[str, int | str | None]] | None = None,
+    path_pressure: dict[str, dict[str, int | str | None]] | None = None,
     internal_clock: dict[str, int | str | None],
     sink_time: list[SinkTimeMessage],
     ntp_sample: DirectNtpSample | None = None,
@@ -220,6 +234,7 @@ def record_control_metadata_sent(
     merge_control_path_capacity(control_metadata, path_capacity)
     merge_control_path_latency(control_metadata, path_latency)
     merge_control_path_mtu(control_metadata, path_mtu or {})
+    merge_control_path_pressure(control_metadata, path_pressure or {})
     merge_internal_clock_sync(control_metadata, internal_clock)
     record_sink_time(
         control_metadata,
@@ -249,7 +264,11 @@ def record_control_metadata_received(
         + len(control_frame.service_scheduler_policies)
         + len(control_frame.path_capacity_bps)
         + len(control_frame.path_latency_us)
+        + len(control_frame.path_latency_quality)
         + len(control_frame.path_mtu)
+        + len(control_frame.path_pressure)
+        + (1 if control_frame.scheduler_status is not None else 0)
+        + len(control_frame.data_transmit_samples)
         + len(control_frame.internal_clock_sync)
         + len(control_frame.sink_time)
     )
@@ -265,7 +284,9 @@ def record_control_metadata_received(
     merge_control_service_endpoint_assertions(control_metadata, control_frame.service_endpoint_assertions)
     merge_control_service_disables(control_metadata, control_frame.service_disables)
     merge_control_service_scheduler_policies(control_metadata, control_frame.service_scheduler_policies)
+    merge_peer_scheduler_status(control_metadata, control_frame.scheduler_status)
     record_control_path_mtu(control_metadata, control_frame.path_mtu, control_frame.path_metadata, {})
+    record_control_path_pressure(control_metadata, control_frame.path_pressure, control_frame.path_metadata, {})
 
 
 def record_path_control(
@@ -281,8 +302,8 @@ def record_path_control(
     path_entry = path_control.setdefault(
         path_name,
         {
-            "tx": {"frames": 0, "messages": 0, "bytes": 0},
-            "rx": {"frames": 0, "messages": 0, "bytes": 0},
+            "tx": {"frames": 0, "messages": 0, "bytes": 0, "last_at_us": 0, "last_gap_us": 0},
+            "rx": {"frames": 0, "messages": 0, "bytes": 0, "last_at_us": 0, "last_gap_us": 0},
         },
     )
     assert isinstance(path_entry, dict)
@@ -291,6 +312,10 @@ def record_path_control(
     counters["frames"] = int(counters["frames"]) + 1
     counters["messages"] = int(counters["messages"]) + message_count
     counters["bytes"] = int(counters["bytes"]) + frame_bytes
+    now_us = internal_monotonic_us()
+    previous_us = int(counters.get("last_at_us", 0) or 0)
+    counters["last_gap_us"] = max(0, now_us - previous_us) if previous_us > 0 else 0
+    counters["last_at_us"] = now_us
     control_metadata["path_control_count"] = len(path_control)
 
 
@@ -338,17 +363,70 @@ def merge_control_service_disables(
 
 def merge_control_service_scheduler_policies(
     control_metadata: dict[str, object],
-    service_scheduler_policies: dict[int, tuple[int, int]],
+    service_scheduler_policies: dict[int, tuple[int, int, int, int, int, int]],
 ) -> None:
     """Merge peer-advertised service scheduler policy facts for Python to compile locally."""
     recorded = control_metadata["service_scheduler_policies"]
     assert isinstance(recorded, dict)
-    for service_id, (fanout, fanout_below_bytes) in service_scheduler_policies.items():
+    for service_id, (
+        fanout,
+        fanout_below_bytes,
+        flowlet_idle_us,
+        flowlet_max_hold_us,
+        path_run_datagrams,
+        path_policy,
+    ) in service_scheduler_policies.items():
         recorded[str(service_id)] = {
             "fanout": int(fanout),
             "fanout_below_bytes": int(fanout_below_bytes),
+            "flowlet_idle_us": int(flowlet_idle_us),
+            "flowlet_max_hold_us": int(flowlet_max_hold_us),
+            "path_run_datagrams": int(path_run_datagrams),
+            "path_policy": _service_path_policy_name(path_policy),
         }
     control_metadata["service_scheduler_policy_count"] = len(recorded)
+
+
+def _service_path_policy_name(policy: int) -> str:
+    """Decode compact control metadata into the Python-facing primitive name."""
+    return {
+        0: "inherit",
+        1: "single_best_path",
+        2: "weighted_round_robin",
+    }.get(int(policy), "inherit")
+
+
+def set_local_scheduler_status(
+    control_metadata: dict[str, object],
+    *,
+    configured_mode: str,
+    effective_mode: str,
+    rust_mode: str,
+) -> None:
+    """Record the scheduler this node uses for local TX decisions."""
+    control_metadata["local_scheduler"] = {
+        "configured_mode": configured_mode,
+        "effective_mode": effective_mode,
+        "rust_mode": rust_mode,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+
+
+def merge_peer_scheduler_status(
+    control_metadata: dict[str, object],
+    scheduler_status: tuple[str, str, str] | None,
+) -> None:
+    """Record peer TX scheduler status without applying it as local policy."""
+    if scheduler_status is None:
+        return
+    configured_mode, effective_mode, rust_mode = scheduler_status
+    control_metadata["peer_scheduler"] = {
+        "configured_mode": configured_mode,
+        "effective_mode": effective_mode,
+        "rust_mode": rust_mode,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    control_metadata["peer_scheduler_count"] = 1
 
 
 def verify_service_endpoint_assertions(
@@ -425,9 +503,22 @@ def merge_control_path_mtu(
     control_metadata["path_mtu_count"] = len(recorded)
 
 
+def merge_control_path_pressure(
+    control_metadata: dict[str, object],
+    path_pressure: dict[str, dict[str, int | str | None]],
+) -> None:
+    """Merge sparse receiver-pressure updates for Python scheduler policy."""
+    recorded = control_metadata["path_pressure"]
+    assert isinstance(recorded, dict)
+    for path_name, pressure in path_pressure.items():
+        existing = recorded.get(path_name)
+        recorded[path_name] = merge_pressure_record(existing, pressure) if isinstance(existing, dict) else pressure
+    control_metadata["path_pressure_count"] = len(recorded)
+
+
 def merge_internal_clock_sync(
     control_metadata: dict[str, object],
-    update: dict[str, int | str | None],
+    update: dict[str, object],
 ) -> None:
     """Merge the latest internal clock sync observation into service metadata."""
     if not update:
@@ -484,6 +575,26 @@ def record_control_path_latency(
     merge_control_path_latency(control_metadata, named_latency)
 
 
+def record_control_path_latency_quality(
+    control_metadata: dict[str, object],
+    path_latency_quality: dict[int, tuple[str | None, str | None]],
+    learned_path_names_by_id: dict[int, str],
+    configured_path_names_by_id: dict[int, str],
+) -> None:
+    """Store peer-advertised latency provenance next to already-merged latency values."""
+    named_latency: dict[str, dict[str, int | str | None]] = {}
+    for path_id, (source, confidence) in path_latency_quality.items():
+        path_name = (
+            learned_path_names_by_id.get(path_id) or configured_path_names_by_id.get(path_id) or f"path-id:{path_id}"
+        )
+        named_latency[path_name] = {
+            "source": source or "peer",
+            "confidence": confidence,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    merge_control_path_latency(control_metadata, named_latency)
+
+
 def record_control_path_mtu(
     control_metadata: dict[str, object],
     path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]],
@@ -508,6 +619,70 @@ def record_control_path_mtu(
             "updated_at": datetime.now(UTC).isoformat(),
         }
     merge_control_path_mtu(control_metadata, named_mtu)
+
+
+def record_control_path_pressure(
+    control_metadata: dict[str, object],
+    path_pressure: dict[
+        int,
+        tuple[
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+            int,
+        ],
+    ],
+    learned_path_names_by_id: dict[int, str],
+    configured_path_names_by_id: dict[int, str],
+) -> None:
+    """Store peer receiver pressure using the best path name currently known."""
+    named_pressure: dict[str, dict[str, int | str | None]] = {}
+    for path_id, pressure in path_pressure.items():
+        path_name = (
+            learned_path_names_by_id.get(path_id) or configured_path_names_by_id.get(path_id) or f"path-id:{path_id}"
+        )
+        (
+            loss_ppm,
+            queue_depth_packets,
+            queue_depth_bytes,
+            queue_oldest_age_us,
+            send_failures,
+            receive_gaps,
+            reorder_depth_packets,
+            local_drops,
+            scheduler_in_flight_packets,
+            scheduler_in_flight_bytes,
+            scheduler_predicted_delivery_us,
+            reorder_buffer_packets,
+            reorder_buffer_oldest_age_us,
+        ) = pressure
+        named_pressure[path_name] = {
+            "loss_ppm": loss_ppm,
+            "queue_depth_packets": queue_depth_packets,
+            "queue_depth_bytes": queue_depth_bytes,
+            "queue_oldest_age_us": queue_oldest_age_us,
+            "send_failures": send_failures,
+            "receive_gaps": receive_gaps,
+            "reorder_depth_packets": reorder_depth_packets,
+            "local_drops": local_drops,
+            "scheduler_in_flight_packets": scheduler_in_flight_packets,
+            "scheduler_in_flight_bytes": scheduler_in_flight_bytes,
+            "scheduler_predicted_delivery_us": scheduler_predicted_delivery_us,
+            "reorder_buffer_packets": reorder_buffer_packets,
+            "reorder_buffer_oldest_age_us": reorder_buffer_oldest_age_us,
+            "source": "peer",
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    merge_control_path_pressure(control_metadata, named_pressure)
 
 
 def clock_sync_sent_status(path_clock_sync: list[InternalClockSyncMessage]) -> dict[str, int | str | None]:
@@ -581,6 +756,66 @@ def latency_by_path_id(
     return latency_by_id
 
 
+def latency_quality_by_path_id(
+    path_latency: dict[str, dict[str, int | str | None]],
+    path_ids: dict[str, int],
+) -> dict[int, tuple[str | None, str | None]]:
+    """Convert named latency provenance into path-id keyed control payloads."""
+    quality_by_id: dict[int, tuple[str | None, str | None]] = {}
+    for path_name, latency in path_latency.items():
+        if path_name not in path_ids:
+            continue
+        quality_by_id[path_ids[path_name]] = (
+            str_or_none(latency.get("source")),
+            str_or_none(latency.get("confidence")),
+        )
+    return quality_by_id
+
+
+def pressure_by_path_id(
+    path_pressure: dict[str, dict[str, int | str | None]],
+    path_ids: dict[str, int],
+) -> dict[
+    int,
+    tuple[
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+    ],
+]:
+    """Convert named receiver-pressure metadata into path-id keyed control payloads."""
+    pressure_by_id = {}
+    for path_name, pressure in path_pressure.items():
+        if path_name not in path_ids:
+            continue
+        pressure_by_id[path_ids[path_name]] = (
+            counter_int(pressure.get("loss_ppm")),
+            counter_int(pressure.get("queue_depth_packets")),
+            counter_int(pressure.get("queue_depth_bytes")),
+            counter_int(pressure.get("queue_oldest_age_us")),
+            counter_int(pressure.get("send_failures")),
+            counter_int(pressure.get("receive_gaps")),
+            counter_int(pressure.get("reorder_depth_packets")),
+            counter_int(pressure.get("local_drops")),
+            counter_int(pressure.get("scheduler_in_flight_packets")),
+            counter_int(pressure.get("scheduler_in_flight_bytes")),
+            counter_int(pressure.get("scheduler_predicted_delivery_us")),
+            counter_int(pressure.get("reorder_buffer_packets")),
+            counter_int(pressure.get("reorder_buffer_oldest_age_us")),
+        )
+    return pressure_by_id
+
+
 def mtu_by_path_id(
     path_mtu: dict[str, dict[str, int | str | None]],
     path_ids: dict[str, int],
@@ -609,6 +844,22 @@ def int_or_none(value: object) -> int | None:
     return None
 
 
+def str_or_none(value: object) -> str | None:
+    """Return a non-empty string when metadata carries one, otherwise ``None``."""
+    if value is None:
+        return None
+    converted = str(value)
+    return converted or None
+
+
+def counter_int(value: object) -> int:
+    """Return a non-negative counter for wire fields where zero is meaningful."""
+    converted = int_or_none(value)
+    if converted is None or converted <= 0:
+        return 0
+    return converted
+
+
 def merge_capacity_record(
     existing: dict[str, int | str | None],
     update: dict[str, int | str | None],
@@ -629,7 +880,16 @@ def merge_latency_record(
     """Merge sparse latency updates without deleting the opposite direction."""
     merged = dict(existing)
     for key, value in update.items():
-        if value is None and key in {"tx_current_us", "tx_mean_us", "rx_current_us", "rx_mean_us"}:
+        if value is None and key in {
+            "tx_current_us",
+            "tx_mean_us",
+            "tx_jitter_us",
+            "tx_p95_us",
+            "rx_current_us",
+            "rx_mean_us",
+            "rx_jitter_us",
+            "rx_p95_us",
+        }:
             continue
         merged[key] = value
     return merged
@@ -662,6 +922,33 @@ def merge_mtu_record(
         merged["frame_mtu"] = merged["tx_frame_mtu"]
     if merged.get("tx_payload_mtu") is not None:
         merged["payload_mtu"] = merged["tx_payload_mtu"]
+    return merged
+
+
+def merge_pressure_record(
+    existing: dict[str, int | str | None],
+    update: dict[str, int | str | None],
+) -> dict[str, int | str | None]:
+    """Merge receiver-pressure counters without preserving stale numeric values."""
+    merged = dict(existing)
+    for key, value in update.items():
+        if value is None and key in {
+            "loss_ppm",
+            "queue_depth_packets",
+            "queue_depth_bytes",
+            "queue_oldest_age_us",
+            "send_failures",
+            "receive_gaps",
+            "reorder_depth_packets",
+            "local_drops",
+            "scheduler_in_flight_packets",
+            "scheduler_in_flight_bytes",
+            "scheduler_predicted_delivery_us",
+            "reorder_buffer_packets",
+            "reorder_buffer_oldest_age_us",
+        }:
+            continue
+        merged[key] = value
     return merged
 
 

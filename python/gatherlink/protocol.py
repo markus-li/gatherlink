@@ -44,9 +44,19 @@ CONTROL_TYPE_SERVICE_ENDPOINT_ASSERTION = 9
 CONTROL_TYPE_SERVICE_DISABLE = 10
 CONTROL_TYPE_PATH_MTU = 11
 CONTROL_TYPE_SERVICE_SCHEDULER_POLICY = 12
+CONTROL_TYPE_PATH_PRESSURE = 13
+CONTROL_TYPE_SCHEDULER_STATUS = 14
+CONTROL_TYPE_DATA_TRANSMIT_SAMPLE = 15
+CONTROL_TYPE_PATH_LATENCY_QUALITY = 16
 SEQUENCE_SPACE = 1 << 64
 DEFAULT_SESSION_ID = 0
 DEFAULT_SERVICE_ID = USER_SERVICE_ID_START
+
+ServiceSchedulerPolicy = tuple[int, int, int, int, int, int]
+PathPressure = tuple[int, int, int, int, int, int, int, int, int, int, int, int, int]
+SchedulerStatus = tuple[str, str, str]
+DataTransmitSample = tuple[int, int, int, int]
+PathLatencyQuality = tuple[str | None, str | None]
 
 
 @dataclass(frozen=True)
@@ -66,10 +76,14 @@ class ControlFrame:
     service_metadata: dict[int, str]
     service_endpoint_assertions: dict[int, str]
     service_disables: dict[int, str]
-    service_scheduler_policies: dict[int, tuple[int, int]]
+    service_scheduler_policies: dict[int, ServiceSchedulerPolicy]
     path_capacity_bps: dict[int, tuple[int | None, int | None]]
     path_latency_us: dict[int, tuple[int | None, int | None, int | None, int | None]]
+    path_latency_quality: dict[int, PathLatencyQuality]
     path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]]
+    path_pressure: dict[int, PathPressure]
+    scheduler_status: SchedulerStatus | None
+    data_transmit_samples: list[DataTransmitSample]
     internal_clock_sync: list[InternalClockSyncMessage]
     sink_time: list[SinkTimeMessage]
 
@@ -157,10 +171,14 @@ def encode_control_payload(
     service_metadata: dict[int, str] | None = None,
     service_endpoint_assertions: dict[int, str] | None = None,
     service_disables: dict[int, str] | None = None,
-    service_scheduler_policies: dict[int, tuple[int, int]] | None = None,
+    service_scheduler_policies: dict[int, ServiceSchedulerPolicy] | None = None,
     path_capacity_bps: dict[int, tuple[int | None, int | None]] | None = None,
     path_latency_us: dict[int, tuple[int | None, int | None, int | None, int | None]] | None = None,
+    path_latency_quality: dict[int, PathLatencyQuality] | None = None,
     path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]] | None = None,
+    path_pressure: dict[int, PathPressure] | None = None,
+    scheduler_status: SchedulerStatus | None = None,
+    data_transmit_samples: list[DataTransmitSample] | None = None,
     path_clock_sync: list[InternalClockSyncMessage] | None = None,
     sink_time: list[SinkTimeMessage] | None = None,
 ) -> bytes:
@@ -171,8 +189,11 @@ def encode_control_payload(
     service_scheduler_policies = service_scheduler_policies or {}
     path_capacity_bps = path_capacity_bps or {}
     path_latency_us = path_latency_us or {}
+    path_latency_quality = path_latency_quality or {}
     path_mtu = path_mtu or {}
+    path_pressure = path_pressure or {}
     path_clock_sync = path_clock_sync or []
+    data_transmit_samples = data_transmit_samples or []
     sink_time = sink_time or []
     message_count = (
         len(path_metadata)
@@ -182,7 +203,11 @@ def encode_control_payload(
         + len(service_scheduler_policies)
         + len(path_capacity_bps)
         + len(path_latency_us)
+        + len(path_latency_quality)
         + len(path_mtu)
+        + len(path_pressure)
+        + (1 if scheduler_status is not None else 0)
+        + len(data_transmit_samples)
         + len(path_clock_sync)
         + len(sink_time)
     )
@@ -198,7 +223,11 @@ def encode_control_payload(
     _encode_service_scheduler_policies(output, service_scheduler_policies)
     _encode_path_capacity(output, path_capacity_bps)
     _encode_path_latency(output, path_latency_us)
+    _encode_path_latency_quality(output, path_latency_quality)
     _encode_path_mtu(output, path_mtu)
+    _encode_path_pressure(output, path_pressure)
+    _encode_scheduler_status(output, scheduler_status)
+    _encode_data_transmit_samples(output, data_transmit_samples)
     _encode_internal_clock_sync(output, path_clock_sync)
     _encode_sink_time(output, sink_time)
     if len(output) > _u16_max():
@@ -221,10 +250,14 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
     service_metadata: dict[int, str] = {}
     service_endpoint_assertions: dict[int, str] = {}
     service_disables: dict[int, str] = {}
-    service_scheduler_policies: dict[int, tuple[int, int]] = {}
+    service_scheduler_policies: dict[int, ServiceSchedulerPolicy] = {}
     path_capacity_bps: dict[int, tuple[int | None, int | None]] = {}
     path_latency_us: dict[int, tuple[int | None, int | None, int | None, int | None]] = {}
+    path_latency_quality: dict[int, PathLatencyQuality] = {}
     path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]] = {}
+    path_pressure: dict[int, PathPressure] = {}
+    scheduler_status: SchedulerStatus | None = None
+    data_transmit_samples: list[DataTransmitSample] = []
     internal_clock_sync: list[InternalClockSyncMessage] = []
     sink_time: list[SinkTimeMessage] = []
     for _ in range(message_count):
@@ -265,8 +298,23 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
             decoded_policy = _decode_service_scheduler_policy_value(value)
             if decoded_policy is None:
                 return None
-            service_id, fanout, fanout_below_bytes = decoded_policy
-            service_scheduler_policies[service_id] = (fanout, fanout_below_bytes)
+            (
+                service_id,
+                fanout,
+                fanout_below_bytes,
+                flowlet_idle_us,
+                flowlet_max_hold_us,
+                path_run_datagrams,
+                path_policy,
+            ) = decoded_policy
+            service_scheduler_policies[service_id] = (
+                fanout,
+                fanout_below_bytes,
+                flowlet_idle_us,
+                flowlet_max_hold_us,
+                path_run_datagrams,
+                path_policy,
+            )
         elif message_type == CONTROL_TYPE_PATH_CAPACITY:
             decoded_capacity = _decode_path_capacity_value(value)
             if decoded_capacity is None:
@@ -279,12 +327,62 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
                 return None
             path_id, tx_current_us, tx_mean_us, rx_current_us, rx_mean_us = decoded_latency
             path_latency_us[path_id] = (tx_current_us, tx_mean_us, rx_current_us, rx_mean_us)
+        elif message_type == CONTROL_TYPE_PATH_LATENCY_QUALITY:
+            decoded_latency_quality = _decode_path_latency_quality_value(value)
+            if decoded_latency_quality is None:
+                return None
+            path_id, source, confidence = decoded_latency_quality
+            path_latency_quality[path_id] = (source, confidence)
         elif message_type == CONTROL_TYPE_PATH_MTU:
             decoded_mtu = _decode_path_mtu_value(value)
             if decoded_mtu is None:
                 return None
             path_id, tx_link_mtu, tx_frame_mtu, rx_link_mtu, rx_frame_mtu = decoded_mtu
             path_mtu[path_id] = (tx_link_mtu, tx_frame_mtu, rx_link_mtu, rx_frame_mtu)
+        elif message_type == CONTROL_TYPE_PATH_PRESSURE:
+            decoded_pressure = _decode_path_pressure_value(value)
+            if decoded_pressure is None:
+                return None
+            (
+                path_id,
+                loss_ppm,
+                queue_depth_packets,
+                queue_depth_bytes,
+                queue_oldest_age_us,
+                send_failures,
+                receive_gaps,
+                reorder_depth_packets,
+                local_drops,
+                scheduler_in_flight_packets,
+                scheduler_in_flight_bytes,
+                scheduler_predicted_delivery_us,
+                reorder_buffer_packets,
+                reorder_buffer_oldest_age_us,
+            ) = decoded_pressure
+            path_pressure[path_id] = (
+                loss_ppm,
+                queue_depth_packets,
+                queue_depth_bytes,
+                queue_oldest_age_us,
+                send_failures,
+                receive_gaps,
+                reorder_depth_packets,
+                local_drops,
+                scheduler_in_flight_packets,
+                scheduler_in_flight_bytes,
+                scheduler_predicted_delivery_us,
+                reorder_buffer_packets,
+                reorder_buffer_oldest_age_us,
+            )
+        elif message_type == CONTROL_TYPE_SCHEDULER_STATUS:
+            scheduler_status = _decode_scheduler_status_value(value)
+            if scheduler_status is None:
+                return None
+        elif message_type == CONTROL_TYPE_DATA_TRANSMIT_SAMPLE:
+            decoded_sample = _decode_data_transmit_sample_value(value)
+            if decoded_sample is None:
+                return None
+            data_transmit_samples.append(decoded_sample)
         elif message_type == CONTROL_TYPE_INTERNAL_CLOCK_SYNC:
             decoded_sync = _decode_internal_clock_sync_value(value)
             if decoded_sync is None:
@@ -305,7 +403,11 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
         service_scheduler_policies=service_scheduler_policies,
         path_capacity_bps=path_capacity_bps,
         path_latency_us=path_latency_us,
+        path_latency_quality=path_latency_quality,
         path_mtu=path_mtu,
+        path_pressure=path_pressure,
+        scheduler_status=scheduler_status,
+        data_transmit_samples=data_transmit_samples,
         internal_clock_sync=internal_clock_sync,
         sink_time=sink_time,
     )
@@ -370,9 +472,21 @@ def _encode_service_disables(output: bytearray, service_disables: dict[int, str]
 
 
 def _encode_service_scheduler_policies(
-    output: bytearray, service_scheduler_policies: dict[int, tuple[int, int]]
+    output: bytearray, service_scheduler_policies: dict[int, ServiceSchedulerPolicy]
 ) -> None:
-    for service_id, (fanout, fanout_below_bytes) in service_scheduler_policies.items():
+    for service_id, policy in service_scheduler_policies.items():
+        if len(policy) == 5:
+            fanout, fanout_below_bytes, flowlet_idle_us, flowlet_max_hold_us, path_run_datagrams = policy
+            path_policy = 0
+        else:
+            (
+                fanout,
+                fanout_below_bytes,
+                flowlet_idle_us,
+                flowlet_max_hold_us,
+                path_run_datagrams,
+                path_policy,
+            ) = policy
         if (
             service_id < USER_SERVICE_ID_START
             or service_id > _u16_max()
@@ -380,13 +494,25 @@ def _encode_service_scheduler_policies(
             or fanout > _u16_max()
             or fanout_below_bytes < 0
             or fanout_below_bytes > _u32_max()
+            or flowlet_idle_us < 0
+            or flowlet_idle_us > _u64_max()
+            or flowlet_max_hold_us < 0
+            or flowlet_max_hold_us > _u64_max()
+            or path_run_datagrams < 0
+            or path_run_datagrams > _u32_max()
+            or path_policy < 0
+            or path_policy > 2
         ):
             raise ValueError("service scheduler policy value out of range")
         output.append(CONTROL_TYPE_SERVICE_SCHEDULER_POLICY)
-        _append_u16(output, 8)
+        _append_u16(output, 29)
         _append_u16(output, service_id)
         _append_u16(output, fanout)
         _append_u32(output, fanout_below_bytes)
+        _append_u64(output, flowlet_idle_us)
+        _append_u64(output, flowlet_max_hold_us)
+        _append_u32(output, path_run_datagrams)
+        output.append(path_policy)
 
 
 def _encode_path_capacity(output: bytearray, path_capacity_bps: dict[int, tuple[int | None, int | None]]) -> None:
@@ -416,6 +542,17 @@ def _encode_path_latency(
         _append_u32(output, _optional_u32(rx_mean_us))
 
 
+def _encode_path_latency_quality(output: bytearray, path_latency_quality: dict[int, PathLatencyQuality]) -> None:
+    for path_id, (source, confidence) in path_latency_quality.items():
+        if path_id < 0 or path_id > _u16_max():
+            raise ValueError("path latency quality path id out of range")
+        output.append(CONTROL_TYPE_PATH_LATENCY_QUALITY)
+        _append_u16(output, 4)
+        _append_u16(output, path_id)
+        output.append(_encode_latency_source(source))
+        output.append(_encode_latency_confidence(confidence))
+
+
 def _encode_path_mtu(
     output: bytearray,
     path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]],
@@ -436,6 +573,82 @@ def _encode_path_mtu(
         _append_u16(output, _optional_u16(tx_frame_mtu))
         _append_u16(output, _optional_u16(rx_link_mtu))
         _append_u16(output, _optional_u16(rx_frame_mtu))
+
+
+def _encode_path_pressure(output: bytearray, path_pressure: dict[int, PathPressure]) -> None:
+    for path_id, pressure in path_pressure.items():
+        if path_id < 0 or path_id > _u16_max():
+            raise ValueError("path pressure path id out of range")
+        (
+            loss_ppm,
+            queue_depth_packets,
+            queue_depth_bytes,
+            queue_oldest_age_us,
+            send_failures,
+            receive_gaps,
+            reorder_depth_packets,
+            local_drops,
+            scheduler_in_flight_packets,
+            scheduler_in_flight_bytes,
+            scheduler_predicted_delivery_us,
+            reorder_buffer_packets,
+            reorder_buffer_oldest_age_us,
+        ) = pressure
+        if loss_ppm > 1_000_000:
+            raise ValueError("path pressure loss value out of range")
+        output.append(CONTROL_TYPE_PATH_PRESSURE)
+        _append_u16(output, 54)
+        _append_u16(output, path_id)
+        _append_u32(output, _counter_u32(loss_ppm))
+        _append_u32(output, _counter_u32(queue_depth_packets))
+        _append_u32(output, _counter_u32(queue_depth_bytes))
+        _append_u32(output, _counter_u32(queue_oldest_age_us))
+        _append_u32(output, _counter_u32(send_failures))
+        _append_u32(output, _counter_u32(receive_gaps))
+        _append_u32(output, _counter_u32(reorder_depth_packets))
+        _append_u32(output, _counter_u32(local_drops))
+        _append_u32(output, _counter_u32(scheduler_in_flight_packets))
+        _append_u32(output, _counter_u32(scheduler_in_flight_bytes))
+        _append_u32(output, _counter_u32(scheduler_predicted_delivery_us))
+        _append_u32(output, _counter_u32(reorder_buffer_packets))
+        _append_u32(output, _counter_u32(reorder_buffer_oldest_age_us))
+
+
+def _encode_scheduler_status(output: bytearray, scheduler_status: SchedulerStatus | None) -> None:
+    """Encode this node's local TX scheduler status for peer diagnostics."""
+    if scheduler_status is None:
+        return
+    configured, effective, rust_mode = scheduler_status
+    encoded_values = [configured.encode("utf-8"), effective.encode("utf-8"), rust_mode.encode("utf-8")]
+    if any(not value or len(value) > 63 for value in encoded_values):
+        raise ValueError("scheduler status value out of range")
+    output.append(CONTROL_TYPE_SCHEDULER_STATUS)
+    _append_u16(output, sum(len(value) for value in encoded_values) + len(encoded_values))
+    for value in encoded_values:
+        output.append(len(value))
+        output.extend(value)
+
+
+def _encode_data_transmit_samples(output: bytearray, data_transmit_samples: list[DataTransmitSample]) -> None:
+    """Encode sparse real-data transmit timing samples; normal data frames stay compact."""
+    for path_id, first_sequence, packet_count, transmit_us in data_transmit_samples:
+        if (
+            path_id < 0
+            or path_id > _u16_max()
+            or first_sequence < 0
+            or first_sequence >= SEQUENCE_SPACE
+            or packet_count <= 0
+            or packet_count > _u32_max()
+            or transmit_us <= 0
+            or transmit_us > _u64_max()
+        ):
+            raise ValueError("data transmit sample value out of range")
+        output.append(CONTROL_TYPE_DATA_TRANSMIT_SAMPLE)
+        _append_u16(output, 22)
+        _append_u16(output, path_id)
+        _append_u64(output, first_sequence)
+        _append_u32(output, packet_count)
+        _append_u64(output, transmit_us)
 
 
 def _encode_internal_clock_sync(
@@ -537,13 +750,24 @@ def _decode_service_disable_value(value: bytes) -> tuple[int, str] | None:
     return service_id, reason
 
 
-def _decode_service_scheduler_policy_value(value: bytes) -> tuple[int, int, int] | None:
-    if len(value) != 8:
+def _decode_service_scheduler_policy_value(value: bytes) -> tuple[int, int, int, int, int, int, int] | None:
+    if len(value) != 29:
         return None
     service_id = _read_u16(value, 0)
     if service_id < USER_SERVICE_ID_START:
         return None
-    return service_id, _read_u16(value, 2), _read_u32(value, 4)
+    path_policy = value[28]
+    if path_policy > 2:
+        return None
+    return (
+        service_id,
+        _read_u16(value, 2),
+        _read_u32(value, 4),
+        _read_u64(value, 8),
+        _read_u64(value, 16),
+        _read_u32(value, 24),
+        path_policy,
+    )
 
 
 def _decode_path_capacity_value(value: bytes) -> tuple[int, int | None, int | None] | None:
@@ -564,6 +788,18 @@ def _decode_path_latency_value(value: bytes) -> tuple[int, int | None, int | Non
     )
 
 
+def _decode_path_latency_quality_value(value: bytes) -> tuple[int, str | None, str | None] | None:
+    if len(value) != 4:
+        return None
+    source = _decode_latency_source(value[2])
+    confidence = _decode_latency_confidence(value[3])
+    if source is None and value[2] != 0:
+        return None
+    if confidence is None and value[3] != 0:
+        return None
+    return _read_u16(value, 0), source, confidence
+
+
 def _decode_path_mtu_value(value: bytes) -> tuple[int, int | None, int | None, int | None, int | None] | None:
     if len(value) != 10:
         return None
@@ -579,6 +815,83 @@ def _decode_path_mtu_value(value: bytes) -> tuple[int, int | None, int | None, i
     ):
         return None
     return path_id, tx_link_mtu, tx_frame_mtu, rx_link_mtu, rx_frame_mtu
+
+
+def _decode_path_pressure_value(
+    value: bytes,
+) -> (
+    tuple[
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+        int,
+    ]
+    | None
+):
+    if len(value) != 54:
+        return None
+    loss_ppm = _read_u32(value, 2)
+    if loss_ppm > 1_000_000:
+        return None
+    return (
+        _read_u16(value, 0),
+        loss_ppm,
+        _read_u32(value, 6),
+        _read_u32(value, 10),
+        _read_u32(value, 14),
+        _read_u32(value, 18),
+        _read_u32(value, 22),
+        _read_u32(value, 26),
+        _read_u32(value, 30),
+        _read_u32(value, 34),
+        _read_u32(value, 38),
+        _read_u32(value, 42),
+        _read_u32(value, 46),
+        _read_u32(value, 50),
+    )
+
+
+def _decode_scheduler_status_value(value: bytes) -> SchedulerStatus | None:
+    """Decode peer TX scheduler status carried for diagnostics only."""
+    cursor = 0
+    values: list[str] = []
+    for _ in range(3):
+        if cursor >= len(value):
+            return None
+        value_len = value[cursor]
+        cursor += 1
+        if value_len <= 0 or cursor + value_len > len(value):
+            return None
+        try:
+            values.append(value[cursor : cursor + value_len].decode("utf-8"))
+        except UnicodeDecodeError:
+            return None
+        cursor += value_len
+    if cursor != len(value):
+        return None
+    return values[0], values[1], values[2]
+
+
+def _decode_data_transmit_sample_value(value: bytes) -> DataTransmitSample | None:
+    if len(value) != 22:
+        return None
+    path_id = _read_u16(value, 0)
+    first_sequence = _read_u64(value, 2)
+    packet_count = _read_u32(value, 10)
+    transmit_us = _read_u64(value, 14)
+    if packet_count <= 0 or transmit_us <= 0:
+        return None
+    return path_id, first_sequence, packet_count, transmit_us
 
 
 def _decode_internal_clock_sync_value(value: bytes) -> InternalClockSyncMessage | None:
@@ -623,6 +936,45 @@ def _decode_sink_time_value(value: bytes) -> SinkTimeMessage | None:
     )
 
 
+_LATENCY_SOURCE_TO_CODE = {
+    None: 0,
+    "reply-rtt-half": 1,
+    "clock-synced-one-way": 2,
+    "data-traffic-one-way": 3,
+    "rejected": 4,
+    "peer": 5,
+}
+_LATENCY_SOURCE_BY_CODE = {code: source for source, code in _LATENCY_SOURCE_TO_CODE.items()}
+_LATENCY_CONFIDENCE_TO_CODE = {
+    None: 0,
+    "coarse": 1,
+    "warming": 2,
+    "good": 3,
+    "rejected": 4,
+}
+_LATENCY_CONFIDENCE_BY_CODE = {code: confidence for confidence, code in _LATENCY_CONFIDENCE_TO_CODE.items()}
+
+
+def _encode_latency_source(source: str | None) -> int:
+    if source not in _LATENCY_SOURCE_TO_CODE:
+        raise ValueError("path latency source value out of range")
+    return _LATENCY_SOURCE_TO_CODE[source]
+
+
+def _decode_latency_source(value: int) -> str | None:
+    return _LATENCY_SOURCE_BY_CODE.get(value)
+
+
+def _encode_latency_confidence(confidence: str | None) -> int:
+    if confidence not in _LATENCY_CONFIDENCE_TO_CODE:
+        raise ValueError("path latency confidence value out of range")
+    return _LATENCY_CONFIDENCE_TO_CODE[confidence]
+
+
+def _decode_latency_confidence(value: int) -> str | None:
+    return _LATENCY_CONFIDENCE_BY_CODE.get(value)
+
+
 def _optional_u64(value: int | None) -> int:
     if value is None:
         return 0
@@ -636,6 +988,12 @@ def _optional_u32(value: int | None) -> int:
         return 0
     if value <= 0 or value > _u32_max():
         raise ValueError("path latency value out of range")
+    return value
+
+
+def _counter_u32(value: int) -> int:
+    if value < 0 or value > _u32_max():
+        raise ValueError("path pressure counter value out of range")
     return value
 
 

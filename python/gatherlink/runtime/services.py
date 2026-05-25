@@ -363,7 +363,12 @@ class ServiceIpcServer:
         """
         with client:
             response = self._handle_request(_read_ipc_request(client))
-            client.sendall((json.dumps(response, sort_keys=True) + "\n").encode("utf-8"))
+            try:
+                client.sendall((json.dumps(response, sort_keys=True) + "\n").encode("utf-8"))
+            except BrokenPipeError:
+                # Clients may time out or be interrupted after sending a request.
+                # That should not surface as a noisy service-thread traceback.
+                return
 
     def _handle_request(self, request: dict[str, Any]) -> dict[str, Any]:
         command = request.get("command")

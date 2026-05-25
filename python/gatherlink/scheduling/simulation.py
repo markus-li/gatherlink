@@ -59,6 +59,11 @@ POLICIES_TO_COMPARE: tuple[SchedulerPolicy, ...] = (
     "least_queue",
     "earliest_completion_first",
     "blocking_estimation",
+    "ordered_multipath",
+    "ordered_multipath_capacity_aware",
+    "arrival_guarded_capacity",
+    "flowlet_adaptive",
+    "latency_guarded_capacity",
     "balanced",
     "adaptive",
 )
@@ -135,6 +140,31 @@ def choose_path(policy: SchedulerPolicy, scenario: SchedulerScenario) -> Schedul
     if not enabled_paths:
         return SchedulerDecision(policy=policy, rust_mode=rust_mode, selected_path=None, reason="no enabled paths")
 
+    if policy == "flowlet_adaptive":
+        selected = min(enabled_paths, key=_balanced_score(scenario.payload_len))
+        return SchedulerDecision(policy, rust_mode, selected.name, "flowlet stickiness with adaptive fallback score")
+    if policy == "arrival_guarded_capacity":
+        selected = _arrival_guarded_capacity_choice(enabled_paths, scenario.payload_len)
+        return SchedulerDecision(
+            policy,
+            rust_mode,
+            selected.name,
+            "capacity share after Python predicted-arrival guard",
+        )
+    if policy == "latency_guarded_capacity":
+        return SchedulerDecision(
+            policy,
+            rust_mode,
+            enabled_paths[0].name,
+            "first slot after Python latency guard and capacity-weight compilation",
+        )
+    if policy == "capacity_aware":
+        return SchedulerDecision(
+            policy,
+            rust_mode,
+            enabled_paths[0].name,
+            "first slot in Python-compiled capacity-weighted sequence",
+        )
     if rust_mode in {"round_robin", "weighted_round_robin", "adaptive"}:
         if policy in {"balanced", "adaptive"}:
             selected = min(enabled_paths, key=_balanced_score(scenario.payload_len))
@@ -160,6 +190,9 @@ def choose_path(policy: SchedulerPolicy, scenario: SchedulerScenario) -> Schedul
     if rust_mode == "blocking_estimation":
         selected = min(enabled_paths, key=_blocking_score(scenario.payload_len))
         return SchedulerDecision(policy, rust_mode, selected.name, "lowest completion time plus reorder hold")
+    if rust_mode == "ordered_multipath":
+        selected = min(enabled_paths, key=_ordered_multipath_score(scenario.payload_len))
+        return SchedulerDecision(policy, rust_mode, selected.name, "earliest safe service-flow arrival")
     if rust_mode == "balanced":
         selected = min(enabled_paths, key=_balanced_score(scenario.payload_len))
         return SchedulerDecision(policy, rust_mode, selected.name, "best hybrid capacity/latency/loss/queue score")
@@ -193,5 +226,33 @@ def _balanced_score(payload_len: int):
         completion_us, loss_ppm, inverse_capacity = _completion_score(payload_len)(path)
         queue_penalty = path.queue_depth_packets * 16 + path.queue_depth_bytes // (64 * 1024)
         return (completion_us + loss_ppm * 100 + path.latency_us // 4 + queue_penalty, inverse_capacity, loss_ppm)
+
+    return score
+
+
+def _arrival_guarded_capacity_choice(paths: list[SimulatedPath], payload_len: int) -> SimulatedPath:
+    """Choose a capacity path after removing predicted receiver-blocking outliers."""
+    predictions = {path.name: _arrival_prediction_us(path, payload_len) for path in paths}
+    fastest = min(predictions.values())
+    eligible = [path for path in paths if predictions[path.name] <= fastest + (path.reorder_hold_us or 150_000)]
+    if not eligible:
+        eligible = paths
+    return max(eligible, key=lambda path: (path.tx_capacity_bps, -path.latency_us, -path.loss_ppm))
+
+
+def _arrival_prediction_us(path: SimulatedPath, payload_len: int) -> int:
+    """Return the same coarse arrival estimate the Python compiler uses."""
+    transmit_us = payload_len * 8 * 1_000_000 // max(1, path.tx_capacity_bps)
+    queue_us = path.queue_depth_packets * 50 + path.queue_depth_bytes * 8 * 1_000_000 // max(1, path.tx_capacity_bps)
+    return path.latency_us + transmit_us + queue_us
+
+
+def _ordered_multipath_score(payload_len: int):
+    """Return the first-packet score used by the ordered multipath executor."""
+
+    def score(path: SimulatedPath) -> tuple[int, int, int]:
+        completion_us, loss_ppm, inverse_capacity = _completion_score(payload_len)(path)
+        queue_penalty = path.queue_depth_packets + payload_len * 8 * 1_000_000 // max(path.tx_capacity_bps, 1)
+        return (completion_us + path.reorder_hold_us + loss_ppm * 100, queue_penalty, inverse_capacity)
 
     return score

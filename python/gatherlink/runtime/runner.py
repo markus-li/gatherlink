@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from threading import Event
 from typing import Any
 
@@ -19,8 +19,8 @@ from gatherlink.carriers import CarrierSupervisor
 from gatherlink.config.models import GatherlinkConfig
 from gatherlink.config.runtime import RuntimeConfig
 from gatherlink.control import ControlCadenceState
-from gatherlink.control.announcements import announce_control_metadata
-from gatherlink.control.metadata import empty_control_metadata
+from gatherlink.control.announcements import announce_control_metadata, announce_path_pinned_clock_sync
+from gatherlink.control.metadata import empty_control_metadata, merge_control_path_latency
 from gatherlink.control.policy import apply_control_policy_to_dataplane
 from gatherlink.control.remote_status import RemoteStatusState, handle_event, send_request_if_due
 from gatherlink.control.reserved import drain_reserved_service_events
@@ -30,16 +30,53 @@ from gatherlink.dataplane.status import (
     merge_disabled_service_errors,
     named_rust_control_metadata,
     named_rust_path_stats,
+    named_rust_service_path_stats,
+    named_rust_service_stats,
 )
 from gatherlink.diagnostics.bus import DiagnosticsBus
 from gatherlink.diagnostics.events import DiagnosticEvent
+from gatherlink.paths.capacity import (
+    PathCapacityDetector,
+    initial_path_capacity_estimates,
+    merge_capacity_snapshots,
+    save_path_capacity_cache,
+)
+from gatherlink.paths.telemetry import (
+    DataTrafficLatencyTracker,
+    PathLatencyTracker,
+    take_data_transmit_sample_batch,
+)
 from gatherlink.protocol import SERVICE_ID_CONTROL_METADATA, SERVICE_ID_REMOTE_STATUS
 from gatherlink.runtime.plan import runtime_warnings
-from gatherlink.runtime.reload import hot_reapply_scheduler_from_status
+from gatherlink.runtime.reload import hot_reapply_scheduler_from_status, scheduler_decision_event_from_status
+from gatherlink.scheduling.compiler import default_effective_scheduler_policy
+from gatherlink.scheduling.coordinator import SchedulerPolicyCoordinator
+from gatherlink.scheduling.metrics import path_pressure_from_path_stats
+from gatherlink.scheduling.service_budget import ServiceBudgetController, ServiceOutcomeSnapshot
+from gatherlink.scheduling.service_outcome import service_outcome_snapshot_from_json
+from gatherlink.scheduling.service_paths import ServicePathAllocator
+from gatherlink.scheduling.service_priority import (
+    service_budget_plan,
+    service_poll_order,
+    uses_service_budget_plan,
+)
+from gatherlink.scheduling.smoothing import SchedulerTelemetrySmoother
 from gatherlink.shared.logging import get_logger
+from gatherlink.time.offset import InternalClockSyncClient, InternalClockSyncMessage
 
 logger = get_logger(__name__)
 COUNTER_SNAPSHOT_INTERVAL_SECONDS = 1.0
+STATUS_SNAPSHOT_INTERVAL_SECONDS = 0.25
+REMOTE_STATUS_POLL_INTERVAL_SECONDS = 0.05
+DIAGNOSTICS_DRAIN_INTERVAL_SECONDS = 0.10
+# Keep the idle poll short enough that low-rate control, WireGuard handshakes,
+# and TCP ACKs do not inherit a multi-millisecond delay from Python
+# orchestration. Rust still performs packet work in bounded nonblocking bursts;
+# this sleep only applies once a whole loop observes no dataplane/control work.
+IDLE_SLEEP_SECONDS = 0.001
+DATAPLANE_BURST_CYCLES = 64
+DEFAULT_DATAPLANE_BATCH_SIZE = 512
+DATA_TIMING_SAMPLE_CONTROL_INTERVAL_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -61,15 +98,20 @@ class CoreRunnerState:
     security_mode: str
     service_names: list[str]
     stop_event: Event
+    service_config: list[dict[str, object]] = field(default_factory=list)
     running: bool = False
     iterations: int = 0
     forwarded_packets: int = 0
     forwarded_bytes: int = 0
     delivered_packets: int = 0
     delivered_bytes: int = 0
+    service_stats: dict[str, dict[str, int]] | None = None
+    service_path_stats: dict[str, dict[str, dict[str, int]]] | None = None
     path_stats: dict[str, dict[str, int]] | None = None
     control_metadata: dict[str, object] | None = None
     security_drops: dict[str, int] | None = None
+    service_outcomes: list[dict[str, object]] | None = None
+    service_outcome_snapshot: ServiceOutcomeSnapshot | None = None
     control_cadence: ControlCadenceState | None = None
     remote_status: RemoteStatusState | None = None
 
@@ -82,17 +124,24 @@ class CoreRunnerState:
             "security_mode": self.security_mode,
             "iterations": self.iterations,
             "services": self.service_names,
+            "service_config": self.service_config,
             "tx_packets": self.forwarded_packets,
             "tx_bytes": self.forwarded_bytes,
             "rx_packets": self.delivered_packets,
             "rx_bytes": self.delivered_bytes,
         }
+        if self.service_stats is not None:
+            payload["service_stats"] = self.service_stats
+        if self.service_path_stats is not None:
+            payload["service_path_stats"] = self.service_path_stats
         if self.path_stats is not None:
             payload["path_stats"] = self.path_stats
         if self.control_metadata is not None:
             payload["control_metadata"] = self.control_metadata
         if self.security_drops is not None:
             payload["security_drops"] = self.security_drops
+        if self.service_outcomes is not None:
+            payload["service_outcomes"] = self.service_outcomes
         if self.control_cadence is not None:
             payload["control_cadence"] = self.control_cadence.status()
         if remote_status is not None:
@@ -121,6 +170,22 @@ class CoreRunnerState:
             self.remote_status = RemoteStatusState()
         return self.remote_status.request(ttl_seconds=ttl_seconds)
 
+    def request_service_outcome(self, request: dict[str, object]) -> dict[str, object]:
+        """
+        IPC command for Python-owned live service outcome facts.
+
+        Helper or benchmark tooling can report facts such as protected TCP
+        degradation here. The runner stores them in memory and the Python budget
+        controller consumes them on the normal status cadence. Rust receives
+        only any primitive drain plan Python later compiles.
+        """
+        snapshot = service_outcome_snapshot_from_json(request)
+        if snapshot is None:
+            raise ValueError("invalid service outcome payload")
+        self.service_outcome_snapshot = snapshot
+        self.service_outcomes = _service_outcomes_for_status(snapshot)
+        return {"outcomes": self.service_outcomes}
+
 
 DataplaneFactory = Callable[[RuntimeConfig], Any]
 
@@ -131,7 +196,7 @@ def run_core_service(
     dataplane_factory: DataplaneFactory = bind_core_dataplane,
     stop_event: Event | None = None,
     max_iterations: int | None = None,
-    batch_size: int = 32,
+    batch_size: int = DEFAULT_DATAPLANE_BATCH_SIZE,
     diagnostics_bus: DiagnosticsBus | None = None,
     runner_state: CoreRunnerState | None = None,
     source_config: GatherlinkConfig | None = None,
@@ -145,6 +210,16 @@ def run_core_service(
     signal path.
     """
     service_names = [service.name for service in runtime_config.services if service.listen]
+    poll_service_names = service_poll_order(runtime_config.services)
+    service_budget_controller = ServiceBudgetController()
+    service_budget_overrides: dict[str, int] = {}
+    service_byte_budget_overrides: dict[str, int] = {}
+    poll_service_plan = _service_poll_plan_if_needed(
+        runtime_config,
+        batch_size,
+        service_budget_overrides,
+        service_byte_budget_overrides,
+    )
     if not service_names and not runtime_config.paths:
         raise ValueError("core runner requires at least one service listener or path transport")
     if batch_size < 1:
@@ -155,7 +230,7 @@ def run_core_service(
         if diagnostics_bus is not None:
             diagnostics_bus.publish(DiagnosticEvent.warning(warning.removeprefix("WARNING: ")))
 
-    carrier_supervisor = CarrierSupervisor(runtime_config)
+    carrier_supervisor = CarrierSupervisor(runtime_config, diagnostics=diagnostics_bus)
     runtime_config = carrier_supervisor.start()
     try:
         dataplane = dataplane_factory(runtime_config)
@@ -181,6 +256,7 @@ def run_core_service(
         service_names=service_names,
         stop_event=stop_event,
     )
+    state.service_config = _service_config_for_status(runtime_config)
     state.running = True
     state.control_cadence = state.control_cadence or ControlCadenceState()
     state.remote_status = state.remote_status or RemoteStatusState()
@@ -189,6 +265,9 @@ def run_core_service(
         if source_config is not None and scheduler_reapply_interval_seconds is not None
         else None
     )
+    scheduler_telemetry_smoother = SchedulerTelemetrySmoother() if next_scheduler_reapply_at is not None else None
+    scheduler_policy_coordinator = SchedulerPolicyCoordinator() if next_scheduler_reapply_at is not None else None
+    service_path_allocator = ServicePathAllocator() if next_scheduler_reapply_at is not None else None
     iterations = 0
     forwarded_packets = 0
     forwarded_bytes = 0
@@ -197,50 +276,189 @@ def run_core_service(
     last_counter_snapshot: tuple[int, int, int, int] | None = None
     last_security_drop_packets = 0
     next_counter_snapshot_at = 0.0
+    next_status_snapshot_at = 0.0
+    next_remote_status_poll_at = 0.0
+    next_diagnostics_drain_at = 0.0
+    last_service_outcome_signature: tuple[tuple[str, bool, str], ...] | None = None
     decoded_control_metadata = empty_control_metadata()
     applied_disabled_services: set[str] = set()
     path_names_by_id = {path.scheduler.path_id: path.name for path in runtime_config.paths}
+    path_names = [path.name for path in runtime_config.paths]
+    path_ids = {path.name: path.scheduler.path_id for path in runtime_config.paths}
+    clock_sync_client = None if runtime_config.role == "server" else InternalClockSyncClient(path_names)
+    clock_sync_responses: list[InternalClockSyncMessage] = []
+    path_latency_tracker = PathLatencyTracker(path_names)
+    data_traffic_latency_tracker = DataTrafficLatencyTracker(path_names_by_id)
+    tx_capacity_detector = PathCapacityDetector(
+        path_names=path_names,
+        direction="tx",
+        initial_estimates=initial_path_capacity_estimates(runtime_config, path_names, direction="tx"),
+    )
+    rx_capacity_detector = PathCapacityDetector(
+        path_names=path_names,
+        direction="rx",
+        initial_estimates=initial_path_capacity_estimates(runtime_config, path_names, direction="rx"),
+    )
+    path_capacity = merge_capacity_snapshots(tx_capacity_detector.snapshot(), rx_capacity_detector.snapshot())
     local_targets_by_service_id = {service.service_id: service.target for service in runtime_config.services}
     peer_names_by_scope = _peer_names_by_scope(runtime_config)
     _apply_reserved_service_schedulers(dataplane)
     next_control_metadata_at = 0.0
+    next_data_sample_control_at = 0.0
+    pending_data_transmit_samples: list[tuple[int, int, int, int]] = []
 
     while not stop_event.is_set():
+        now = time.monotonic()
         if max_iterations is not None and iterations >= max_iterations:
             break
         iterations += 1
         state.iterations = iterations
-        for service_name in service_names:
-            try:
-                outcomes = _forward_available_for_service(dataplane, service_name, batch_size)
-            except Exception as exc:
-                if _is_idle_receive_timeout(exc):
-                    continue
+        did_dataplane_work = False
+        try:
+            forwarded_count, forwarded_byte_count, delivered_count, delivered_byte_count = _run_dataplane_available(
+                dataplane,
+                service_names,
+                batch_size,
+                poll_service_names=poll_service_names,
+                poll_service_plan=poll_service_plan,
+            )
+        except Exception as exc:
+            if _is_idle_receive_timeout(exc):
+                forwarded_count = forwarded_byte_count = delivered_count = delivered_byte_count = 0
+            else:
                 raise
-            forwarded_packets += len(outcomes)
-            forwarded_bytes += sum(int(outcome.payload_len()) for outcome in outcomes)
-            state.forwarded_packets = forwarded_packets
-            state.forwarded_bytes = forwarded_bytes
-        delivered = dataplane.receive_available_from_paths(batch_size)
-        delivered_packets += len(delivered)
-        delivered_bytes += sum(int(outcome.payload_len()) for outcome in delivered)
+        did_dataplane_work = forwarded_count > 0 or delivered_count > 0
+        forwarded_packets += forwarded_count
+        forwarded_bytes += forwarded_byte_count
+        state.forwarded_packets = forwarded_packets
+        state.forwarded_bytes = forwarded_bytes
+        delivered_packets += delivered_count
+        delivered_bytes += delivered_byte_count
         state.delivered_packets = delivered_packets
         state.delivered_bytes = delivered_bytes
-        if time.monotonic() >= next_control_metadata_at:
+        now = time.monotonic()
+        if did_dataplane_work:
+            pending_data_transmit_samples.extend(
+                data_traffic_latency_tracker.observe_local_samples(
+                    _drain_data_timing_samples(dataplane),
+                    local_clock_offset_us=_current_clock_offset_us(decoded_control_metadata),
+                )
+            )
+            data_latency_changes = data_traffic_latency_tracker.promote_pending_peer_transmit_samples(
+                local_clock_offset_us=_current_clock_offset_us(decoded_control_metadata),
+                latency_tracker=path_latency_tracker,
+                rtt_us=_current_clock_rtt_us(decoded_control_metadata),
+                clock_error_us=_current_clock_error_us(decoded_control_metadata),
+            )
+            if data_latency_changes:
+                merge_control_path_latency(decoded_control_metadata, data_latency_changes)
+        if now >= next_control_metadata_at:
+            _refresh_runner_state_from_dataplane(state, dataplane, runtime_config, decoded_control_metadata)
+            service_outcome, last_service_outcome_signature = _service_outcome_for_budget(
+                state,
+                diagnostics_bus,
+                last_service_outcome_signature,
+            )
+            budget_decision = service_budget_controller.update(
+                runtime_config.services,
+                state.service_stats,
+                now=now,
+                batch_size=batch_size,
+                outcome=service_outcome,
+            )
+            if budget_decision.changed:
+                service_budget_overrides = budget_decision.packet_budget_overrides
+                service_byte_budget_overrides = budget_decision.byte_budget_overrides
+                poll_service_plan = _service_poll_plan_if_needed(
+                    runtime_config,
+                    batch_size,
+                    service_budget_overrides,
+                    service_byte_budget_overrides,
+                )
+                if diagnostics_bus is not None:
+                    diagnostics_bus.publish(
+                        DiagnosticEvent.scheduler_decision(
+                            node=runtime_config.node,
+                            message="service budget decision updated",
+                            details={
+                                "source": "service_budget_controller",
+                                "reason": budget_decision.reason,
+                                "packet_budget_overrides": service_budget_overrides,
+                                "byte_budget_overrides": service_byte_budget_overrides,
+                            },
+                        )
+                    )
+            capacity_changes = merge_capacity_snapshots(
+                tx_capacity_detector.observe(state.path_stats or {}, {}),
+                rx_capacity_detector.observe(state.path_stats or {}, {}),
+            )
+            path_capacity = merge_capacity_snapshots(tx_capacity_detector.snapshot(), rx_capacity_detector.snapshot())
+            if capacity_changes:
+                save_path_capacity_cache(runtime_config, path_capacity)
+            if runtime_config.role == "server":
+                path_clock_sync = list(clock_sync_responses)
+                clock_sync_responses.clear()
+            elif clock_sync_client is not None:
+                path_clock_sync = list(clock_sync_client.create_requests(path_names, path_ids).values())
+            else:
+                path_clock_sync = []
+            if path_clock_sync:
+                _try_announce_path_pinned_clock_sync(
+                    dataplane,
+                    runtime_config,
+                    decoded_control_metadata,
+                    path_clock_sync=path_clock_sync,
+                )
+            data_transmit_samples = take_data_transmit_sample_batch(pending_data_transmit_samples)
+            path_latency = path_latency_tracker.dirty_snapshot()
             _try_announce_control_metadata(
                 dataplane,
                 runtime_config,
                 decoded_control_metadata,
+                path_capacity=path_capacity,
+                path_latency=path_latency,
+                path_pressure=path_pressure_from_path_stats(state.path_stats or {}),
+                data_transmit_samples=data_transmit_samples,
+                scheduler_status=_scheduler_status_tuple(
+                    source_config,
+                    runtime_config,
+                    scheduler_policy_coordinator,
+                ),
                 include_sink_time=runtime_config.role == "server",
             )
-            next_control_metadata_at = time.monotonic() + state.control_cadence.next_interval(
-                forwarded_packets + delivered_packets
+            if path_latency:
+                path_latency_tracker.mark_sent()
+            if data_transmit_samples:
+                next_data_sample_control_at = now + DATA_TIMING_SAMPLE_CONTROL_INTERVAL_SECONDS
+            next_control_metadata_at = now + state.control_cadence.next_interval(forwarded_packets + delivered_packets)
+        elif pending_data_transmit_samples and now >= next_data_sample_control_at:
+            data_transmit_samples = take_data_transmit_sample_batch(pending_data_transmit_samples)
+            path_latency = path_latency_tracker.dirty_snapshot()
+            _try_announce_control_metadata(
+                dataplane,
+                runtime_config,
+                decoded_control_metadata,
+                path_capacity={},
+                path_latency=path_latency,
+                path_pressure={},
+                data_transmit_samples=data_transmit_samples,
+                scheduler_status=_scheduler_status_tuple(
+                    source_config,
+                    runtime_config,
+                    scheduler_policy_coordinator,
+                ),
+                include_sink_time=runtime_config.role == "server",
             )
-        try:
-            send_request_if_due(dataplane, state.remote_status, peer_scopes=peer_names_by_scope)
-        except RuntimeError as exc:
-            logger.warning("remote status request skipped", extra={"error": str(exc)})
-        if _drain_python_reserved_services(
+            if path_latency:
+                path_latency_tracker.mark_sent()
+            next_data_sample_control_at = now + DATA_TIMING_SAMPLE_CONTROL_INTERVAL_SECONDS
+        if now >= next_remote_status_poll_at:
+            try:
+                send_request_if_due(dataplane, state.remote_status, peer_scopes=peer_names_by_scope)
+            except RuntimeError as exc:
+                logger.warning("remote status request skipped", extra={"error": str(exc)})
+            next_remote_status_poll_at = now + REMOTE_STATUS_POLL_INTERVAL_SECONDS
+        drained_reserved_events = _drain_python_reserved_services(
             dataplane,
             decoded_control_metadata,
             path_names_by_id=path_names_by_id,
@@ -249,14 +467,84 @@ def run_core_service(
             peer_names_by_scope=peer_names_by_scope,
             fallback_peer_name=runtime_config.peer or "peer",
             status_provider=state.snapshot,
-        ):
+            clock_sync_client=clock_sync_client,
+            clock_sync_responses=clock_sync_responses,
+            path_latency_tracker=path_latency_tracker,
+            data_traffic_latency_tracker=data_traffic_latency_tracker,
+        )
+        did_dataplane_work = did_dataplane_work or bool(drained_reserved_events)
+        if drained_reserved_events and runtime_config.role == "server" and clock_sync_responses:
+            immediate_clock_sync = list(clock_sync_responses)
+            clock_sync_responses.clear()
+            _try_announce_path_pinned_clock_sync(
+                dataplane,
+                runtime_config,
+                decoded_control_metadata,
+                path_clock_sync=immediate_clock_sync,
+            )
+            path_latency = path_latency_tracker.dirty_snapshot()
+            _try_announce_control_metadata(
+                dataplane,
+                runtime_config,
+                decoded_control_metadata,
+                path_capacity={},
+                path_latency=path_latency,
+                path_pressure={},
+                scheduler_status=_scheduler_status_tuple(
+                    source_config,
+                    runtime_config,
+                    scheduler_policy_coordinator,
+                ),
+                include_sink_time=True,
+            )
+            if path_latency:
+                path_latency_tracker.mark_sent()
+        if drained_reserved_events:
             apply_control_policy_to_dataplane(
                 dataplane,
                 decoded_control_metadata,
+                runtime_config=runtime_config,
                 applied_disabled_services=applied_disabled_services,
                 logger=logger.warning,
             )
-        _refresh_runner_state_from_dataplane(state, dataplane, runtime_config, decoded_control_metadata)
+        now = time.monotonic()
+        if now >= next_status_snapshot_at or (max_iterations is not None and iterations == max_iterations):
+            _refresh_runner_state_from_dataplane(state, dataplane, runtime_config, decoded_control_metadata)
+            service_outcome, last_service_outcome_signature = _service_outcome_for_budget(
+                state,
+                diagnostics_bus,
+                last_service_outcome_signature,
+            )
+            budget_decision = service_budget_controller.update(
+                runtime_config.services,
+                state.service_stats,
+                now=now,
+                batch_size=batch_size,
+                outcome=service_outcome,
+            )
+            if budget_decision.changed:
+                service_budget_overrides = budget_decision.packet_budget_overrides
+                service_byte_budget_overrides = budget_decision.byte_budget_overrides
+                poll_service_plan = _service_poll_plan_if_needed(
+                    runtime_config,
+                    batch_size,
+                    service_budget_overrides,
+                    service_byte_budget_overrides,
+                )
+                if diagnostics_bus is not None:
+                    diagnostics_bus.publish(
+                        DiagnosticEvent.scheduler_decision(
+                            node=runtime_config.node,
+                            message="service budget decision updated",
+                            details={
+                                "source": "service_budget_controller",
+                                "reason": budget_decision.reason,
+                                "packet_budget_overrides": service_budget_overrides,
+                                "byte_budget_overrides": service_byte_budget_overrides,
+                            },
+                        )
+                    )
+            next_status_snapshot_at = now + STATUS_SNAPSHOT_INTERVAL_SECONDS
         if diagnostics_bus is not None:
             last_security_drop_packets = _publish_security_drop_diagnostics(
                 diagnostics_bus,
@@ -266,7 +554,7 @@ def run_core_service(
                 last_packets=last_security_drop_packets,
             )
             current_counter_snapshot = (forwarded_packets, forwarded_bytes, delivered_packets, delivered_bytes)
-            if current_counter_snapshot != last_counter_snapshot and time.monotonic() >= next_counter_snapshot_at:
+            if current_counter_snapshot != last_counter_snapshot and now >= next_counter_snapshot_at:
                 diagnostics_bus.publish(
                     DiagnosticEvent.counter_snapshot(
                         node=runtime_config.node,
@@ -280,11 +568,11 @@ def run_core_service(
                     )
                 )
                 last_counter_snapshot = current_counter_snapshot
-                next_counter_snapshot_at = time.monotonic() + COUNTER_SNAPSHOT_INTERVAL_SECONDS
+                next_counter_snapshot_at = now + COUNTER_SNAPSHOT_INTERVAL_SECONDS
         if (
             next_scheduler_reapply_at is not None
             and scheduler_reapply_interval_seconds is not None
-            and time.monotonic() >= next_scheduler_reapply_at
+            and now >= next_scheduler_reapply_at
         ):
             try:
                 runtime_config = hot_reapply_scheduler_from_status(
@@ -292,9 +580,21 @@ def run_core_service(
                     source_config,
                     runtime_config,
                     state.snapshot(),
+                    telemetry_smoother=scheduler_telemetry_smoother,
+                    scheduler_coordinator=scheduler_policy_coordinator,
+                    service_path_allocator=service_path_allocator,
                 )
                 _apply_reserved_service_schedulers(dataplane)
                 if diagnostics_bus is not None:
+                    diagnostics_bus.publish(
+                        scheduler_decision_event_from_status(
+                            source_config,
+                            runtime_config,
+                            state.snapshot(),
+                            scheduler_coordinator=scheduler_policy_coordinator,
+                            service_path_allocator=service_path_allocator,
+                        )
+                    )
                     diagnostics_bus.publish(
                         DiagnosticEvent.config_reapplied(
                             node=runtime_config.node,
@@ -310,9 +610,12 @@ def run_core_service(
                             details={"error": str(exc), "source": "scheduler_status_loop"},
                         )
                     )
-            next_scheduler_reapply_at = time.monotonic() + scheduler_reapply_interval_seconds
-        if diagnostics_bus is not None:
+            next_scheduler_reapply_at = now + scheduler_reapply_interval_seconds
+        if diagnostics_bus is not None and now >= next_diagnostics_drain_at:
             diagnostics_bus.drain(limit=128)
+            next_diagnostics_drain_at = now + DIAGNOSTICS_DRAIN_INTERVAL_SECONDS
+        if not did_dataplane_work:
+            time.sleep(IDLE_SLEEP_SECONDS)
 
     result = CoreRunnerResult(
         iterations=iterations,
@@ -335,6 +638,34 @@ def run_core_service(
     return result
 
 
+def _service_poll_plan_if_needed(
+    runtime_config: RuntimeConfig,
+    batch_size: int,
+    packet_budget_overrides: dict[str, int],
+    byte_budget_overrides: dict[str, int],
+) -> list[tuple[str, int, int]] | None:
+    """Compile a Rust-executed service plan only when Python has non-default policy."""
+    if not uses_service_budget_plan(runtime_config.services, packet_budget_overrides, byte_budget_overrides):
+        return None
+    return service_budget_plan(runtime_config.services, batch_size, packet_budget_overrides, byte_budget_overrides)
+
+
+def _service_config_for_status(runtime_config: RuntimeConfig) -> list[dict[str, object]]:
+    """Return operator-visible service policy facts without exposing Rust internals."""
+    return [
+        {
+            "name": service.name,
+            "service_id": service.service_id,
+            "priority": service.priority,
+            "priority_value": service.priority_value,
+            "traffic_class": service.traffic_class,
+            "listen": service.listen,
+            "target": service.target,
+        }
+        for service in runtime_config.services
+    ]
+
+
 def _refresh_runner_state_from_dataplane(
     state: CoreRunnerState,
     dataplane: Any,
@@ -348,6 +679,8 @@ def _refresh_runner_state_from_dataplane(
     snapshot = status_snapshot()
     if not isinstance(snapshot, dict):
         return
+    state.service_stats = named_rust_service_stats(snapshot)
+    state.service_path_stats = named_rust_service_path_stats(snapshot, runtime_config)
     state.path_stats = named_rust_path_stats(snapshot, runtime_config)
     control_metadata = named_rust_control_metadata(snapshot.get("control_metadata", {}), runtime_config)
     disabled_services = snapshot.get("disabled_services")
@@ -362,6 +695,52 @@ def _refresh_runner_state_from_dataplane(
             "packets": int(security_drops.get("packets", 0) or 0),
             "bytes": int(security_drops.get("bytes", 0) or 0),
         }
+
+
+def _service_outcome_for_budget(
+    state: CoreRunnerState,
+    diagnostics_bus: DiagnosticsBus | None,
+    last_signature: tuple[tuple[str, bool, str], ...] | None,
+) -> tuple[ServiceOutcomeSnapshot | None, tuple[tuple[str, bool, str], ...] | None]:
+    """
+    Read Python-owned live service outcomes for the budget controller.
+
+    Helpers and benchmark tooling inject these facts through the existing
+    service IPC command path. This keeps the value in memory beside the runner
+    state instead of adding a second file-watching control plane.
+    """
+    snapshot = state.service_outcome_snapshot
+    signature = _service_outcome_signature(snapshot)
+    state.service_outcomes = _service_outcomes_for_status(snapshot)
+    if signature != last_signature and diagnostics_bus is not None:
+        diagnostics_bus.publish(
+            DiagnosticEvent.scheduler_decision(
+                node=state.node,
+                message="service outcome feedback updated",
+                details={
+                    "source": "service_ipc",
+                    "outcomes": state.service_outcomes or [],
+                },
+            )
+        )
+    return snapshot, signature
+
+
+def _service_outcome_signature(snapshot: ServiceOutcomeSnapshot | None) -> tuple[tuple[str, bool, str], ...] | None:
+    """Return a stable signature for low-noise diagnostics."""
+    if snapshot is None:
+        return None
+    return tuple(sorted((outcome.service, outcome.degraded, outcome.reason) for outcome in snapshot.outcomes))
+
+
+def _service_outcomes_for_status(snapshot: ServiceOutcomeSnapshot | None) -> list[dict[str, object]] | None:
+    """Return a JSON/status-friendly live outcome view."""
+    if snapshot is None:
+        return None
+    return [
+        {"service": outcome.service, "degraded": outcome.degraded, "reason": outcome.reason}
+        for outcome in snapshot.outcomes
+    ]
 
 
 def _publish_security_drop_diagnostics(
@@ -433,6 +812,10 @@ def _drain_python_reserved_services(
     peer_names_by_scope: dict[int, str] | None = None,
     fallback_peer_name: str = "peer",
     status_provider: Callable[[], dict[str, object]] | None = None,
+    clock_sync_client: InternalClockSyncClient | None = None,
+    clock_sync_responses: list[InternalClockSyncMessage] | None = None,
+    path_latency_tracker: PathLatencyTracker | None = None,
+    data_traffic_latency_tracker: DataTrafficLatencyTracker | None = None,
 ) -> int:
     """
     Drain reserved service payloads that Rust intentionally forwards to Python.
@@ -459,6 +842,10 @@ def _drain_python_reserved_services(
         control_metadata,
         path_names_by_id=path_names_by_id,
         local_targets_by_service_id=local_targets_by_service_id,
+        clock_sync_client=clock_sync_client,
+        clock_sync_responses=clock_sync_responses,
+        path_latency_tracker=path_latency_tracker,
+        data_traffic_latency_tracker=data_traffic_latency_tracker,
         extra_handlers=extra_handlers,
         logger=logger.warning,
     )
@@ -493,8 +880,8 @@ def _apply_reserved_service_schedulers(dataplane: Any) -> None:
     setter = getattr(dataplane, "set_service_scheduler", None)
     if not callable(setter):
         return
-    setter(SERVICE_ID_CONTROL_METADATA, 0, 0)
-    setter(SERVICE_ID_REMOTE_STATUS, 1, 0)
+    setter(SERVICE_ID_CONTROL_METADATA, 0, 0, 0, 0, 0, "inherit", None, None)
+    setter(SERVICE_ID_REMOTE_STATUS, 1, 0, 0, 0, 0, "inherit", None, None)
 
 
 def _try_announce_control_metadata(
@@ -502,6 +889,11 @@ def _try_announce_control_metadata(
     runtime_config: RuntimeConfig,
     control_metadata: dict[str, object],
     *,
+    path_capacity: dict[str, dict[str, int | str | None]],
+    path_latency: dict[str, dict[str, int | str | None]],
+    path_pressure: dict[str, dict[str, int | str | None]],
+    data_transmit_samples: list[tuple[int, int, int, int]] | None = None,
+    scheduler_status: tuple[str, str, str] | None = None,
     include_sink_time: bool,
 ) -> None:
     """
@@ -517,13 +909,104 @@ def _try_announce_control_metadata(
             dataplane,
             runtime_config,
             control_metadata,
+            path_capacity=path_capacity,
+            path_latency=path_latency,
+            path_pressure=path_pressure,
+            data_transmit_samples=data_transmit_samples,
+            scheduler_status=scheduler_status,
             include_sink_time=include_sink_time,
         )
     except RuntimeError as exc:
         logger.warning("control metadata announcement skipped", extra={"error": str(exc)})
 
 
-def _forward_available_for_service(dataplane: Any, service_name: str, batch_size: int) -> list[Any]:
+def _drain_data_timing_samples(dataplane: Any) -> dict[str, object]:
+    """Drain Rust-collected real-data timing facts without making Rust interpret them."""
+    drain = getattr(dataplane, "drain_data_timing_samples", None)
+    if not callable(drain):
+        return {"tx": [], "rx": []}
+    samples = drain()
+    return samples if isinstance(samples, dict) else {"tx": [], "rx": []}
+
+
+def _current_clock_offset_us(control_metadata: dict[str, object]) -> int | None:
+    """Return the latest Python-owned local-to-shared clock offset for data samples."""
+    internal_clock = control_metadata.get("internal_clock")
+    if not isinstance(internal_clock, dict):
+        return None
+    for key in ("mean_offset_us", "offset_us"):
+        value = internal_clock.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _current_clock_rtt_us(control_metadata: dict[str, object]) -> int | None:
+    """Return the current Python-owned RTT sanity value for data latency samples."""
+    return _current_internal_clock_int(control_metadata, ("mean_rtt_us", "rtt_us"))
+
+
+def _current_clock_error_us(control_metadata: dict[str, object]) -> int | None:
+    """Return the current Python-owned clock error budget for data latency samples."""
+    return _current_internal_clock_int(control_metadata, ("error_budget_us",))
+
+
+def _current_internal_clock_int(control_metadata: dict[str, object], keys: tuple[str, ...]) -> int | None:
+    internal_clock = control_metadata.get("internal_clock")
+    if not isinstance(internal_clock, dict):
+        return None
+    for key in keys:
+        value = internal_clock.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _try_announce_path_pinned_clock_sync(
+    dataplane: Any,
+    runtime_config: RuntimeConfig,
+    control_metadata: dict[str, object],
+    *,
+    path_clock_sync: list[InternalClockSyncMessage],
+) -> None:
+    """Send per-path clock probes only when the Rust bridge exposes exact-path injection."""
+    try:
+        announce_path_pinned_clock_sync(
+            dataplane,
+            runtime_config,
+            control_metadata,
+            path_clock_sync,
+        )
+    except RuntimeError as exc:
+        logger.warning("path-pinned clock sync skipped", extra={"error": str(exc)})
+
+
+def _scheduler_status_tuple(
+    source_config: GatherlinkConfig | None,
+    runtime_config: RuntimeConfig,
+    scheduler_policy_coordinator: SchedulerPolicyCoordinator | None,
+) -> tuple[str, str, str]:
+    """Return local TX scheduler status for diagnostics and peer context."""
+    configured_mode = source_config.scheduler.mode if source_config is not None else runtime_config.scheduler.mode
+    effective_mode = configured_mode
+    if scheduler_policy_coordinator is not None and scheduler_policy_coordinator.last_decision is not None:
+        effective_mode = scheduler_policy_coordinator.last_decision.effective_mode
+    elif source_config is not None and configured_mode == "coordinated_adaptive":
+        effective_mode = default_effective_scheduler_policy(source_config)
+    elif configured_mode == "coordinated_adaptive":
+        effective_mode = runtime_config.scheduler.mode
+    return str(configured_mode), str(effective_mode), str(runtime_config.scheduler.mode)
+
+
+def _forward_available_for_service(dataplane: Any, service_name: str, batch_size: int) -> tuple[int, int]:
     """
     Drain one app-facing service without letting a quiet UDP socket stall supervision.
 
@@ -531,10 +1014,79 @@ def _forward_available_for_service(dataplane: Any, service_name: str, batch_size
     production runner needs the nonblocking shape so IPC status/stop, path receives,
     and scheduler reapply keep moving even when an application has no new datagram.
     """
+    summary = getattr(dataplane, "forward_available_for_service_nonblocking_summary", None)
+    if callable(summary):
+        packet_count, byte_count = summary(service_name, batch_size)
+        return int(packet_count), int(byte_count)
     nonblocking = getattr(dataplane, "forward_available_for_service_nonblocking", None)
     if callable(nonblocking):
-        return nonblocking(service_name, batch_size)
-    return dataplane.forward_available_for_service(service_name, batch_size)
+        outcomes = nonblocking(service_name, batch_size)
+    else:
+        outcomes = dataplane.forward_available_for_service(service_name, batch_size)
+    return len(outcomes), sum(int(outcome.payload_len()) for outcome in outcomes)
+
+
+def _run_dataplane_available(
+    dataplane: Any,
+    service_names: list[str],
+    batch_size: int,
+    *,
+    poll_service_names: list[str] | None = None,
+    poll_service_plan: list[tuple[str, int, int]] | None = None,
+) -> tuple[int, int, int, int]:
+    """
+    Drain Rust dataplane work with a bounded Rust-side burst when available.
+
+    TODO(perf): This remains an execution primitive, not policy. Python chooses
+    the service list, cadence, scheduler state, diagnostics, and stop behavior;
+    Rust only repeats the same nonblocking socket/frame drains to amortize the
+    Python bridge during high-rate packet flow.
+    """
+    plan_summary = getattr(dataplane, "run_available_budget_summary", None)
+    if callable(plan_summary) and poll_service_plan is not None:
+        forwarded_count, forwarded_bytes, delivered_count, delivered_bytes = plan_summary(
+            poll_service_plan,
+            batch_size,
+            DATAPLANE_BURST_CYCLES,
+        )
+        return int(forwarded_count), int(forwarded_bytes), int(delivered_count), int(delivered_bytes)
+
+    legacy_plan_summary = getattr(dataplane, "run_available_plan_summary", None)
+    if callable(legacy_plan_summary) and poll_service_plan is not None:
+        forwarded_count, forwarded_bytes, delivered_count, delivered_bytes = legacy_plan_summary(
+            [(service_name, packet_budget) for service_name, packet_budget, _byte_budget in poll_service_plan],
+            batch_size,
+            DATAPLANE_BURST_CYCLES,
+        )
+        return int(forwarded_count), int(forwarded_bytes), int(delivered_count), int(delivered_bytes)
+
+    summary = getattr(dataplane, "run_available_summary", None)
+    if callable(summary):
+        forwarded_count, forwarded_bytes, delivered_count, delivered_bytes = summary(
+            poll_service_names or service_names,
+            batch_size,
+            DATAPLANE_BURST_CYCLES,
+        )
+        return int(forwarded_count), int(forwarded_bytes), int(delivered_count), int(delivered_bytes)
+
+    forwarded_count = 0
+    forwarded_bytes = 0
+    for service_name in service_names:
+        packet_count, byte_count = _forward_available_for_service(dataplane, service_name, batch_size)
+        forwarded_count += packet_count
+        forwarded_bytes += byte_count
+    delivered_count, delivered_bytes = _receive_available_from_paths(dataplane, batch_size)
+    return forwarded_count, forwarded_bytes, delivered_count, delivered_bytes
+
+
+def _receive_available_from_paths(dataplane: Any, batch_size: int) -> tuple[int, int]:
+    """Drain path frames using aggregate counters when the Rust bridge supports it."""
+    summary = getattr(dataplane, "receive_available_from_paths_summary", None)
+    if callable(summary):
+        packet_count, byte_count = summary(batch_size)
+        return int(packet_count), int(byte_count)
+    outcomes = dataplane.receive_available_from_paths(batch_size)
+    return len(outcomes), sum(int(outcome.payload_len()) for outcome in outcomes)
 
 
 def _is_idle_receive_timeout(exc: Exception) -> bool:

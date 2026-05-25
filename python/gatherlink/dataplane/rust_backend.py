@@ -91,6 +91,18 @@ def _service_dto(bindings: ModuleType | Any, service: RuntimeServiceConfig) -> A
         _bounded_user_service_id(service.service_id),
         _bounded_u16(service.scheduler_fanout, field="service.scheduler_fanout"),
         service.scheduler_fanout_below_bytes,
+        service.scheduler_flowlet_idle_us,
+        service.scheduler_flowlet_max_hold_us,
+        service.scheduler_path_run_datagrams,
+        service.scheduler_path_policy,
+        service.scheduler_allowed_path_ids,
+        [
+            (
+                _bounded_u16(path_id, field="service.scheduler_path_weights[].path_id"),
+                _bounded_u16(weight, field="service.scheduler_path_weights[].weight"),
+            )
+            for path_id, weight in service.scheduler_path_weights
+        ],
     )
 
 
@@ -115,6 +127,10 @@ def _path_dto(bindings: ModuleType | Any, path: Any) -> Any:
         _bounded_u32(scheduler.reorder_hold_us, field="path.scheduler.reorder_hold_us"),
         _bounded_u16(scheduler.max_in_flight_packets, field="path.scheduler.max_in_flight_packets"),
         _bounded_u32(scheduler.max_in_flight_bytes, field="path.scheduler.max_in_flight_bytes"),
+        _bounded_u64(scheduler.pacing_budget_bps, field="path.scheduler.pacing_budget_bps"),
+        _bounded_u32(scheduler.queue_depth_packets, field="path.scheduler.queue_depth_packets"),
+        _bounded_u32(scheduler.queue_depth_bytes, field="path.scheduler.queue_depth_bytes"),
+        _bounded_u64(scheduler.queue_oldest_age_us, field="path.scheduler.queue_oldest_age_us"),
         path.transport_bind,
         path.transport_remote,
         (
@@ -180,6 +196,10 @@ def _optional_u32(value: int | None, *, field: str) -> int | None:
 
 def _bounded_u16(value: int, *, field: str) -> int:
     return _bounded(value, field=field, minimum=0, maximum=2**16 - 1)
+
+
+def _bounded_u64(value: int, *, field: str) -> int:
+    return _bounded(value, field=field, minimum=0, maximum=2**64 - 1)
 
 
 def _bounded_user_service_id(value: int) -> int:

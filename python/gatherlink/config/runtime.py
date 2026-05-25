@@ -21,6 +21,8 @@ from gatherlink.config.models import (
     SecurityMode,
     ServicePriority,
     ServiceReturnMode,
+    ServiceSchedulerPathPolicy,
+    ServiceTrafficClass,
 )
 from gatherlink.shared.models import GatherlinkBaseModel
 
@@ -34,6 +36,7 @@ SchedulerMode = Literal[
     "least_queue",
     "earliest_completion_first",
     "blocking_estimation",
+    "ordered_multipath",
     "balanced",
     "adaptive",
 ]
@@ -54,6 +57,10 @@ class RuntimePathSchedulerConfig(GatherlinkBaseModel):
     reorder_hold_us: int = Field(default=0, ge=0)
     max_in_flight_packets: int = Field(default=0, ge=0, le=65535)
     max_in_flight_bytes: int = Field(default=0, ge=0)
+    pacing_budget_bps: int = Field(default=0, ge=0)
+    queue_depth_packets: int = Field(default=0, ge=0)
+    queue_depth_bytes: int = Field(default=0, ge=0)
+    queue_oldest_age_us: int = Field(default=0, ge=0)
 
 
 class RuntimePathRelayHopConfig(GatherlinkBaseModel):
@@ -101,9 +108,17 @@ class RuntimeServiceConfig(GatherlinkBaseModel):
     listen: str | None = None
     priority: ServicePriority = "normal"
     priority_value: int = 100
+    traffic_class: ServiceTrafficClass = "unknown"
     return_mode: ServiceReturnMode = "fixed"
     scheduler_fanout: int = 1
     scheduler_fanout_below_bytes: int = 0
+    scheduler_flowlet_idle_us: int = 0
+    scheduler_flowlet_max_hold_us: int = 0
+    scheduler_poll_batch_packets: int = Field(default=0, ge=0)
+    scheduler_path_run_datagrams: int = 0
+    scheduler_path_policy: ServiceSchedulerPathPolicy = "inherit"
+    scheduler_allowed_path_ids: list[int] = Field(default_factory=list)
+    scheduler_path_weights: list[tuple[int, int]] = Field(default_factory=list)
 
 
 class RuntimeSecuritySessionConfig(GatherlinkBaseModel):
@@ -159,6 +174,8 @@ class RuntimeWireGuardHelperConfig(GatherlinkBaseModel):
 
     kind: Literal["wireguard"] = "wireguard"
     enabled: bool = True
+    profile: Literal["single", "dual_profile"] = "single"
+    traffic_class: Literal["single", "stable", "fast"] = "single"
     service: str
     service_target: str
     service_listen: str | None = None

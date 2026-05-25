@@ -36,7 +36,7 @@ def named_rust_control_metadata(control_metadata: object, runtime_config: Any) -
     if isinstance(service_disables, dict):
         output["service_disables"] = dict(service_disables)
         output["service_disable_count"] = len(output["service_disables"])
-    for field_name in ["path_capacity", "path_latency", "path_control"]:
+    for field_name in ["path_capacity", "path_latency", "path_control", "path_pressure"]:
         keyed = control_metadata.get(field_name)
         if isinstance(keyed, dict):
             output[field_name] = {
@@ -103,4 +103,44 @@ def named_rust_path_stats(snapshot: dict[str, object], runtime_config: Any) -> d
     for path_id, counters in raw_paths.items():
         name = path_names_by_id.get(str(path_id), f"path-id:{path_id}")
         named[name] = {key: int(value) for key, value in dict(counters).items()}
+    return named
+
+
+def named_rust_service_stats(snapshot: dict[str, object]) -> dict[str, dict[str, int]]:
+    """Return Rust service counters in a Python-owned, monitor-friendly shape."""
+    raw_services = snapshot.get("services", {})
+    if not isinstance(raw_services, dict):
+        return {}
+    named: dict[str, dict[str, int]] = {}
+    for service_name, counters in raw_services.items():
+        if isinstance(counters, dict):
+            named[str(service_name)] = {key: int(value) for key, value in counters.items()}
+    return named
+
+
+def named_rust_service_path_stats(
+    snapshot: dict[str, object], runtime_config: Any
+) -> dict[str, dict[str, dict[str, int]]]:
+    """
+    Map Rust service/path intersection counters back to configured path names.
+
+    The Rust side only reports facts keyed by the compact numeric path ids it
+    executes. Python owns naming and scheduler meaning, so this converter keeps
+    the operator/scheduler-facing shape tied to configured path names.
+    """
+    raw_service_paths = snapshot.get("service_path_stats", {})
+    if not isinstance(raw_service_paths, dict):
+        return {}
+    path_names_by_id = {str(path.scheduler.path_id): path.name for path in runtime_config.paths}
+    named: dict[str, dict[str, dict[str, int]]] = {}
+    for service_name, raw_paths in raw_service_paths.items():
+        if not isinstance(raw_paths, dict):
+            continue
+        service_rows: dict[str, dict[str, int]] = {}
+        for path_id, counters in raw_paths.items():
+            if not isinstance(counters, dict):
+                continue
+            path_name = path_names_by_id.get(str(path_id), f"path-id:{path_id}")
+            service_rows[path_name] = {key: int(value) for key, value in counters.items()}
+        named[str(service_name)] = service_rows
     return named

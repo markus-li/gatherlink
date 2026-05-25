@@ -8,7 +8,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 from gatherlink.control import metadata as control_metadata_helpers
+from gatherlink.paths.telemetry import DataTrafficLatencyTracker, PathLatencyTracker
 from gatherlink.protocol import RESERVED_SERVICE_ID_END, SERVICE_ID_CONTROL_METADATA, decode_control_payload
+from gatherlink.time.offset import InternalClockSyncClient, InternalClockSyncMessage
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,10 @@ def drain_reserved_service_events(
     *,
     path_names_by_id: dict[int, str],
     local_targets_by_service_id: dict[int, str],
+    clock_sync_client: InternalClockSyncClient | None = None,
+    clock_sync_responses: list[InternalClockSyncMessage] | None = None,
+    path_latency_tracker: PathLatencyTracker | None = None,
+    data_traffic_latency_tracker: DataTrafficLatencyTracker | None = None,
     extra_handlers: dict[int, Callable[[ReservedServicePayload], bool]] | None = None,
     logger: Callable[[str], None] | None = None,
 ) -> int:
@@ -62,6 +68,10 @@ def drain_reserved_service_events(
                 control_metadata,
                 path_names_by_id=path_names_by_id,
                 local_targets_by_service_id=local_targets_by_service_id,
+                clock_sync_client=clock_sync_client,
+                clock_sync_responses=clock_sync_responses,
+                path_latency_tracker=path_latency_tracker,
+                data_traffic_latency_tracker=data_traffic_latency_tracker,
                 logger=logger,
             ):
                 handled += 1
@@ -76,6 +86,10 @@ def handle_control_metadata_event(
     *,
     path_names_by_id: dict[int, str],
     local_targets_by_service_id: dict[int, str],
+    clock_sync_client: InternalClockSyncClient | None = None,
+    clock_sync_responses: list[InternalClockSyncMessage] | None = None,
+    path_latency_tracker: PathLatencyTracker | None = None,
+    data_traffic_latency_tracker: DataTrafficLatencyTracker | None = None,
     logger: Callable[[str], None] | None = None,
 ) -> bool:
     """Decode and apply one control-metadata payload into the shared status shape."""
@@ -86,6 +100,7 @@ def handle_control_metadata_event(
         return False
 
     path_name = path_names_by_id.get(event.path_id, f"path-id:{event.path_id}")
+    received_at_internal_us = control_metadata_helpers.internal_monotonic_us()
     control_metadata_helpers.record_control_metadata_received(
         control_metadata,
         event.frame_bytes,
@@ -105,6 +120,12 @@ def handle_control_metadata_event(
         control_frame.path_metadata,
         path_names_by_id,
     )
+    control_metadata_helpers.record_control_path_latency_quality(
+        control_metadata,
+        control_frame.path_latency_quality,
+        control_frame.path_metadata,
+        path_names_by_id,
+    )
     control_metadata_helpers.record_control_path_mtu(
         control_metadata,
         control_frame.path_mtu,
@@ -115,9 +136,123 @@ def handle_control_metadata_event(
         control_metadata,
         control_frame.sink_time,
         path_names_by_id,
-        received_at_internal_us=control_metadata_helpers.internal_monotonic_us(),
+        received_at_internal_us=received_at_internal_us,
     )
+    if clock_sync_client is not None:
+        clock_update = clock_sync_client.observe_control_frame(
+            control_frame.internal_clock_sync,
+            path_names_by_id=path_names_by_id,
+        )
+        if path_latency_tracker is not None:
+            _merge_clock_sync_latency(control_metadata, path_latency_tracker, clock_update)
+        control_metadata_helpers.merge_internal_clock_sync(
+            control_metadata,
+            _clock_update_without_latency_events(clock_update),
+        )
+    if clock_sync_responses is not None:
+        clock_sync_responses.extend(
+            control_metadata_helpers.sink_clock_sync_responses(
+                control_frame.internal_clock_sync,
+                received_at_us=received_at_internal_us,
+            )
+        )
+    if data_traffic_latency_tracker is not None and path_latency_tracker is not None:
+        changed = data_traffic_latency_tracker.observe_peer_transmit_samples(
+            control_frame.data_transmit_samples,
+            peer_scope=event.peer_scope,
+            local_clock_offset_us=_current_clock_offset_us(control_metadata),
+            latency_tracker=path_latency_tracker,
+            rtt_us=_current_clock_rtt_us(control_metadata),
+            clock_error_us=_current_clock_error_us(control_metadata),
+        )
+        if changed:
+            control_metadata_helpers.merge_control_path_latency(control_metadata, changed)
     return True
+
+
+def _merge_clock_sync_latency(
+    control_metadata: dict[str, object],
+    path_latency_tracker: PathLatencyTracker,
+    clock_update: dict[str, object],
+) -> None:
+    """Promote accepted/rejected path-pinned clock samples into scheduler-visible latency."""
+    changed: dict[str, dict[str, int | str | None]] = {}
+    observations = clock_update.get("path_latency_observations")
+    if isinstance(observations, list):
+        for observation in observations:
+            if not isinstance(observation, dict):
+                continue
+            path_name = observation.get("path")
+            if not isinstance(path_name, str):
+                continue
+            changed.update(
+                path_latency_tracker.observe_directional(
+                    path_name,
+                    tx_one_way_us=_optional_int(observation.get("tx_one_way_us")),
+                    rx_one_way_us=_optional_int(observation.get("rx_one_way_us")),
+                    source=str(observation.get("source") or "clock-synced-one-way"),
+                    confidence=str(observation.get("confidence") or "warming"),
+                    rtt_us=_optional_int(observation.get("rtt_us")),
+                    clock_error_us=_optional_int(observation.get("clock_error_us")),
+                )
+            )
+    rejections = clock_update.get("path_latency_rejections")
+    if isinstance(rejections, list):
+        for rejection in rejections:
+            if not isinstance(rejection, dict):
+                continue
+            path_name = rejection.get("path")
+            if not isinstance(path_name, str):
+                continue
+            changed.update(
+                path_latency_tracker.reject(
+                    path_name,
+                    str(rejection.get("reason") or "rejected"),
+                    rtt_us=_optional_int(rejection.get("rtt_us")),
+                    clock_error_us=_optional_int(rejection.get("clock_error_us")),
+                )
+            )
+    if changed:
+        control_metadata_helpers.merge_control_path_latency(control_metadata, changed)
+
+
+def _clock_update_without_latency_events(clock_update: dict[str, object]) -> dict[str, object]:
+    """Keep path-latency event lists out of the compact internal-clock status row."""
+    return {
+        key: value
+        for key, value in clock_update.items()
+        if key not in {"path_latency_observations", "path_latency_rejections"}
+    }
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _current_clock_offset_us(control_metadata: dict[str, object]) -> int | None:
+    internal_clock = control_metadata.get("internal_clock")
+    if not isinstance(internal_clock, dict):
+        return None
+    return _optional_int(internal_clock.get("mean_offset_us") or internal_clock.get("offset_us"))
+
+
+def _current_clock_rtt_us(control_metadata: dict[str, object]) -> int | None:
+    internal_clock = control_metadata.get("internal_clock")
+    if not isinstance(internal_clock, dict):
+        return None
+    return _optional_int(internal_clock.get("mean_rtt_us") or internal_clock.get("rtt_us"))
+
+
+def _current_clock_error_us(control_metadata: dict[str, object]) -> int | None:
+    internal_clock = control_metadata.get("internal_clock")
+    if not isinstance(internal_clock, dict):
+        return None
+    return _optional_int(internal_clock.get("error_budget_us"))
 
 
 def reserved_event_from_py(event: object) -> ReservedServicePayload:
@@ -149,12 +284,14 @@ def note_control_metadata_sent(
     path_capacity: dict[str, dict[str, int | str | None]],
     path_latency: dict[str, dict[str, int | str | None]] | None = None,
     path_mtu: dict[str, dict[str, int | str | None]] | None = None,
+    path_pressure: dict[str, dict[str, int | str | None]] | None = None,
     service_metadata: dict[int, str] | None = None,
     path_name: str | None = None,
     service_endpoint_assertions: dict[int, str] | None = None,
     service_disables: dict[int, str] | None = None,
-    service_scheduler_policies: dict[int, tuple[int, int]] | None = None,
+    service_scheduler_policies: dict[int, tuple[int, int, int, int, int, int]] | None = None,
     sink_time: list[object] | None = None,
+    internal_clock: dict[str, object] | None = None,
 ) -> None:
     """Record locally-sent control metadata after Python asked Rust to frame it."""
     frame = decode_control_payload(payload)
@@ -168,7 +305,11 @@ def note_control_metadata_sent(
             + len(frame.service_scheduler_policies)
             + len(frame.path_capacity_bps)
             + len(frame.path_latency_us)
+            + len(frame.path_latency_quality)
             + len(frame.path_mtu)
+            + len(frame.path_pressure)
+            + (1 if frame.scheduler_status is not None else 0)
+            + len(frame.data_transmit_samples)
             + len(frame.internal_clock_sync)
             + len(frame.sink_time)
         )
@@ -180,7 +321,8 @@ def note_control_metadata_sent(
         path_capacity=path_capacity,
         path_latency=path_latency or {},
         path_mtu=path_mtu,
-        internal_clock={},
+        path_pressure=path_pressure or {},
+        internal_clock=internal_clock or {},
         sink_time=sink_time or [],
         path_name=path_name,
     )

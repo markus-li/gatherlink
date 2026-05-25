@@ -13,6 +13,7 @@ from gatherlink.protocol import SERVICE_ID_REMOTE_STATUS
 REMOTE_STATUS_REQUEST_INTERVAL_SECONDS = 2.0
 REMOTE_STATUS_REQUEST_TTL_SECONDS = 120.0
 REMOTE_STATUS_CACHE_TTL_SECONDS = 10.0
+REMOTE_STATUS_PENDING_TTL_SECONDS = 6.0
 
 REQUEST_TYPE = "status_request"
 RESPONSE_TYPE = "status_response"
@@ -44,6 +45,9 @@ class RemoteStatusState:
     next_request_at_monotonic: float = 0.0
     next_request_id: int = 1
     cache: dict[str, dict[str, object]] = field(default_factory=dict)
+    pending_requests: dict[int, float] = field(default_factory=dict)
+    acknowledged_responses: int = 0
+    timed_out_requests: int = 0
 
     def request(self, *, ttl_seconds: float = REMOTE_STATUS_REQUEST_TTL_SECONDS) -> dict[str, object]:
         """Enable temporary remote-status requests."""
@@ -60,9 +64,11 @@ class RemoteStatusState:
 
     def next_request_payload(self) -> tuple[int, bytes]:
         """Return the next request id and encoded payload, then schedule the next send."""
+        self._expire_pending_requests()
         request_id = self.next_request_id
         self.next_request_id += 1
         self.next_request_at_monotonic = time.monotonic() + REMOTE_STATUS_REQUEST_INTERVAL_SECONDS
+        self.pending_requests[request_id] = time.monotonic()
         ttl_seconds = self.remaining_ttl_seconds()
         return request_id, encode_request(request_id, ttl_seconds=ttl_seconds)
 
@@ -70,6 +76,9 @@ class RemoteStatusState:
         """Cache one peer status response for service monitor/list consumers."""
         if message.status is None:
             return
+        if message.request_id in self.pending_requests:
+            self.pending_requests.pop(message.request_id, None)
+            self.acknowledged_responses += 1
         self.cache[peer_name] = {
             "received_at": datetime.now(UTC).isoformat(),
             "request_id": message.request_id,
@@ -81,9 +90,15 @@ class RemoteStatusState:
     def status(self) -> dict[str, object]:
         """Return the IPC status shape for local monitor rendering."""
         self._mark_stale_entries()
+        self._expire_pending_requests()
         return {
             "enabled": self.is_enabled(),
             "ttl_seconds": self.remaining_ttl_seconds(),
+            "pending_request_count": len(self.pending_requests),
+            "acknowledged_responses": self.acknowledged_responses,
+            "timed_out_requests": self.timed_out_requests,
+            "request_interval_seconds": REMOTE_STATUS_REQUEST_INTERVAL_SECONDS,
+            "pending_ttl_seconds": REMOTE_STATUS_PENDING_TTL_SECONDS,
             "cache": self.cache,
         }
 
@@ -115,6 +130,18 @@ class RemoteStatusState:
                 envelope["stale"] = True
                 continue
             envelope["stale"] = (now - received).total_seconds() > REMOTE_STATUS_CACHE_TTL_SECONDS
+
+    def _expire_pending_requests(self) -> None:
+        """Expire unacknowledged internal metadata requests without retrying user UDP payloads."""
+        now = time.monotonic()
+        expired = [
+            request_id
+            for request_id, sent_at in self.pending_requests.items()
+            if now - sent_at > REMOTE_STATUS_PENDING_TTL_SECONDS
+        ]
+        for request_id in expired:
+            self.pending_requests.pop(request_id, None)
+        self.timed_out_requests += len(expired)
 
 
 def encode_request(request_id: int, *, ttl_seconds: float | None = None) -> bytes:

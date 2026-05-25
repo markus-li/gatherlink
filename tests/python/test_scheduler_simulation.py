@@ -21,9 +21,11 @@ def test_scheduler_matrix_shows_expected_policy_differences() -> None:
     clean = {decision.policy: decision.selected_path for decision in matrix["clean-balanced"]}
     lossy = {decision.policy: decision.selected_path for decision in matrix["loss-on-fast-path"]}
     queued = {decision.policy: decision.selected_path for decision in matrix["queue-pressure"]}
+    rust_modes = {decision.policy: decision.rust_mode for decision in matrix["clean-balanced"]}
 
     assert clean["srtt"] == "path-a"
-    assert clean["capacity_aware"] == "path-c"
+    assert clean["capacity_aware"] == "path-a"
+    assert rust_modes["capacity_aware"] == "weighted_round_robin"
     assert lossy["loss_aware"] != "path-a"
     assert queued["least_queue"] != "path-a"
 

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 PATH_CAPACITY_DETECTION_WINDOW_SECONDS = 5.0
 PATH_CAPACITY_INCREASE_SUSTAIN_SECONDS = 15.0
@@ -14,6 +17,8 @@ PATH_CAPACITY_HEADROOM_RATIO = 1.05
 PATH_CAPACITY_ADJUSTMENT_RATIO = 0.25
 PATH_CAPACITY_MIN_SAMPLE_BYTES = 16 * 1024
 PATH_CAPACITY_DEFAULT_BPS = 50_000_000
+PATH_CAPACITY_CACHE_SCHEMA_VERSION = 1
+PATH_CAPACITY_CACHE_FILE = "path-capacity-cache.json"
 
 
 @dataclass(frozen=True)
@@ -96,8 +101,8 @@ class PathCapacityDetector:
             sample_rate_bps = _int_or_none(sample_stats.get(path_name, {}).get("rate_bps"))
             capacity_key = f"{self._direction}_bps"
             current_bps = int(self._estimates[path_name].get(capacity_key) or PATH_CAPACITY_DEFAULT_BPS)
-            current_bytes = _sample_bytes(path_name, path_stats, sample_stats)
-            current_payload_bytes = path_stats.get(path_name, {}).get("bytes", 0)
+            current_bytes = _sample_bytes(path_name, path_stats, sample_stats, self._direction)
+            current_payload_bytes = _path_payload_bytes(path_name, path_stats, self._direction)
             current_drops = sample_stats.get(path_name, {}).get("dropped", 0)
             delta_bytes = max(current_bytes - self._last_bytes.get(path_name, 0), 0)
             delta_payload_bytes = max(current_payload_bytes - self._last_payload_bytes.get(path_name, 0), 0)
@@ -189,11 +194,20 @@ def _sample_bytes(
     path_name: str,
     path_stats: dict[str, dict[str, int]],
     sample_stats: dict[str, dict[str, int]],
+    direction: str,
 ) -> int:
     sample_row = sample_stats.get(path_name)
     if sample_row is not None and "sent_bytes" in sample_row:
         return sample_row["sent_bytes"]
-    return path_stats.get(path_name, {}).get("bytes", 0)
+    return _path_payload_bytes(path_name, path_stats, direction)
+
+
+def _path_payload_bytes(path_name: str, path_stats: dict[str, dict[str, int]], direction: str) -> int:
+    stats = path_stats.get(path_name, {})
+    directional_key = f"{direction}_bytes"
+    if directional_key in stats:
+        return stats[directional_key]
+    return stats.get("bytes", 0)
 
 
 def _empty_capacity_observation(*, direction: str | None = None) -> dict[str, float | int | str | None]:
@@ -231,3 +245,110 @@ def _int_or_none(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def initial_path_capacity_estimates(
+    runtime_config: Any,
+    path_names: list[str],
+    *,
+    direction: str,
+    cache_dir: Path | None = None,
+) -> dict[str, dict[str, int | str | None]]:
+    """
+    Build startup capacity estimates from cache plus runtime scheduler hints.
+
+    Configured capacity is only a seed. Runtime detection and peer control
+    metadata can refine it after traffic proves the real path behavior.
+    """
+    cache = load_path_capacity_cache(runtime_config, cache_dir=cache_dir)
+    estimates: dict[str, dict[str, int | str | None]] = {}
+    paths_by_name = {path.name: path for path in getattr(runtime_config, "paths", [])}
+    for path_name in path_names:
+        cached = cache.get(path_name, {})
+        scheduler = getattr(paths_by_name.get(path_name), "scheduler", None)
+        configured = (
+            _int_or_none(getattr(scheduler, f"{direction}_capacity_bps", None)) if scheduler is not None else None
+        )
+        cached_value = _int_or_none(cached.get(f"{direction}_bps")) if cached else None
+        estimates[path_name] = {
+            "tx_bps": None,
+            "rx_bps": None,
+            "source": "config" if configured is not None else "cache" if cached else "config",
+            "updated_at": (
+                None
+                if configured is not None
+                else cached.get("updated_at") if isinstance(cached.get("updated_at"), str) else None
+            ),
+        }
+        estimates[path_name][f"{direction}_bps"] = configured if configured is not None else cached_value
+        if estimates[path_name][f"{direction}_bps"] is None:
+            estimates[path_name][f"{direction}_bps"] = PATH_CAPACITY_DEFAULT_BPS
+    return estimates
+
+
+def merge_capacity_snapshots(
+    *snapshots: dict[str, dict[str, int | str | None]],
+) -> dict[str, dict[str, int | str | None]]:
+    """Merge sparse directional capacity snapshots without losing tx or rx."""
+    merged: dict[str, dict[str, int | str | None]] = {}
+    for snapshot in snapshots:
+        for path_name, capacity in snapshot.items():
+            existing = merged.get(path_name, {})
+            row = dict(existing)
+            for key, value in capacity.items():
+                if value is None and key in {"tx_bps", "rx_bps"} and row.get(key) is not None:
+                    continue
+                row[key] = value
+            merged[path_name] = row
+    return merged
+
+
+def load_path_capacity_cache(
+    runtime_config: Any,
+    *,
+    cache_dir: Path | None = None,
+) -> dict[str, dict[str, int | str | None]]:
+    """Load the non-authoritative local path capacity cache."""
+    cache_file = path_capacity_cache_file(runtime_config, cache_dir=cache_dir)
+    if not cache_file.exists():
+        return {}
+    try:
+        raw = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if raw.get("schema_version") != PATH_CAPACITY_CACHE_SCHEMA_VERSION:
+        return {}
+    paths = raw.get("paths")
+    if not isinstance(paths, dict):
+        return {}
+    return {str(path_name): path_data for path_name, path_data in paths.items() if isinstance(path_data, dict)}
+
+
+def save_path_capacity_cache(
+    runtime_config: Any,
+    path_capacity: dict[str, dict[str, int | str | None]],
+    *,
+    cache_dir: Path | None = None,
+) -> None:
+    """Persist non-authoritative path capacity hints for the next service start."""
+    cache_file = path_capacity_cache_file(runtime_config, cache_dir=cache_dir)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    merged_paths = load_path_capacity_cache(runtime_config, cache_dir=cache_dir)
+    merged_paths = merge_capacity_snapshots(merged_paths, path_capacity)
+    payload = {
+        "schema_version": PATH_CAPACITY_CACHE_SCHEMA_VERSION,
+        "updated_at": datetime.now(UTC).isoformat(),
+        "paths": merged_paths,
+    }
+    cache_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def path_capacity_cache_file(runtime_config: Any, *, cache_dir: Path | None = None) -> Path:
+    """Return the local per-node path capacity cache path."""
+    node_name = _safe_cache_name(str(getattr(runtime_config, "node", "node") or "node"))
+    return (cache_dir or Path(".gatherlink")) / node_name / PATH_CAPACITY_CACHE_FILE
+
+
+def _safe_cache_name(value: str) -> str:
+    safe = "".join(character if character.isalnum() or character in {"-", "_", "."} else "-" for character in value)
+    return safe.strip(".-") or "node"

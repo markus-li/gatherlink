@@ -26,7 +26,7 @@ from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.diagnostics.sinks import JsonlDiagnosticSink
 from gatherlink.runtime.helper_supervisor import HelperLaunchPlan, build_helper_launch_plans
 from gatherlink.runtime.relay_runner import RelayRunnerState, RelayRuntimeConfig, run_relay_service
-from gatherlink.runtime.runner import CoreRunnerState, run_core_service
+from gatherlink.runtime.runner import DEFAULT_DATAPLANE_BATCH_SIZE, CoreRunnerState, run_core_service
 from gatherlink.runtime.services import ServiceIpcServer, ServiceRecord, ServiceRegistry, service_name
 from gatherlink.runtime.supervisor import plan_runtime_start
 
@@ -60,7 +60,10 @@ def service(
         None,
         help="Stop after this many runner loop iterations; intended for smoke tests.",
     ),
-    batch_size: int = typer.Option(32, help="Maximum UDP datagrams to drain per service step."),
+    batch_size: int = typer.Option(
+        DEFAULT_DATAPLANE_BATCH_SIZE,
+        help="Maximum UDP datagrams to drain per service step.",
+    ),
     diagnostics_jsonl: Path | None = typer.Option(
         None,
         help="Append structured diagnostics events to this JSONL file.",
@@ -120,6 +123,7 @@ def service(
                 commands={
                     "control-cadence": runner_state.request_control_cadence,
                     "remote-status": runner_state.request_remote_status,
+                    "service-outcome": runner_state.request_service_outcome,
                 },
             )
             ipc.start()
@@ -325,7 +329,10 @@ def relay_start(
 def start(
     path: Path,
     name: str | None = typer.Option(None, "--name", help="Override the managed service name."),
-    batch_size: int = typer.Option(32, help="Maximum UDP datagrams to drain per service step."),
+    batch_size: int = typer.Option(
+        DEFAULT_DATAPLANE_BATCH_SIZE,
+        help="Maximum UDP datagrams to drain per service step.",
+    ),
     diagnostics_jsonl: Path | None = typer.Option(
         None, help="Append structured diagnostics events to this JSONL file."
     ),

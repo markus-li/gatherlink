@@ -7,7 +7,13 @@ from typing import Any
 
 from gatherlink.control import metadata as control_metadata_helpers
 from gatherlink.control import reserved
-from gatherlink.protocol import GATHERLINK_V1_HEADER_LEN, SERVICE_ID_CONTROL_METADATA, encode_control_payload
+from gatherlink.protocol import (
+    GATHERLINK_V1_HEADER_LEN,
+    SERVICE_ID_CONTROL_METADATA,
+    DataTransmitSample,
+    encode_control_payload,
+)
+from gatherlink.time.offset import InternalClockSyncMessage
 
 
 @dataclass(frozen=True)
@@ -21,8 +27,21 @@ class ControlMetadataAnnouncement:
     scheduler_policy_count: int
     service_disable_count: int
     capacity_count: int
+    latency_count: int
     mtu_count: int
+    pressure_count: int
+    data_transmit_sample_count: int
     sink_time_count: int
+    clock_sync_count: int
+    payload_bytes: int
+
+
+@dataclass(frozen=True)
+class PathPinnedControlAnnouncement:
+    """Summary of path-pinned control payloads handed to Rust."""
+
+    sent_paths: int
+    clock_sync_count: int
     payload_bytes: int
 
 
@@ -32,8 +51,13 @@ def announce_control_metadata(
     control_metadata: dict[str, object],
     *,
     path_capacity: dict[str, dict[str, int | str | None]] | None = None,
+    path_latency: dict[str, dict[str, int | str | None]] | None = None,
     path_mtu: dict[str, dict[str, int | str | None]] | None = None,
+    path_pressure: dict[str, dict[str, int | str | None]] | None = None,
+    scheduler_status: tuple[str, str, str] | None = None,
+    data_transmit_samples: list[DataTransmitSample] | None = None,
     service_disables: dict[int, str] | None = None,
+    path_clock_sync: list[InternalClockSyncMessage] | None = None,
     ntp_sample: Any | None = None,
     include_sink_time: bool = False,
 ) -> ControlMetadataAnnouncement:
@@ -50,7 +74,14 @@ def announce_control_metadata(
     service_metadata = {service.service_id: service.name for service in runtime_config.services}
     service_endpoint_assertions = {service.service_id: service.target for service in runtime_config.services}
     service_scheduler_policies = {
-        service.service_id: (service.scheduler_fanout, service.scheduler_fanout_below_bytes)
+        service.service_id: (
+            service.scheduler_fanout,
+            service.scheduler_fanout_below_bytes,
+            service.scheduler_flowlet_idle_us,
+            service.scheduler_flowlet_max_hold_us,
+            service.scheduler_path_run_datagrams,
+            _service_path_policy_code(service.scheduler_path_policy),
+        )
         for service in runtime_config.services
     }
     sink_time = (
@@ -59,8 +90,12 @@ def announce_control_metadata(
         else []
     )
     path_capacity = path_capacity or {}
+    path_latency = path_latency or {}
     path_mtu = path_mtu or {}
+    path_pressure = path_pressure or {}
+    data_transmit_samples = data_transmit_samples or []
     service_disables = service_disables or {}
+    path_clock_sync = path_clock_sync or []
     payload = encode_control_payload(
         path_metadata,
         service_metadata=service_metadata,
@@ -68,9 +103,23 @@ def announce_control_metadata(
         service_scheduler_policies=service_scheduler_policies,
         service_disables=service_disables,
         path_capacity_bps=control_metadata_helpers.capacity_by_path_id(path_capacity, path_ids),
+        path_latency_us=control_metadata_helpers.latency_by_path_id(path_latency, path_ids),
+        path_latency_quality=control_metadata_helpers.latency_quality_by_path_id(path_latency, path_ids),
         path_mtu=control_metadata_helpers.mtu_by_path_id(path_mtu, path_ids),
+        path_pressure=control_metadata_helpers.pressure_by_path_id(path_pressure, path_ids),
+        scheduler_status=scheduler_status,
+        data_transmit_samples=data_transmit_samples,
+        path_clock_sync=path_clock_sync,
         sink_time=sink_time,
     )
+    if scheduler_status is not None:
+        configured_mode, effective_mode, rust_mode = scheduler_status
+        control_metadata_helpers.set_local_scheduler_status(
+            control_metadata,
+            configured_mode=configured_mode,
+            effective_mode=effective_mode,
+            rust_mode=rust_mode,
+        )
     sent_paths = dataplane.transmit_service_payload(SERVICE_ID_CONTROL_METADATA, payload)
     for path_name in path_ids:
         reserved.note_control_metadata_sent(
@@ -79,12 +128,15 @@ def announce_control_metadata(
             frame_bytes=len(payload) + GATHERLINK_V1_HEADER_LEN,
             path_metadata=path_metadata,
             path_capacity=path_capacity,
+            path_latency=path_latency,
             path_mtu=path_mtu,
+            path_pressure=path_pressure,
             service_metadata=service_metadata,
             service_endpoint_assertions=service_endpoint_assertions,
             service_scheduler_policies=service_scheduler_policies,
             service_disables=service_disables,
             sink_time=sink_time,
+            internal_clock=control_metadata_helpers.clock_sync_sent_status(path_clock_sync),
             path_name=path_name,
         )
     return ControlMetadataAnnouncement(
@@ -95,7 +147,70 @@ def announce_control_metadata(
         scheduler_policy_count=len(service_scheduler_policies),
         service_disable_count=len(service_disables),
         capacity_count=len(path_capacity),
+        latency_count=len(path_latency),
         mtu_count=len(path_mtu),
+        pressure_count=len(path_pressure),
+        data_transmit_sample_count=len(data_transmit_samples),
         sink_time_count=len(sink_time),
+        clock_sync_count=len(path_clock_sync),
         payload_bytes=len(payload),
+    )
+
+
+def _service_path_policy_code(policy: str) -> int:
+    """Encode Python's service path selector primitive into control metadata."""
+    return {
+        "inherit": 0,
+        "single_best_path": 1,
+        "weighted_round_robin": 2,
+    }[policy]
+
+
+def announce_path_pinned_clock_sync(
+    dataplane: Any,
+    runtime_config: Any,
+    control_metadata: dict[str, object],
+    path_clock_sync: list[InternalClockSyncMessage],
+) -> PathPinnedControlAnnouncement:
+    """
+    Send NTP-style internal clock probes on the exact path they measure.
+
+    This keeps Python in charge of clock-sync meaning while giving the Rust
+    dataplane only the narrow execution primitive needed for honest per-path
+    latency samples.
+    """
+    if not path_clock_sync:
+        return PathPinnedControlAnnouncement(sent_paths=0, clock_sync_count=0, payload_bytes=0)
+    path_names_by_id = {path.scheduler.path_id: path.name for path in runtime_config.paths}
+    transmit_on_path = getattr(dataplane, "transmit_service_payload_on_path", None)
+    if not callable(transmit_on_path):
+        raise RuntimeError("Rust dataplane does not expose exact-path reserved-service transmit")
+    sent_paths = 0
+    payload_bytes = 0
+    for sync in path_clock_sync:
+        path_name = path_names_by_id.get(sync.path_id)
+        if path_name is None:
+            continue
+        payload = encode_control_payload(
+            {sync.path_id: path_name},
+            path_clock_sync=[sync],
+        )
+        sent_paths += transmit_on_path(SERVICE_ID_CONTROL_METADATA, sync.path_id, payload)
+        payload_bytes += len(payload)
+        reserved.note_control_metadata_sent(
+            control_metadata,
+            payload,
+            frame_bytes=len(payload) + GATHERLINK_V1_HEADER_LEN,
+            path_metadata={sync.path_id: path_name},
+            path_capacity={},
+            path_latency={},
+            path_mtu={},
+            path_pressure={},
+            internal_clock=control_metadata_helpers.clock_sync_sent_status([sync]),
+            path_name=path_name,
+        )
+    return PathPinnedControlAnnouncement(
+        sent_paths=sent_paths,
+        clock_sync_count=len(path_clock_sync),
+        payload_bytes=payload_bytes,
     )
