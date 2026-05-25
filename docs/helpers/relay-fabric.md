@@ -100,12 +100,9 @@ source requires a maintained, narrow client library.
 - dynamic relay-session requests outside signed topology/control context
 - mandatory cloud relay service
 
-## Non-goals
+## Boundary
 
-Relay fabric must not become:
-
-- hidden dynamic mesh magic
-- firewall policy engine
-- payload inspection layer
-- mandatory cloud service for self-hosted deployments
-- opaque vendor-only infrastructure
+Relay fabric must follow `docs/protocol/relay-session-lifecycle.md`,
+`docs/protocol/relay-trust-model.md`, and
+`docs/architecture/architecture-contract.md`. This helper doc records relay
+discovery and health scope only.

@@ -51,3 +51,23 @@ sudo wg show
 Use Gatherlink for unstable multi-path WAN transport, then let WireGuard provide
 the VPN interface on top. Keep firewall and routing policy in your normal Linux
 or WireGuard setup.
+
+## MTU Tuning
+
+WireGuard interface MTU is the main WireGuard-side knob that affects
+WireGuard-over-Gatherlink throughput. It changes the packet shape that
+Gatherlink sees; it does not change Gatherlink routing, security, or service
+mapping.
+
+Start with MTU `1380` on normal 1500-byte underlay paths. If the path set is
+lossy or jittery, test MTU `1280`. For UDP-first testing on very uneven mobile
+or satellite-style profiles, MTU `1200` can be worth testing too. Avoid assuming
+MTU `1420` is better just because it is larger; in the Hyper-V real-world
+facsimiles it hurt TCP-like WireGuard traffic badly.
+
+`PersistentKeepalive` is still useful for NAT/liveness behavior, but it is not a
+throughput tuning knob. Keep it only where the normal WireGuard deployment would
+need it.
+
+For current performance status, known struggles, and benchmark interpretation,
+see `docs/benchmarks/wireguard-over-gatherlink-status.md`.

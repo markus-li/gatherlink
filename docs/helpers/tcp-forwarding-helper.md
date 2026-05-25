@@ -1,10 +1,12 @@
-# TCP Forwarding Helper
+# TCP Forwarding And TCP Proxy Helper
 
 ## Purpose
 
 The TCP forwarding helper provides simple one-to-one TCP port forwarding over
-Gatherlink. It is an active helper priority and remains Python/control-plane
-owned for v0.9.
+Gatherlink. The same helper family is also the future TCP-aware proxy shape for
+TCP streams where Gatherlink should stay "in the know" at stream level without
+moving TCP semantics into Rust. It is an active helper priority and remains
+Python/control-plane owned for v0.9.
 
 Example:
 
@@ -28,6 +30,63 @@ local 127.0.0.1:8080
 - clear diagnostics for refused connections, unreachable exits, and policy
   denial
 - optional JSONL diagnostics sink for stream lifecycle and failure events
+
+Post-v0.9.2 TCP-aware proxy scope must include both explicit and transparent
+modes from the beginning:
+
+- explicit mode: applications connect to a configured local listen endpoint,
+  and the helper forwards to a configured target or named remote exit service
+- transparent mode: an opt-in Debian firewall/policy-routing helper uses
+  TPROXY-style interception to deliver selected TCP flows to the local helper
+  while preserving the original destination
+- the stream helper owns TCP connection lifetime, byte ordering, stream ids,
+  backpressure, credits, open/close/reset, and per-stream diagnostics
+- the traffic-split/firewall helper owns nftables/TPROXY rules, marks, policy
+  routing, original-destination recovery, labels, cleanup, and privilege
+  checks
+- Gatherlink core still carries framed encrypted service payloads and receives
+  only scheduler metadata such as stream id, traffic class, pressure, and path
+  preference
+
+Initial post-v0.9.2 tests may prove explicit mode first, but transparent mode
+is part of the helper contract and must be designed so it can work rather than
+bolted on as a separate product later.
+
+## Post-V0.9.2 Hybrid TCP Proxy Plus WireGuard Profile
+
+A useful post-v0.9.2 deployment profile is:
+
+```text
+TCP traffic
+  -> transparent TCP proxy helper
+  -> TCP-aware Gatherlink stream service
+
+non-TCP traffic
+  -> WireGuard
+  -> WireGuard-over-Gatherlink service
+```
+
+This lets Gatherlink handle TCP with stream-level knowledge while leaving
+non-TCP IP traffic, VPN behavior, keys, interfaces, and routes with WireGuard.
+It avoids trying to make a single opaque WireGuard UDP flow behave like MPTCP
+for high-BDP TCP traffic.
+
+Boundary:
+
+- the TCP proxy helper owns TCP stream framing and per-stream scheduler hints
+- the WireGuard helper owns the non-TCP tunnel transport shape around
+  WireGuard's own tooling
+- the traffic-split/firewall helper owns the local Debian rules that decide
+  which traffic enters the transparent TCP proxy and which traffic stays in
+  WireGuard
+- Gatherlink core still carries encrypted service payloads and does not inspect
+  application protocols, raw TCP sequence numbers, or WireGuard payloads
+
+This is not part of the v0.9.2 release scope. When promoted later, it should be
+tested first without transparent interception by using explicit TCP proxy
+listeners and ordinary WireGuard-over-Gatherlink for the remaining traffic.
+Transparent interception can then be proven separately with the same TCP stream
+service.
 
 Implemented first slice:
 
@@ -76,6 +135,41 @@ Use Python `asyncio` streams first. Do not add a TCP proxy dependency unless the
 standard library cannot provide the needed connection lifecycle, backpressure,
 and diagnostics hooks.
 
+For TCP-aware proxying, stream frames should remain inside the encrypted
+Gatherlink service payload. A compact frame shape should be enough:
+
+```text
+stream_id
+frame_type: open | data | close | reset | credit | keepalive
+flags: interactive | bulk | prefer_stable | allow_migrate
+chunk_id
+payload
+```
+
+Scheduler metadata exposed by the helper should be stream-level, not raw TCP
+sequence-level:
+
+```text
+service_id
+stream_id
+traffic_class
+flowlet_key = stream_id
+path_preference
+send_backlog
+latency_sensitivity
+```
+
+Default scheduling posture:
+
+- keep one TCP stream on one path by default
+- spread different TCP streams across available paths
+- move a stream only after a safe idle/flowlet gap, explicit policy decision,
+  or path failure
+- prioritize open, close, reset, credit, and small interactive frames ahead of
+  bulk data when the helper marks them that way
+- expose per-stream path choice, backlog, stalls, resets, and close reasons in
+  diagnostics
+
 ## Not-Yet Scope
 
 - general proxy framework
@@ -83,8 +177,10 @@ and diagnostics hooks.
 - TLS termination
 - shared SOCKS5 multiplexing unless a later design folds them together
 - TCP semantics or stream proxying inside Rust
-- transparent proxying
-- dynamic target selection from packet contents
+- transparent mode implementation until the Debian TPROXY/firewall helper
+  slice is promoted and tested
+- dynamic L7 target selection from packet contents
+- hidden TCP reliability for ordinary Gatherlink UDP services
 
 ## Relationship To SOCKS5 Helper
 

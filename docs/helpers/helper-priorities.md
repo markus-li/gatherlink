@@ -7,6 +7,10 @@ deferred. Helpers are Python/control-plane features unless a document explicitly
 says otherwise. They must not move policy, privileged behavior, or protocol
 parsing into the Rust dataplane without a later design decision.
 
+The canonical helper boundary is `docs/architecture/architecture-contract.md`.
+This file records helper priority and local helper scope only; detailed helper
+contracts live in the specific helper docs linked from `docs/helpers/README.md`.
+
 When committing helper documentation, only stage the docs touched for that
 helper decision. Other chats may be editing code or unrelated docs.
 
@@ -121,7 +125,11 @@ Not-yet scope:
 
 The TCP forwarding helper provides simple 1:1 port forwarding over Gatherlink,
 including response traffic. Example: local TCP port to a web server reachable on
-the remote side through a Gatherlink service.
+the remote side through a Gatherlink service. The post-v0.9.2 TCP-aware proxy
+and transparent TPROXY shape is documented in
+`docs/helpers/tcp-forwarding-helper.md` and
+`docs/reports/future-roadmap-pipeline.md`; it is not part of the current
+active helper slice.
 
 First scope:
 
@@ -139,6 +147,8 @@ Not-yet scope:
 - L7 routing
 - shared SOCKS5 multiplexing unless later design folds them together
 - TCP semantics inside the Rust dataplane
+- transparent TCP interception until the post-v0.9.2 TCP-aware proxy slice is
+  promoted
 
 ### 6. Relay Fabric Helper
 
@@ -179,10 +189,11 @@ First scope:
 - loopback-only bind by default
 - non-loopback bind only through a loud danger flag
 - structured helper diagnostics, including startup and non-loopback bind events
-- write-window metadata so future write APIs can expire without changing the
+- write-window metadata so experimental write APIs expire without changing the
   helper contract
-- POST/write requests fail closed once the write window has expired, even
-  though write operations themselves are still intentionally unimplemented
+- `POST /v1/services/{name}/close` mapped narrowly to the existing local service
+  registry close behavior
+- POST/write requests fail closed once the write window has expired
 - redacted service metadata so status responses cannot leak private keys,
   session keys, tokens, passwords, or bootstrap secrets accidentally carried in
   registry records
@@ -190,36 +201,9 @@ First scope:
 Not-yet scope:
 
 - remote unauthenticated exposure
-- service control or mutation
+- broad service control or mutation beyond the guarded close endpoint
 - replacing `gatherlink services monitor`
 - richer diagnostics sinks
-
-### 8. Experimental Local REST Helper
-
-The REST service should be a helper/control-plane sidecar, not core runtime or
-dataplane logic. It exists to prepare future UI and local automation while the
-CLI remains the primary supported control surface.
-
-V1 scope:
-
-- explicit CLI startup
-- bind to `127.0.0.1` by default
-- non-loopback bind only with a loud danger flag
-- read APIs for service list/status structured facts
-- write-window metadata for selected CLI-equivalent operations
-- write APIs expire after one hour by default unless the helper is restarted
-  from CLI
-- responses must not expose secret key material
-- all docs and startup output must mark it `EXPERIMENTAL`
-
-Not-yet scope:
-
-- remote unauthenticated management
-- implemented write operations
-- replacing the CLI
-- stable public API guarantees
-- browser UI as part of v0.9
-- long-lived write access
 
 ## Deferred Helpers
 
@@ -252,10 +236,9 @@ Deferred means:
 
 ## Cross-Cutting Rules
 
-- Helpers fail independently; core transport keeps running.
-- Helpers emit diagnostics rather than silently changing policy.
-- Helpers should be Python-owned unless there is a measured packet-rate reason
-  to move a tiny execution primitive into Rust.
+- Follow `docs/architecture/architecture-contract.md` for global helper
+  boundaries.
+- Helpers fail independently and emit diagnostics.
 - Privileged helpers must be narrow, explicit, and opt-in.
 - Active helper docs should define first scope and not-yet scope before code is
   expanded.

@@ -17,6 +17,10 @@ Implemented first slice:
 
 - `gatherlink helpers wireguard-plan configs/examples/wireguard-client.json`
   shows the Gatherlink service mapping that WireGuard should use
+- `gatherlink helpers wireguard-plan
+  configs/examples/wireguard-dual-profile-client.json` shows the advanced
+  two-tunnel profile: a stable/default service for TCP-like traffic and a
+  fast service for UDP/high-throughput traffic
 - the WireGuard peer `Endpoint` should point at the local Gatherlink service
   listen endpoint; Gatherlink then forwards that UDP service to the configured
   WireGuard listen endpoint on the far side
@@ -32,6 +36,9 @@ Implemented first slice:
   generated peer secrets
 - Gatherlink does not parse or implement WireGuard packets, routes, firewall
   policy, or interface lifecycle
+- the optional traffic split helper can generate Debian policy-routing rules
+  for the dual profile, but sites should prefer owning the reviewed final rules
+  in their normal firewall tooling when possible
 - `tools/hyperv/run_wireguard_vm_acceptance.sh` proves this contract in the
   two-Debian-VM lab by rendering the WireGuard plan, sending UDP payloads to the
   planned local Gatherlink endpoint, and verifying they exit at the peer-side
@@ -41,6 +48,33 @@ Implemented first slice:
   interfaces. The runner uses WireGuard's own `wg` tool and lab sudo for the
   interface setup, then curls an HTTP helper over WireGuard while Gatherlink
   carries the UDP endpoint packets through B -> C -> A relay-hop transport.
+- `tools/hyperv/run_dual_wireguard_gatherlink_speed.sh` proves the advanced
+  dual profile with two real temporary WireGuard interfaces over two
+  Gatherlink UDP services. It uses the WireGuard helper plan, captures the
+  traffic-split helper dry-run, then sends TCP-style iperf through the stable
+  tunnel and UDP-style iperf through the fast tunnel.
+
+Performance posture:
+
+- Current WireGuard-over-Gatherlink performance status and known struggles live
+  in `docs/benchmarks/wireguard-over-gatherlink-status.md`. Keep exact
+  benchmark rows in the benchmark docs, not in this helper contract.
+- The advanced dual-WireGuard profile is intended for mixed traffic where one
+  opaque WireGuard peer flow is not enough information for the scheduler:
+  TCP/default traffic uses the stable profile, while UDP/high-throughput traffic
+  uses the fast profile.
+- The dual profile is not the default because it requires two WireGuard
+  interfaces, two Gatherlink services, and local firewall or policy-routing
+  decisions.
+- WireGuard interface MTU remains WireGuard-owned, but the helper docs should
+  mention it because it changes the UDP packet shape that Gatherlink carries.
+- Use MTU `1380` as the normal starting point for 1500-byte underlays.
+- Test MTU `1280` or `1200` on lossy/jittery mobile or satellite-style path
+  sets.
+- Avoid using a larger MTU such as `1420` as a blind performance tweak; current
+  Hyper-V real-world facsimiles showed that it can hurt TCP-like WireGuard
+  traffic over Gatherlink.
+- `PersistentKeepalive` is a liveness/NAT setting, not a throughput setting.
 
 Library posture:
 
@@ -49,8 +83,22 @@ Library posture:
 - do not add a Python WireGuard protocol library for v0.9
 - Gatherlink should generate/coordinate config, not reimplement WireGuard
 
+Post-v0.9.2 userspace WireGuard comparison:
+
+- evaluate Mullvad's GotaTun as an optional Rust userspace WireGuard backend
+  for labs and advanced helpers
+- compare it directly against `wireguard-go` before considering it for normal
+  helper use
+- keep kernel WireGuard and standard `wg`/`wg-quick` tooling as the normal
+  operator path unless benchmark and reliability evidence justify another
+  backend
+- do not vendor, fork, or implement WireGuard protocol behavior in Gatherlink
+  unless a later roadmap explicitly accepts the security and support burden
+- document Linux privilege differences, especially capability and `fwmark`
+  behavior, before exposing it as an operator choice
+
 Not-yet scope:
 
 - implementing WireGuard protocol behavior
 - replacing `wg`, `wg-quick`, platform network managers, or appliance tooling
-- taking over system firewall/routing policy
+- silently taking over system firewall/routing policy without operator review

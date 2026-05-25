@@ -12,24 +12,26 @@ $VmSpecs = @(
     @{
         Name = "gatherlink-vm-a"
         MacBase = "00155D9100"
-        PathIpNote = "path-a=10.91.1.11/24 path-b=10.91.2.11/24 path-c=10.91.3.11/24"
+        PathIpNote = "path-a=10.91.1.11/24 path-b=10.91.2.11/24 path-c=10.91.3.11/24 path-d=10.91.4.11/24 path-e=10.91.5.11/24"
     },
     @{
         Name = "gatherlink-vm-b"
         MacBase = "00155D9200"
-        PathIpNote = "path-a=10.91.1.12/24 path-b=10.91.2.12/24 path-c=10.91.3.12/24"
+        PathIpNote = "path-a=10.91.1.12/24 path-b=10.91.2.12/24 path-c=10.91.3.12/24 path-d=10.91.4.12/24 path-e=10.91.5.12/24"
     },
     @{
         Name = "gatherlink-vm-c"
         MacBase = "00155D9300"
-        PathIpNote = "path-a=10.91.1.13/24 path-b=10.91.2.13/24 path-c=10.91.3.13/24"
+        PathIpNote = "path-a=10.91.1.13/24 path-b=10.91.2.13/24 path-c=10.91.3.13/24 path-d=10.91.4.13/24 path-e=10.91.5.13/24"
     }
 )
 
 $PathSwitches = @(
     @{ AdapterName = "path-a"; SwitchName = "gatherlink-path-a"; MacSuffix = "A1" },
     @{ AdapterName = "path-b"; SwitchName = "gatherlink-path-b"; MacSuffix = "B1" },
-    @{ AdapterName = "path-c"; SwitchName = "gatherlink-path-c"; MacSuffix = "C1" }
+    @{ AdapterName = "path-c"; SwitchName = "gatherlink-path-c"; MacSuffix = "C1" },
+    @{ AdapterName = "path-d"; SwitchName = "gatherlink-path-d"; MacSuffix = "D1" },
+    @{ AdapterName = "path-e"; SwitchName = "gatherlink-path-e"; MacSuffix = "E1" }
 )
 
 $SelectedVmSpecs = $VmSpecs | Where-Object { $Name -contains $_.Name }
@@ -62,7 +64,14 @@ if (-not $IsoPath -or -not (Test-Path -LiteralPath $IsoPath)) {
     throw "Debian netinst ISO was not found. Pass -IsoPath or run tools\hyperv\download_debian_netinst.ps1 first."
 }
 
-foreach ($switchName in @($InternetSwitchName, "gatherlink-path-a", "gatherlink-path-b", "gatherlink-path-c")) {
+foreach ($switchName in @(
+        $InternetSwitchName,
+        "gatherlink-path-a",
+        "gatherlink-path-b",
+        "gatherlink-path-c",
+        "gatherlink-path-d",
+        "gatherlink-path-e"
+    )) {
     if (-not (Get-VMSwitch -Name $switchName -ErrorAction SilentlyContinue)) {
         throw "Required Hyper-V switch '$switchName' does not exist."
     }

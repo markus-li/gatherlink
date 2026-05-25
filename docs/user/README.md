@@ -44,5 +44,5 @@ gatherlink config validate configs/examples/windows-two-node-a.json
 - Authenticated Noise-generated security material is the normal secure path.
   Static crypto remains an explicit lab/manual fallback.
 - SOCKS5 and WireGuard are the most useful helper paths at this stage.
-- Day-to-day operation is covered in `docs/operations/v0.9-operator-runbook.md`.
+- Day-to-day operation is covered in `docs/operations/v0.9-operator-runbook.md` until the next general runbook replaces it; treat it as the current Debian operations guide, not as a new feature roadmap.
 - Scenario troubleshooting is covered in `docs/operations/v0.9-troubleshooting-guide.md`.

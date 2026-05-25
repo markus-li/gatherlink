@@ -36,14 +36,14 @@ The scheduler remains deterministic and explainable.
 
 The advisor should run locally by default.
 
-Do not require a cloud AI service to make routing decisions.
+Do not require an external cloud decision service to make routing decisions.
 
 Fleet/cloud systems may later aggregate anonymized opt-in patterns, but packet
-routing must not depend on external AI.
+routing must not depend on an external decision service.
 
 ## Compute model
 
-Do not use an LLM for hot-path routing.
+Do not use an opaque general-purpose model for hot-path routing.
 
 Useful techniques are lightweight:
 
@@ -67,4 +67,4 @@ Do not implement before:
 - real traces exist
 - replayable scenarios exist
 
-This is a future optimization layer, not v0.9.
+This is a future optimization layer unless a release roadmap promotes it.

@@ -47,6 +47,7 @@ gatherlink config validate configs/examples/minimal-client.json
 gatherlink config validate --json configs/examples/minimal-client.json
 gatherlink config show --runtime configs/examples/minimal-client.json
 gatherlink config show --canonical configs/examples/minimal-client.json
+gatherlink config summary configs/examples/minimal-client.json
 ```
 
 Format detection is deliberately shallow. It only chooses which input mapping to
@@ -97,4 +98,5 @@ when the source config file stores explicit session material.
 
 Runtime JSON is also the first operator/automation view for compiled state.
 Human terminal tables may be added later, but they should be derived from the
-same compiled runtime model.
+same compiled runtime model. `config summary` is the stable compact automation
+view for compiled path, service, helper, security, and scheduler facts.

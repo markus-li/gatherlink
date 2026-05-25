@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "global_targets": {
+    "gatherlink_raw_udp_onehop": {
+      "baseline": "userspace WireGuard, same active paths and MTU",
+      "pass_threshold_ratio": 0.8,
+      "performance_target_ratio": 0.9
+    },
+    "wireguard_over_gatherlink_onehop": {
+      "baseline": "userspace WireGuard direct, same active paths and MTU",
+      "pass_threshold_ratio": 0.75,
+      "performance_target_ratio": 0.9
+    },
+    "gatherlink_raw_udp_untrusted_relay": {
+      "baseline": "userspace WireGuard routed through equivalent hop shape",
+      "pass_threshold_ratio": 0.7,
+      "performance_target_ratio": 0.9
+    },
+    "wireguard_over_gatherlink_relay": {
+      "baseline": "userspace WireGuard routed through equivalent hop shape",
+      "pass_threshold_ratio": 0.65,
+      "performance_target_ratio": 0.9
+    }
+  },
+  "wan_profiles": {
+    "acceptance-300-500-700": {
+      "expected_capacity_mbit": 1500,
+      "wg_userland_mbit": 1500,
+      "path_capacity_mbit": [300, 500, 700],
+      "pressure_mbit": 1550,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.8,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "acceptance-uneven-high": {
+      "expected_capacity_mbit": 2800,
+      "wg_userland_mbit": 2800,
+      "path_capacity_mbit": [600, 900, 1300],
+      "pressure_mbit": 2900,
+      "path_mtu": 1452,
+      "payload_size": 1438,
+      "shape_mtu": 1452,
+      "pass_threshold_delivered_ratio": 0.7,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "realworld-fiber-plus-5g": {
+      "expected_capacity_mbit": 930,
+      "wg_userland_mbit": 930,
+      "path_capacity_mbit": [800, 160, 85],
+      "pressure_mbit": 950,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "realworld-starlink-plus-5g": {
+      "expected_capacity_mbit": 245,
+      "wg_userland_mbit": 245,
+      "path_capacity_mbit": [180, 120, 15],
+      "pressure_mbit": 250,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "realworld-starlink-plus-2x5g": {
+      "expected_capacity_mbit": 340,
+      "wg_userland_mbit": 340,
+      "path_capacity_mbit": [180, 140, 90],
+      "pressure_mbit": 350,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "external-clean-dual-gig": {
+      "expected_capacity_mbit": 2000,
+      "wg_userland_mbit": 2000,
+      "path_capacity_mbit": [1000, 1000],
+      "pressure_mbit": 2100,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9,
+      "external_pass_mbit": 300,
+      "external_strong_mbit": 500
+    },
+    "external-fiber-5g-asymmetric": {
+      "expected_capacity_mbit": 950,
+      "wg_userland_mbit": 950,
+      "path_capacity_mbit": [800, 150],
+      "pressure_mbit": 980,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "external-starlink-5g-high-bdp": {
+      "expected_capacity_mbit": 315,
+      "wg_userland_mbit": 315,
+      "path_capacity_mbit": [180, 120, 15],
+      "pressure_mbit": 330,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9,
+      "external_pass_mbit": 150,
+      "external_strong_mbit": 250
+    },
+    "external-starlink-queue-dynamics": {
+      "expected_capacity_mbit": 275,
+      "wg_userland_mbit": 232,
+      "path_capacity_mbit": [160, 95, 20],
+      "pressure_mbit": 290,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9,
+      "external_pass_mbit": 150,
+      "external_strong_mbit": 250
+    },
+    "external-five-starlink-correlated": {
+      "expected_capacity_mbit": 1100,
+      "wg_userland_mbit": 1100,
+      "path_capacity_mbit": [220, 240, 200, 230, 210],
+      "pressure_mbit": 1150,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9,
+      "external_pass_mbit": 300,
+      "external_strong_mbit": 650
+    },
+    "external-dual-lte-same-tower": {
+      "expected_capacity_mbit": 160,
+      "wg_userland_mbit": 160,
+      "path_capacity_mbit": [80, 80],
+      "pressure_mbit": 170,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "external-dual-lte-independent": {
+      "expected_capacity_mbit": 160,
+      "wg_userland_mbit": 160,
+      "path_capacity_mbit": [80, 80],
+      "pressure_mbit": 170,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "external-duplication-mode": {
+      "expected_capacity_mbit": 260,
+      "wg_userland_mbit": 260,
+      "path_capacity_mbit": [120, 80, 60],
+      "pressure_mbit": 180,
+      "path_mtu": 1200,
+      "payload_size": 800,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "external-tcp-mode-relay": {
+      "expected_capacity_mbit": 320,
+      "wg_userland_mbit": 320,
+      "path_capacity_mbit": [200, 120],
+      "pressure_mbit": 330,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    }
+  },
+  "three_path_wan_profiles": {
+    "acceptance-300-500-700": {
+      "expected_capacity_mbit": 1500,
+      "wg_userland_mbit": 1500,
+      "path_capacity_mbit": [300, 500, 700],
+      "pressure_mbit": 1550,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.8,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "acceptance-uneven-high": {
+      "expected_capacity_mbit": 2800,
+      "wg_userland_mbit": 2800,
+      "path_capacity_mbit": [600, 900, 1300],
+      "pressure_mbit": 2900,
+      "path_mtu": 1452,
+      "payload_size": 1438,
+      "shape_mtu": 1452,
+      "pass_threshold_delivered_ratio": 0.7,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "realworld-fiber-plus-5g": {
+      "expected_capacity_mbit": 930,
+      "wg_userland_mbit": 930,
+      "path_capacity_mbit": [800, 160, 85],
+      "pressure_mbit": 950,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "realworld-starlink-plus-5g": {
+      "expected_capacity_mbit": 245,
+      "wg_userland_mbit": 245,
+      "path_capacity_mbit": [180, 120, 15],
+      "pressure_mbit": 250,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    },
+    "realworld-starlink-plus-2x5g": {
+      "expected_capacity_mbit": 340,
+      "wg_userland_mbit": 340,
+      "path_capacity_mbit": [180, 140, 90],
+      "pressure_mbit": 350,
+      "path_mtu": 1200,
+      "payload_size": 1200,
+      "pass_threshold_delivered_ratio": 0.75,
+      "performance_target_delivered_ratio": 0.9
+    }
+  }
+}

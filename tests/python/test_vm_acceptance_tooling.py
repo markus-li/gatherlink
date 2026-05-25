@@ -21,7 +21,7 @@ def test_vm_acceptance_scripts_are_syntax_valid(tmp_path) -> None:
             [
                 "python3",
                 "-c",
-                ("import py_compile, sys; " "py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)"),
+                ("import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)"),
                 str(source),
                 str(tmp_path / f"{source.name}.pyc"),
             ],
@@ -51,6 +51,43 @@ def test_hyperv_acceptance_scripts_are_syntax_valid() -> None:
         subprocess.run(["bash", "-n", str(script)], check=True)
 
 
+def test_hyperv_performance_scripts_are_syntax_valid() -> None:
+    """Performance tooling should stay parseable because it drives long VM runs."""
+    for name in [
+        "perf_common.sh",
+        "install_boringtun_backend.sh",
+        "install_gotatun_backend.sh",
+        "run_private_lan_speed.sh",
+        "run_wireguard_onehop_speed.sh",
+        "run_gatherlink_onehop_speed.sh",
+        "run_relay_udp_speed.sh",
+        "run_relay_rust_udp_speed.sh",
+        "run_relay_wireguard_speed.sh",
+        "run_performance_matrix.sh",
+        "run_direct_wireguard_routing_speed.sh",
+    ]:
+        subprocess.run(["bash", "-n", str(HYPERV_TOOLS / name)], check=True)
+
+
+def test_hyperv_performance_docs_define_comparable_layers() -> None:
+    """Benchmark notes should keep Gatherlink/WireGuard concerns separated."""
+    readme = (REPO_ROOT / "docs" / "benchmarks" / "README.md").read_text(encoding="utf-8")
+    log = (REPO_ROOT / "docs" / "benchmarks" / "hyperv-performance-log.md").read_text(encoding="utf-8")
+
+    assert "Private LAN" in log
+    assert "Direct WireGuard" in log
+    assert "One-hop WireGuard userspace" in log
+    assert "wireguard-gotatun-onehop" in log
+    assert "wireguard-boringtun-onehop" in log
+    assert "Gatherlink raw one-hop" in log
+    assert "Gatherlink raw relay" in log
+    assert "WireGuard over Gatherlink relay" in log
+    assert "Only compare runs with the same" in readme
+    assert "install_gotatun_backend.sh" in readme
+    assert "install_boringtun_backend.sh" in readme
+    assert "CPU and memory are not ruled out" in log
+
+
 def test_socks5_acceptance_uses_distinct_gatherlink_services_for_helper_types() -> None:
     """SOCKS5 and TCP forward probes must not share one learned app source."""
     script = (HYPERV_TOOLS / "run_socks5_vm_acceptance.sh").read_text(encoding="utf-8")
@@ -69,7 +106,8 @@ def test_relay_wireguard_acceptance_uses_real_wg_and_relay_processes() -> None:
     assert "sudo ip link add wg-gl-b type wireguard" in script
     assert "run relay-start" in script
     assert "relaywg.c.relay.ba.path-" in script
-    assert "relaywg.a.exit.ba.path-" in script
+    assert "relaywg.a.exit.ba.path-" not in script
+    assert "10.91.{index}.11:{61100 + index}" in script
     assert "'helpers': {'wireguard': {'enabled': True, 'service': 'wireguard-main'}}" in script
     assert "curl --interface wg-gl-b" in script
     assert "--allow-non-loopback" in script
@@ -83,6 +121,36 @@ def test_hyperv_vm_ip_cache_uses_unique_temporary_files() -> None:
 
     assert 'mktemp "${cache_file}.XXXXXX"' in helper
     assert '"${cache_file}.tmp"' not in helper
+
+
+def test_performance_tooling_collects_live_vm_counters() -> None:
+    """Speed labs should capture live CPU and UDP counters during pressure windows."""
+    probe = (HYPERV_TOOLS / "vm_perf_probe.py").read_text(encoding="utf-8")
+    relay_udp = (HYPERV_TOOLS / "run_relay_udp_speed.sh").read_text(encoding="utf-8")
+    relay_rust = (HYPERV_TOOLS / "run_relay_rust_udp_speed.sh").read_text(encoding="utf-8")
+    relay_wg = (HYPERV_TOOLS / "run_relay_wireguard_speed.sh").read_text(encoding="utf-8")
+
+    assert "/proc/net/snmp" in probe
+    assert "cpu_busy_percent_all_cores" in probe
+    assert "udp_delta" in probe
+    assert "vm_perf_probe.py" in relay_udp
+    assert "--scheduler-mode" in relay_udp
+    assert "--path-capacity-mbit" in relay_udp
+    assert "reorder_hold not in ('', 'auto')" in relay_udp
+    assert "rustc --edition 2021 -O tools/udp_pressure.rs" in relay_rust
+    assert "--scheduler-mode" in relay_rust
+    assert "--path-capacity-mbit" in relay_rust
+    assert "gatherlink-udp-pressure send --target 127.0.0.1:55180" in relay_rust
+    assert "gatherlink-udp-pressure sink --bind 127.0.0.1:19091" in relay_rust
+    assert "perf_start_node_probe" in relay_wg
+
+
+def test_udp_pressure_tool_compiles(tmp_path) -> None:
+    """The compiled UDP pressure tool is the fair raw-UDP Gatherlink generator."""
+    source = REPO_ROOT / "tools" / "udp_pressure.rs"
+    output = tmp_path / "udp-pressure"
+
+    subprocess.run(["rustc", "--edition", "2021", "-O", str(source), "-o", str(output)], check=True)
 
 
 def test_vm_acceptance_dry_run_does_not_contact_vms(tmp_path) -> None:

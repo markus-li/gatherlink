@@ -3,7 +3,9 @@ $ErrorActionPreference = "Stop"
 $RequiredSwitches = @(
     @{ Name = "gatherlink-path-a"; Type = "Private" },
     @{ Name = "gatherlink-path-b"; Type = "Private" },
-    @{ Name = "gatherlink-path-c"; Type = "Private" }
+    @{ Name = "gatherlink-path-c"; Type = "Private" },
+    @{ Name = "gatherlink-path-d"; Type = "Private" },
+    @{ Name = "gatherlink-path-e"; Type = "Private" }
 )
 
 foreach ($item in $RequiredSwitches) {
@@ -29,6 +31,15 @@ if ($null -eq $internet) {
 }
 
 Get-VMSwitch |
-    Where-Object { $_.Name -in @("External Network", "gatherlink-path-a", "gatherlink-path-b", "gatherlink-path-c") } |
+    Where-Object {
+        $_.Name -in @(
+            "External Network",
+            "gatherlink-path-a",
+            "gatherlink-path-b",
+            "gatherlink-path-c",
+            "gatherlink-path-d",
+            "gatherlink-path-e"
+        )
+    } |
     Select-Object Name, SwitchType, NetAdapterInterfaceDescription, AllowManagementOS |
     Format-Table -AutoSize

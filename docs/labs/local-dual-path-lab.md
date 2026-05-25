@@ -174,6 +174,19 @@ gatherlink services attach lab.local-dual-path.sink --mode aggregate
 gatherlink services monitor lab.local-dual-path lab.local-dual-path.sink
 ```
 
+The lab services use aggregate Rust dataplane drains by default so benchmark
+runs are not slowed by per-packet Python outcome objects or log formatting. If
+you specifically need raw packet logs from the lab service loop, start the lab
+services with `GATHERLINK_LAB_PACKET_LOG=1`; this also enables per-packet
+logging from the lab sink app socket. Leave it unset for throughput testing and
+normal monitor-driven debugging.
+
+For scheduler tuning only, `GATHERLINK_LAB_DATAPLANE_BURST_CYCLES` can lower
+the aggregate drain cycles used by the lab supervisor. It is bounded by the
+compiled default and cannot raise the burst above the normal value. Use this
+only for A/B tests that need to separate scheduler behavior from local lab
+supervisor burst pressure; production services do not use this knob.
+
 Aggregate mode uses 1024-based human-readable units by default for `bytes` and
 `speed`. Press `h` while it is running to toggle between human units and raw
 byte counters. Press `b` to toggle speed between bit/s and byte/s. Press `q` to
@@ -241,6 +254,50 @@ rather than immediately dropping. `forced-drop` uses the same rates with small
 netem queue limits so stress tests show drop counters quickly.
 `latency-jitter-skew` keeps both paths up but makes path-b much slower and
 jittery so normal traffic can expose out-of-order and reorder behavior.
+
+`configs/lab/local-three-path.json` is the local scheduler and WAN-shape
+acceptance scenario. It intentionally uses exactly three paths for the core
+acceptance profiles because the common production shape is "several imperfect
+WANs" rather than an unlimited number of ideal links. The path
+`default_max_speed` values are startup hints only: Python seeds scheduler policy
+from them, then the runtime capacity detector should refine cached per-path
+capacity as traffic proves the real link behavior.
+
+The current three-path acceptance modes are:
+
+- `acceptance-300-500-700`: hard three-path baseline at `300mbit`,
+  `500mbit`, and `700mbit`; generate about `1.55gbit` of pressure.
+- `acceptance-uneven-high`: higher uneven local lab at `600mbit`, `900mbit`,
+  and `1300mbit`; generate about `2.9gbit` of pressure.
+- `realworld-fiber-plus-5g`: home fiber facsimile where a nominal 1gbit link
+  behaves closer to `800mbit`, plus two 5G-like links; generate about
+  `950mbit` of useful-delivery pressure.
+- `realworld-starlink-plus-5g`: Starlink-like primary plus one 5G router and a
+  weak standby path; generate about `250mbit` of useful-delivery pressure.
+- `realworld-starlink-plus-2x5g`: Starlink-like primary plus two 5G routers;
+  generate about `350mbit` of useful-delivery pressure.
+
+Those pressures should sit just above the expected aggregate capacity. The goal
+is to exercise scheduler pressure, dynamic capacity detection, queue behavior,
+and latency skew without turning every run into unrealistic forced packet loss.
+The clean synthetic acceptance modes use larger qdisc queues so they measure
+Gatherlink path selection and packet-rate behavior rather than the local lab's
+artificial buffer size. Real-world facsimiles keep smaller queues to preserve
+their jitter/loss character.
+Lab `reorder_policies[].max_hold` is a cap, not the actual hold used on every
+path. Clean paths keep the ordered scheduler's small default hold; paths with
+configured delay/jitter get a derived hold capped by the node-pair policy. This
+keeps clean capacity probes from accidentally measuring an oversized receive
+buffer while still giving latency-skewed profiles realistic reorder budgets.
+Use the explicit `forced-drop` modes when the test needs to prove loss counters
+and fail-closed behavior under deliberately hostile queue limits.
+
+Applying a named network mode also writes non-authoritative path capacity
+startup hints into the lab runtime cache. That keeps the next `lab up` from
+starting a Starlink/5G profile with the generic 300/500/700 Mbit guesses, while
+still preserving the intended detector behavior: the hint is only a best guess,
+and sustained traffic with jitter, loss, or drops can raise or lower the
+advertised capacity through normal Python-owned auto-detection.
 
 Bandwidth can also wander while a separate terminal sends traffic:
 
@@ -498,9 +555,16 @@ The shape should include:
 - named live shaping profiles that can be applied to running labs
 - requested future features such as WSS fallback, MTU mismatch, receiver metrics, peer failover, DNS racing, or bootstrap variants
 
-The first implementation only needs to plan the local dual-path plaintext UDP
-lab. Namespace setup, traffic shaping, process launch, and traffic generation
-can initially report `not_implemented` until their commands are added.
+The current lab tooling plans and runs local namespace/veth setup, traffic
+shaping, Gatherlink process launch, service monitoring, traffic generation,
+cleanup, and live shaping changes for the supported local scenarios. Labs should
+exercise the same production runtime paths as ordinary services; lab-only code
+may prepare namespaces, interfaces, qdiscs, traffic tools, and reports, but it
+must not replace the core runner, scheduler, crypto, or helper transport logic.
+
+Future scenario features may still be listed in config when they are useful for
+planning, but unsupported features must appear in the lab plan as
+`not_implemented` instead of being silently ignored.
 
 ## Traffic Tools
 

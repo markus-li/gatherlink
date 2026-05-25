@@ -9,7 +9,7 @@ import pytest
 from gatherlink.dataplane.rust_backend import RustDataplaneUnavailableError, _load_bindings
 from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.runtime.relay_runner import RelayRunnerState, RelayRuntimeConfig, run_relay_service
-from gatherlink.security.envelope import decrypt_packet_without_replay, encrypt_frame_with_counter
+from gatherlink.security.envelope import encrypt_frame_with_counter
 from gatherlink.security.relay_sessions import RelayExecutorConfig
 
 
@@ -54,6 +54,37 @@ class FakeRelayForwarder:
         }
 
 
+class FakeBatchRelayForwarder:
+    def __init__(self, batches: list[dict[str, int]]) -> None:
+        self.batches = batches
+        self.forwarded = 0
+        self.dropped = 0
+        self.emitted_packets = 0
+        self.emitted_bytes = 0
+
+    def local_addr(self) -> str:
+        return "127.0.0.1:55100"
+
+    def try_forward_many(self, _max_packets: int, _now_unix_us: int) -> dict[str, int]:
+        if not self.batches:
+            return {"forwarded_packets": 0, "dropped_packets": 0, "emitted_packets": 0, "emitted_bytes": 0}
+        batch = self.batches.pop(0)
+        self.forwarded += batch.get("forwarded_packets", 0)
+        self.dropped += batch.get("dropped_packets", 0)
+        self.emitted_packets += batch.get("emitted_packets", 0)
+        self.emitted_bytes += batch.get("emitted_bytes", 0)
+        return batch
+
+    def counters(self) -> dict[str, int]:
+        return {
+            "forwarded_packets": self.forwarded,
+            "forwarded_bytes": self.emitted_bytes,
+            "dropped_packets": self.dropped,
+            "emitted_packets": self.emitted_packets,
+            "emitted_bytes": self.emitted_bytes,
+        }
+
+
 def test_relay_runner_publishes_forward_and_drop_diagnostics() -> None:
     config = _relay_config()
     sink = MemorySink()
@@ -87,6 +118,29 @@ def test_relay_runner_publishes_forward_and_drop_diagnostics() -> None:
     ]
     assert sink.events[2].stable_code
     assert sink.events[2].details["reason"] == "UnknownReceiverIndex"
+
+
+def test_relay_runner_uses_batch_forwarding_when_available() -> None:
+    config = _relay_config()
+    sink = MemorySink()
+    bus = DiagnosticsBus(sinks=[sink])
+    forwarder = FakeBatchRelayForwarder(
+        [{"forwarded_packets": 3, "dropped_packets": 1, "emitted_packets": 3, "emitted_bytes": 120}]
+    )
+
+    result = run_relay_service(
+        config,
+        forwarder_factory=lambda _config: forwarder,
+        max_iterations=1,
+        diagnostics_bus=bus,
+    )
+
+    assert result.forwarded_packets == 3
+    assert result.dropped_packets == 1
+    assert result.emitted_packets == 3
+    assert result.emitted_bytes == 120
+    assert [event.code for event in sink.events] == ["service.bound", "packet.forwarded", "runtime.shutdown"]
+    assert sink.events[1].details["packets"] == 3
 
 
 def test_relay_runner_state_exposes_ipc_status_and_stop() -> None:
@@ -138,10 +192,9 @@ def test_relay_runtime_config_validates_key_encoding() -> None:
         config.keys.decoded_send_key()
 
 
-def test_rust_relay_forwarder_rewraps_hop_packet_to_next_hop() -> None:
+def test_rust_relay_forwarder_unwraps_one_outer_hop_layer_to_next_hop() -> None:
     bindings = _load_relay_bindings()
     upstream_to_relay = b"a" * 32
-    relay_to_downstream = b"b" * 32
     relay_receiver_index = 55
     downstream_receiver_index = 77
     now_us = int(time.time() * 1_000_000)
@@ -154,7 +207,7 @@ def test_rust_relay_forwarder_rewraps_hop_packet_to_next_hop() -> None:
         f"127.0.0.1:{next_hop.getsockname()[1]}",
         relay_receiver_index,
         downstream_receiver_index,
-        relay_to_downstream,
+        b"b" * 32,
         upstream_to_relay,
         now_us + 5_000_000,
         None,
@@ -169,12 +222,10 @@ def test_rust_relay_forwarder_rewraps_hop_packet_to_next_hop() -> None:
     )
 
     outcome = _poll_forwarder(forwarder, now_us)
-    resealed, _source = next_hop.recvfrom(4096)
-    decrypted = decrypt_packet_without_replay(relay_to_downstream, resealed)
+    unwrapped, _source = next_hop.recvfrom(4096)
 
     assert outcome["kind"] == "forwarded"
-    assert decrypted.receiver_index == downstream_receiver_index
-    assert decrypted.plaintext == plaintext
+    assert unwrapped == plaintext
     assert forwarder.counters()["forwarded_packets"] == 1
 
 

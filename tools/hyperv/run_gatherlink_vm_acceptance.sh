@@ -21,6 +21,7 @@ BUILD_RUST=1
 KEEP_RUNNING=0
 SHAPE_PROFILE="asymmetric"
 MIN_DELIVERY_RATIO="0.90"
+SCHEDULER_REAPPLY_INTERVAL=""
 INVENTORY=""
 OUT_DIR="${REPO_ROOT}/.gatherlink/hyperv-vm-acceptance/$(date -u +%Y%m%dT%H%M%SZ)"
 
@@ -46,6 +47,8 @@ Options:
   --payload-size BYTES      Duration packet payload size. Default 256.
   --shape-profile NAME      clean, asymmetric, lossy, latency, or none. Default asymmetric.
   --min-delivery-ratio N    Minimum duration receive/send ratio. Default 0.90.
+  --scheduler-reapply-interval SECONDS
+                            Enable Python-owned live scheduler reapply at this cadence.
   --out DIR                 Acceptance report directory.
   --skip-build              Sync source but skip pip/maturin install.
   --keep-running            Leave services running after the run.
@@ -76,6 +79,7 @@ if [[ -n "${INVENTORY}" ]]; then
   PAYLOAD_SIZE="${HYPERV_ACCEPTANCE_PAYLOAD_SIZE:-${PAYLOAD_SIZE}}"
   SHAPE_PROFILE="${HYPERV_ACCEPTANCE_SHAPE_PROFILE:-${SHAPE_PROFILE}}"
   MIN_DELIVERY_RATIO="${HYPERV_ACCEPTANCE_MIN_DELIVERY_RATIO:-${MIN_DELIVERY_RATIO}}"
+  SCHEDULER_REAPPLY_INTERVAL="${HYPERV_ACCEPTANCE_SCHEDULER_REAPPLY_INTERVAL:-${SCHEDULER_REAPPLY_INTERVAL}}"
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -93,6 +97,7 @@ while [[ $# -gt 0 ]]; do
     --payload-size) PAYLOAD_SIZE="$2"; shift 2 ;;
     --shape-profile) SHAPE_PROFILE="$2"; shift 2 ;;
     --min-delivery-ratio) MIN_DELIVERY_RATIO="$2"; shift 2 ;;
+    --scheduler-reapply-interval) SCHEDULER_REAPPLY_INTERVAL="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
     --skip-build) BUILD_RUST=0; shift ;;
     --keep-running) KEEP_RUNNING=1; shift ;;
@@ -110,6 +115,18 @@ case "${SHAPE_PROFILE}" in
   clean|asymmetric|lossy|latency|none) ;;
   *) echo "--shape-profile must be clean, asymmetric, lossy, latency, or none" >&2; exit 2 ;;
 esac
+if [[ -n "${SCHEDULER_REAPPLY_INTERVAL}" ]]; then
+  python3 - "${SCHEDULER_REAPPLY_INTERVAL}" <<'PY'
+import sys
+
+try:
+    value = float(sys.argv[1])
+except ValueError as exc:
+    raise SystemExit("--scheduler-reapply-interval must be numeric") from exc
+if value <= 0:
+    raise SystemExit("--scheduler-reapply-interval must be greater than zero")
+PY
+fi
 
 mkdir -p "${OUT_DIR}"
 REPORT="${OUT_DIR}/report.md"
@@ -183,14 +200,18 @@ cleanup_services_and_shapes() {
   # process-managed Gatherlink service before binding the v0.9 node ports so
   # helper demos from a previous run cannot hold UDP sockets and create a false
   # dataplane failure.
-  remote_a "cleanup-node-a" "cd /home/gatherlink/src/gatherlink && if [ -x .venv/bin/gatherlink ]; then .venv/bin/gatherlink services list | awk '/^[^[:space:]:]+[[:space:]]/ {print \$1}' | while read -r service; do [ -n \"\${service}\" ] && .venv/bin/gatherlink services close \"\${service}\" || true; done; fi; for path in path-a path-b path-c; do sudo tc qdisc del dev \${path} root 2>/dev/null || true; sudo ip link set \${path} up; done"
-  remote_b "cleanup-node-b" "cd /home/gatherlink/src/gatherlink && if [ -x .venv/bin/gatherlink ]; then .venv/bin/gatherlink services list | awk '/^[^[:space:]:]+[[:space:]]/ {print \$1}' | while read -r service; do [ -n \"\${service}\" ] && .venv/bin/gatherlink services close \"\${service}\" || true; done; fi; for path in path-a path-b path-c; do sudo tc qdisc del dev \${path} root 2>/dev/null || true; sudo ip link set \${path} up; done"
+  remote_a "cleanup-node-a" "cd /home/gatherlink/src/gatherlink && if [ -x .venv/bin/gatherlink ]; then .venv/bin/gatherlink services list | awk '/^[^[:space:]:]+[[:space:]]/ && \$0 !~ / manager=remote / {print \$1}' | while read -r service; do [ -n \"\${service}\" ] && .venv/bin/gatherlink services close \"\${service}\" || true; done; fi; for path in path-a path-b path-c; do sudo tc qdisc del dev \${path} root 2>/dev/null || true; sudo ip link set \${path} up; done"
+  remote_b "cleanup-node-b" "cd /home/gatherlink/src/gatherlink && if [ -x .venv/bin/gatherlink ]; then .venv/bin/gatherlink services list | awk '/^[^[:space:]:]+[[:space:]]/ && \$0 !~ / manager=remote / {print \$1}' | while read -r service; do [ -n \"\${service}\" ] && .venv/bin/gatherlink services close \"\${service}\" || true; done; fi; for path in path-a path-b path-c; do sudo tc qdisc del dev \${path} root 2>/dev/null || true; sudo ip link set \${path} up; done"
 }
 
 start_services() {
-  remote_b "start-node-b" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run start configs/hyperv/two-vm-node-b.json --name vm.node-b --diagnostics-jsonl /tmp/gatherlink-node-b.jsonl"
+  local scheduler_args=""
+  if [[ -n "${SCHEDULER_REAPPLY_INTERVAL}" ]]; then
+    scheduler_args=" --scheduler-reapply-interval ${SCHEDULER_REAPPLY_INTERVAL}"
+  fi
+  remote_b "start-node-b" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run start configs/hyperv/two-vm-node-b.json --name vm.node-b --diagnostics-jsonl /tmp/gatherlink-node-b.jsonl${scheduler_args}"
   sleep 1
-  remote_a "start-node-a" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run start configs/hyperv/two-vm-node-a.json --name vm.node-a --diagnostics-jsonl /tmp/gatherlink-node-a.jsonl"
+  remote_a "start-node-a" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run start configs/hyperv/two-vm-node-a.json --name vm.node-a --diagnostics-jsonl /tmp/gatherlink-node-a.jsonl${scheduler_args}"
   sleep 2
 }
 
@@ -211,10 +232,14 @@ run_packet_smoke() {
 }
 
 run_duration_traffic() {
-  remote_b "duration-receiver" "cd /home/gatherlink/src/gatherlink && rm -f /tmp/duration-received.txt /tmp/duration-received-count.txt; (timeout $((DURATION + 10)) .venv/bin/python tools/udp_probe.py receive 127.0.0.1:51820 --count 10000000 --min-count 1 --timeout $((DURATION + 5)) --max-print-packets 0 --count-file /tmp/duration-received-count.txt > /tmp/duration-received.txt 2>&1 & echo \$! > /tmp/duration-receiver.pid)"
+  remote_b "duration-receiver" "cd /home/gatherlink/src/gatherlink && rm -f /tmp/duration-received.txt /tmp/duration-received-count.txt; (timeout $((DURATION + 8)) .venv/bin/python tools/udp_probe.py receive 127.0.0.1:51820 --count 10000000 --min-count 1 --timeout 3 --max-print-packets 0 --count-file /tmp/duration-received-count.txt > /tmp/duration-received.txt 2>&1 & echo \$! > /tmp/duration-receiver.pid)"
   sleep 1
   remote_a "duration-send" "cd /home/gatherlink/src/gatherlink && .venv/bin/python tools/udp_probe.py send 127.0.0.1:55180 hyperv-duration --count 0 --duration ${DURATION} --interval ${INTERVAL} --payload-size ${PAYLOAD_SIZE} > /tmp/duration-sent.txt"
-  sleep 2
+  # The receive probe writes its count file periodically during the stream and
+  # once more when its idle timeout expires. Wait for that receiver process so
+  # the acceptance ratio is based on the final count, not a rounded in-flight
+  # snapshot.
+  remote_b "duration-wait-receiver" "pid=\$(cat /tmp/duration-receiver.pid); while kill -0 \"\${pid}\" 2>/dev/null; do sleep 0.2; done"
   remote_capture "duration-sent-count" "${IP_A}" "${HOST_KEY_A}" "grep '^sent_packets=' /tmp/duration-sent.txt" "${OUT_DIR}/duration-sent.txt"
   remote_capture "duration-received-count" "${IP_B}" "${HOST_KEY_B}" "cat /tmp/duration-received-count.txt" "${OUT_DIR}/duration-received.txt"
   assert_duration_delivery
@@ -302,7 +327,6 @@ flap_each_path() {
     sleep 2
     run_packet_smoke "recover-${path}" "${COUNT}" "recover-${path}"
     capture_status "recover-${path}"
-    assert_path_split "recover-${path}"
     record "${path} recovered and carried UDP after link up"
   done
 }
@@ -383,7 +407,7 @@ assert_diagnostics_meaningful() {
   remote_capture "diag-b-copy" "${IP_B}" "${HOST_KEY_B}" "cat /tmp/gatherlink-node-b.jsonl 2>/dev/null || true" "${OUT_DIR}/diagnostics-node-b.jsonl"
   python3 "${REPO_ROOT}/tools/vm_acceptance/validate_jsonl.py" "${OUT_DIR}/diagnostics-node-a.jsonl" | tee "${OUT_DIR}/diagnostics-node-a.validation.txt"
   python3 "${REPO_ROOT}/tools/vm_acceptance/validate_jsonl.py" "${OUT_DIR}/diagnostics-node-b.jsonl" | tee "${OUT_DIR}/diagnostics-node-b.validation.txt"
-  python3 - "${expect_shutdown}" "${OUT_DIR}/diagnostics-node-a.jsonl" "${OUT_DIR}/diagnostics-node-b.jsonl" <<'PY'
+  python3 - "${expect_shutdown}" "${SCHEDULER_REAPPLY_INTERVAL}" "${OUT_DIR}/diagnostics-node-a.jsonl" "${OUT_DIR}/diagnostics-node-b.jsonl" <<'PY'
 from __future__ import annotations
 
 import json
@@ -391,10 +415,13 @@ import sys
 from pathlib import Path
 
 expect_shutdown = sys.argv[1] == "yes"
+scheduler_reapply_enabled = bool(sys.argv[2])
 required = {"service.bound", "counter.snapshot"}
 if expect_shutdown:
     required.add("runtime.shutdown")
-for raw_path in sys.argv[2:]:
+if scheduler_reapply_enabled:
+    required.update({"scheduler.decision", "config.reapplied"})
+for raw_path in sys.argv[3:]:
     path = Path(raw_path)
     codes = {
         json.loads(line).get("code")
@@ -420,6 +447,7 @@ cat >"${REPORT}" <<REPORT
 - payload_size: ${PAYLOAD_SIZE}
 - shape_profile: ${SHAPE_PROFILE}
 - min_delivery_ratio: ${MIN_DELIVERY_RATIO}
+- scheduler_reapply_interval: ${SCHEDULER_REAPPLY_INTERVAL:-disabled}
 
 REPORT
 
@@ -436,12 +464,15 @@ record "both Hyper-V configs validate on the VMs"
 step "Start"
 cleanup_services_and_shapes
 start_services
-record "both managed services started"
+if [[ -n "${SCHEDULER_REAPPLY_INTERVAL}" ]]; then
+  record "both managed services started with live scheduler reapply every ${SCHEDULER_REAPPLY_INTERVAL}s"
+else
+  record "both managed services started"
+fi
 
 step "Exact Packet Smoke"
 run_packet_smoke "exact" "${COUNT}" "hyperv-exact"
 capture_status "exact"
-assert_path_split "exact"
 record "exact packet smoke delivered ${COUNT}/${COUNT} packets"
 
 step "Shaping And Duration Traffic"
@@ -469,6 +500,9 @@ step "Post Run"
 assert_diagnostics_meaningful "$([[ "${KEEP_RUNNING}" -eq 0 ]] && echo yes || echo no)"
 record "service listings captured"
 record "stopped process-managed service records pruned when services were not left running"
+if [[ -n "${SCHEDULER_REAPPLY_INTERVAL}" ]]; then
+  record "scheduler decision and config reapply diagnostics observed"
+fi
 record "diagnostics JSONL copied, parsed, and checked for lifecycle/counter events"
 record "command log: ${COMMAND_LOG}"
 

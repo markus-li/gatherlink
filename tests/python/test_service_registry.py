@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import time
 from pathlib import Path
 from threading import Event
@@ -170,6 +171,29 @@ def test_service_ipc_status_works_while_custom_command_runs(tmp_path: Path) -> N
         assert result["result"] == {"done": True}
     finally:
         release_command.set()
+        server.close()
+
+
+def test_service_ipc_ignores_client_disconnect_before_response(tmp_path: Path) -> None:
+    registry = ServiceRegistry(tmp_path / "services")
+    record = registry.register(
+        ServiceRecord(
+            name="lab.disconnect",
+            kind="lab",
+            pid=os.getpid(),
+            log_file=tmp_path / "ipc.log",
+        )
+    )
+    server = ServiceIpcServer(record, status=lambda: {"running": True}, stop=lambda: None)
+    server.start()
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(str(record.ipc_socket))
+        client.sendall(b'{"command": "status"}\n')
+        client.close()
+
+        assert request_service(record, "status")["status"] == {"running": True}
+    finally:
         server.close()
 
 

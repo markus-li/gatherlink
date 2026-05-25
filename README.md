@@ -16,9 +16,9 @@ WireGuard and helper traffic, but those tools keep owning their own domains.
 
 ## Status
 
-The project is v0.9-ready for Debian personal/lab users and small sites. The
-planned v0.9 VM release gates have passed, including the untrusted
-relay/routing proof; final tag/release hygiene is tracked in the living
+The project is at v0.9.2 release-candidate state for Debian personal/lab users
+and small sites. The v0.9 and v0.9.1 baselines are closed; current release
+evidence, remaining limits, and tag posture are tracked in the living
 assessment.
 
 Real-world testing is still limited. So far, Gatherlink has mainly been tested
@@ -41,7 +41,7 @@ Current shape:
 - Routing uses authenticated session/control context and relay-hop state.
 
 Before using this as anything more serious than a lab/small-site tool, read the
-v0.9 release checklist and current living assessment.
+release checklist and current living assessment.
 
 ## What Works
 
@@ -101,6 +101,8 @@ blindly.
 Start here:
 
 - `docs/README.md`: documentation map
+- `docs/project-story.md`: how the project was shaped and why the architecture
+  looks the way it does
 - `docs/user/README.md`: short user guide
 - `docs/user/config-cookbook.md`: common config shapes
 - `docs/operations/v0.9-operator-runbook.md`: day-to-day v0.9 operation

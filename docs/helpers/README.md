@@ -12,6 +12,7 @@ are active, deferred, or future-only.
 | `socks5-helper.md` | SOCKS5 TCP CONNECT helper over Gatherlink transport |
 | `tcp-forwarding-helper.md` | one-to-one TCP forwarding helper over Gatherlink transport |
 | `wireguard-helper.md` | WireGuard-over-Gatherlink planning and UDP endpoint contract |
+| `traffic-split-helper.md` | advanced local policy-routing split for dual WireGuard profiles |
 | `relay-fabric.md` | relay discovery and health helper |
 
 ## Deferred Helper Notes
@@ -27,5 +28,5 @@ are active, deferred, or future-only.
 - Helpers use Gatherlink transport; direct behavior is only for explicit lab
   smoke modes.
 - Helper docs should not duplicate protocol, runtime, or platform ownership.
-- Do not add `-full.md` companion docs. Keep the canonical helper doc complete
-  enough, then split by clearer subject only if the doc becomes unwieldy.
+- Follow `docs/operations/documentation-maintenance.md` for duplication,
+  canonical-linking, and volatile-fact rules.

@@ -5,7 +5,7 @@ param(
     [string[]] $Name = @("gatherlink-vm-a", "gatherlink-vm-b", "gatherlink-vm-c"),
     [string] $VmRoot = "D:\hyper-v\gatherlink",
     [string] $ImageDirectory = "D:\media\debian",
-[string] $WslDistro = "gatherlink-dev"
+    [string] $WslDistro = "gatherlink-dev"
 )
 
 $ErrorActionPreference = "Stop"
@@ -24,6 +24,8 @@ $VmSpecs = @(
         PathA = "10.91.1.11/24"
         PathB = "10.91.2.11/24"
         PathC = "10.91.3.11/24"
+        PathD = "10.91.4.11/24"
+        PathE = "10.91.5.11/24"
     },
     @{
         Name = "gatherlink-vm-b"
@@ -33,6 +35,8 @@ $VmSpecs = @(
         PathA = "10.91.1.12/24"
         PathB = "10.91.2.12/24"
         PathC = "10.91.3.12/24"
+        PathD = "10.91.4.12/24"
+        PathE = "10.91.5.12/24"
     },
     @{
         Name = "gatherlink-vm-c"
@@ -42,6 +46,8 @@ $VmSpecs = @(
         PathA = "10.91.1.13/24"
         PathB = "10.91.2.13/24"
         PathC = "10.91.3.13/24"
+        PathD = "10.91.4.13/24"
+        PathE = "10.91.5.13/24"
     }
 )
 
@@ -178,7 +184,7 @@ packages:
   - vim
 runcmd:
   - [ systemctl, enable, --now, ssh ]
-  - [ sh, -lc, "mkdir -p /home/gatherlink/codex /home/gatherlink/src && chown -R gatherlink:gatherlink /home/gatherlink" ]
+  - [ sh, -lc, "mkdir -p /home/gatherlink/workspace /home/gatherlink/src && chown -R gatherlink:gatherlink /home/gatherlink" ]
 final_message: "Gatherlink Hyper-V lab VM is ready after `$UPTIME seconds"
 "@
 
@@ -191,6 +197,8 @@ local-hostname: $($spec.Hostname)
     $pathAMac = Format-MacForCloudInit "$($spec.MacBase)A1"
     $pathBMac = Format-MacForCloudInit "$($spec.MacBase)B1"
     $pathCMac = Format-MacForCloudInit "$($spec.MacBase)C1"
+    $pathDMac = Format-MacForCloudInit "$($spec.MacBase)D1"
+    $pathEMac = Format-MacForCloudInit "$($spec.MacBase)E1"
 
     Write-Utf8NoBom -Path $networkConfigPath -Content @"
 version: 2
@@ -220,6 +228,20 @@ ethernets:
       macaddress: "$pathCMac"
     set-name: path-c
     addresses: [$($spec.PathC)]
+    dhcp4: false
+    dhcp6: false
+  path-d:
+    match:
+      macaddress: "$pathDMac"
+    set-name: path-d
+    addresses: [$($spec.PathD)]
+    dhcp4: false
+    dhcp6: false
+  path-e:
+    match:
+      macaddress: "$pathEMac"
+    set-name: path-e
+    addresses: [$($spec.PathE)]
     dhcp4: false
     dhcp6: false
 "@

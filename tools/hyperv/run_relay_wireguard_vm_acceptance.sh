@@ -231,25 +231,6 @@ cfg = {
     },
 }
 Path('/tmp/relaywg-node-a.json').write_text(json.dumps(cfg, indent=2, sort_keys=True))
-for index in range(1, 4):
-    exit_cfg = {
-        'schema_version': 1,
-        'name': f'ba-exit-path-{chr(96 + index)}',
-        'listen': f'10.91.{index}.11:{63000 + index}',
-        'exit_to_inner_packet': True,
-        'executor': {
-            'relay_receiver_index': 8100 + index,
-            'next_hop_transport': 'udp',
-            'next_hop_address': f'10.91.{index}.11:{61100 + index}',
-            'next_hop_receiver_index': 0,
-            'direction': 'upstream_to_downstream',
-            'topology_generation': 1,
-            'expires_at_unix_us': 4102444800000000,
-            'max_packet_size': 4096,
-        },
-        'keys': {'send_key': key(0), 'receive_key': key(0x60 + index)},
-    }
-    Path(f'/tmp/relaywg-a-exit-ba-path-{chr(96 + index)}.json').write_text(json.dumps(exit_cfg, indent=2, sort_keys=True))
 PY"
 
 remote_b "write-configs-b" "cd /home/gatherlink/src/gatherlink && .venv/bin/python - <<'PY'
@@ -296,25 +277,6 @@ cfg = {
     },
 }
 Path('/tmp/relaywg-node-b.json').write_text(json.dumps(cfg, indent=2, sort_keys=True))
-for index in range(1, 4):
-    exit_cfg = {
-        'schema_version': 1,
-        'name': f'ab-exit-path-{chr(96 + index)}',
-        'listen': f'10.91.{index}.12:{63100 + index}',
-        'exit_to_inner_packet': True,
-        'executor': {
-            'relay_receiver_index': 8200 + index,
-            'next_hop_transport': 'udp',
-            'next_hop_address': f'10.91.{index}.12:{61000 + index}',
-            'next_hop_receiver_index': 0,
-            'direction': 'downstream_to_upstream',
-            'topology_generation': 1,
-            'expires_at_unix_us': 4102444800000000,
-            'max_packet_size': 4096,
-        },
-        'keys': {'send_key': key(0), 'receive_key': key(0x70 + index)},
-    }
-    Path(f'/tmp/relaywg-b-exit-ab-path-{chr(96 + index)}.json').write_text(json.dumps(exit_cfg, indent=2, sort_keys=True))
 PY"
 
 remote_c "write-configs-c" "cd /home/gatherlink/src/gatherlink && .venv/bin/python - <<'PY'
@@ -334,14 +296,14 @@ for index in range(1, 4):
         'executor': {
             'relay_receiver_index': 7100 + index,
             'next_hop_transport': 'udp',
-            'next_hop_address': f'10.91.{index}.11:{63000 + index}',
-            'next_hop_receiver_index': 8100 + index,
+            'next_hop_address': f'10.91.{index}.11:{61100 + index}',
+            'next_hop_receiver_index': 0,
             'direction': 'upstream_to_downstream',
             'topology_generation': 1,
             'expires_at_unix_us': 4102444800000000,
             'max_packet_size': 4096,
         },
-        'keys': {'send_key': key(0x60 + index), 'receive_key': key(0x40 + index)},
+        'keys': {'send_key': key(0), 'receive_key': key(0x40 + index)},
     }
     ab_cfg = {
         'schema_version': 1,
@@ -350,14 +312,14 @@ for index in range(1, 4):
         'executor': {
             'relay_receiver_index': 7200 + index,
             'next_hop_transport': 'udp',
-            'next_hop_address': f'10.91.{index}.12:{63100 + index}',
-            'next_hop_receiver_index': 8200 + index,
+            'next_hop_address': f'10.91.{index}.12:{61000 + index}',
+            'next_hop_receiver_index': 0,
             'direction': 'downstream_to_upstream',
             'topology_generation': 1,
             'expires_at_unix_us': 4102444800000000,
             'max_packet_size': 4096,
         },
-        'keys': {'send_key': key(0x70 + index), 'receive_key': key(0x50 + index)},
+        'keys': {'send_key': key(0), 'receive_key': key(0x50 + index)},
     }
     Path(f'/tmp/relaywg-c-ba-{path_name}.json').write_text(json.dumps(ba_cfg, indent=2, sort_keys=True))
     Path(f'/tmp/relaywg-c-ab-{path_name}.json').write_text(json.dumps(ab_cfg, indent=2, sort_keys=True))
@@ -373,8 +335,6 @@ remote_b "configure-wireguard-b" "sudo ip link del wg-gl-b 2>/dev/null || true; 
 remote_a "start-status-http-a" "cd /home/gatherlink/src/gatherlink && (nohup .venv/bin/gatherlink helpers status-http --listen 10.202.0.1:18081 --allow-non-loopback --write-window-seconds 0 >/tmp/relaywg-status-http.log 2>&1 </dev/null & echo \$! >/tmp/relaywg-status-http.pid)"
 
 for path in a b c; do
-  remote_a "start-a-exit-${path}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run relay-start /tmp/relaywg-a-exit-ba-path-${path}.json --name relaywg.a.exit.ba.path-${path} --diagnostics-jsonl /tmp/relaywg-a-exit-ba-path-${path}.jsonl"
-  remote_b "start-b-exit-${path}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run relay-start /tmp/relaywg-b-exit-ab-path-${path}.json --name relaywg.b.exit.ab.path-${path} --diagnostics-jsonl /tmp/relaywg-b-exit-ab-path-${path}.jsonl"
   remote_c "start-c-relay-ba-${path}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run relay-start /tmp/relaywg-c-ba-path-${path}.json --name relaywg.c.relay.ba.path-${path} --diagnostics-jsonl /tmp/relaywg-c-ba-path-${path}.jsonl"
   remote_c "start-c-relay-ab-${path}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run relay-start /tmp/relaywg-c-ab-path-${path}.json --name relaywg.c.relay.ab.path-${path} --diagnostics-jsonl /tmp/relaywg-c-ab-path-${path}.jsonl"
 done
@@ -382,7 +342,7 @@ remote_a "start-core-a" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherl
 sleep 1
 remote_b "start-core-b" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run start /tmp/relaywg-node-b.json --name relaywg.vm.node-b --diagnostics-jsonl /tmp/relaywg-node-b.jsonl"
 sleep 3
-record "B core, C relay services, A final-hop exits, A core, WireGuard interfaces, and A HTTP helper started"
+record "B core, C relay services, A core, WireGuard interfaces, and A HTTP helper started"
 
 step "Curl Through WireGuard Over Relayed Gatherlink"
 remote_b "curl-through-wireguard" "for attempt in \$(seq 1 20); do curl --interface wg-gl-b --max-time 8 -sS http://10.202.0.1:18081/text > /tmp/relaywg-curl.txt && grep -q 'Gatherlink local status (EXPERIMENTAL)' /tmp/relaywg-curl.txt && break; sleep 1; done; cat /tmp/relaywg-curl.txt; grep -q 'Gatherlink local status (EXPERIMENTAL)' /tmp/relaywg-curl.txt"
@@ -391,9 +351,9 @@ remote_a "wireguard-show-a" "sudo wg show wg-gl-a" | tee "${OUT_DIR}/wg-show-a.t
 record "VM B fetched VM A HTTP status through WireGuard carried by Gatherlink via untrusted relay VM C"
 
 step "Operator Graph Views"
-remote_capture_b "monitor-b-graph" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services monitor relaywg.vm.node-b relaywg.b.exit.ab.path-a relaywg.b.exit.ab.path-b relaywg.b.exit.ab.path-c --view graph --once" "${OUT_DIR}/monitor-b-graph.txt"
+remote_capture_b "monitor-b-graph" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services monitor relaywg.vm.node-b --view graph --once" "${OUT_DIR}/monitor-b-graph.txt"
 remote_capture_c "monitor-c-graph" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services monitor relaywg.c.relay.ba.path-a relaywg.c.relay.ba.path-b relaywg.c.relay.ba.path-c relaywg.c.relay.ab.path-a relaywg.c.relay.ab.path-b relaywg.c.relay.ab.path-c --view graph --once" "${OUT_DIR}/monitor-c-graph.txt"
-remote_capture_a "monitor-a-graph" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services monitor relaywg.vm.node-a relaywg.a.exit.ba.path-a relaywg.a.exit.ba.path-b relaywg.a.exit.ba.path-c --view graph --once" "${OUT_DIR}/monitor-a-graph.txt"
+remote_capture_a "monitor-a-graph" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services monitor relaywg.vm.node-a --view graph --once" "${OUT_DIR}/monitor-a-graph.txt"
 grep -q "dependency graph" "${OUT_DIR}/monitor-b-graph.txt"
 grep -q "dependency graph" "${OUT_DIR}/monitor-c-graph.txt"
 grep -q "dependency graph" "${OUT_DIR}/monitor-a-graph.txt"

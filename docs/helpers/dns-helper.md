@@ -82,3 +82,12 @@ Not-yet scope:
 - enterprise DNS policy engine
 - replacing existing DNS servers
 - making core transport depend on DNS helper availability
+
+
+## Upstream Strategy
+
+`race_first_valid` queries configured upstream candidates concurrently and uses
+the first response accepted by DNSSEC policy. Failed upstreams emit structured
+`dns.upstream_failed` diagnostics, and DNSSEC-rejected responses emit
+`dns.dnssec_bogus`. When a single upstream is configured, the behavior is the
+same as deterministic ordered fallback.

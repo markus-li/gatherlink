@@ -1,6 +1,6 @@
 # Config Cookbook
 
-These are small starting points for common v0.9 setups. Use the example configs as
+These are small starting points for common Gatherlink setups. Use the example configs as
 the source files, then change addresses, names, service targets, and keys for
 your site.
 
@@ -54,7 +54,7 @@ gatherlink run start node-a.json --name core.node-a
 gatherlink run helpers-start node-a.json
 ```
 
-SOCKS5 supports TCP CONNECT for v0.9. UDP ASSOCIATE is deferred.
+SOCKS5 supports TCP CONNECT. UDP ASSOCIATE is deferred.
 
 Local acceptance proof:
 
@@ -132,7 +132,7 @@ gatherlink helpers dns-serve \
   --dnssec-mode allow_unsigned
 ```
 
-The v0.9 release report should still prove this in the VM environment before
+The release report should still prove this in the VM environment before
 tagging.
 
 ## WireGuard Over Gatherlink

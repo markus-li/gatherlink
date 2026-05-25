@@ -139,7 +139,7 @@ tools/hyperv/run_relay_wireguard_vm_acceptance.sh \
 
 This runner uses WireGuard's own `wg` tooling and passwordless lab sudo to
 create temporary test interfaces. Gatherlink still owns only the UDP service
-transport. VM C authenticates and rewraps only relay-hop envelopes; it never
+transport. VM C authenticates and removes only its own relay-hop envelope; it never
 decrypts endpoint Gatherlink packets or WireGuard packets. The runner captures
 `gatherlink services monitor --view graph --once` output on B, C, and A. In an
 interactive monitor, press `g` to toggle between the counter table and
@@ -192,7 +192,7 @@ For v0.9, prefer simple Bash plus SSH scripts over Ansible.
 Reasons:
 
 - fewer dependencies for personal/lab users and small sites
-- easier to inspect when AI generates or updates scripts
+- easier to inspect when scripts are generated or updated
 - easier to run one step at a time while debugging
 - matches the current CLI-first workflow
 - avoids introducing an inventory/configuration-management system before the
@@ -202,12 +202,12 @@ Ansible can be reconsidered later if VM acceptance grows into many nodes,
 repeatable matrix runs, or hosted CI infrastructure. It should not be required
 for v0.9.
 
-## AI-Assisted Deploy
+## Automation-Assisted Deploy
 
-AI-assisted deploy is allowed, but it must produce auditable scripts and config
-files rather than hiding behavior behind opaque orchestration.
+Automation-assisted deploy is allowed, but it must produce auditable scripts
+and config files rather than hiding behavior behind opaque orchestration.
 
-The AI-assisted workflow should:
+The automation-assisted workflow should:
 
 - generate plain Bash/SSH commands
 - show config files before installing them
@@ -249,12 +249,9 @@ The first VM pass does not need all of these to block basic packet acceptance.
 It should record which checks are proven, which are not configured, and which
 need later follow-up.
 
-The current v0.9.1 Hyper-V VM pass has run:
-
-- direct QUIC DATAGRAM carrier smoke on VMs A, B, and C
-- direct HTTP/3 DATAGRAM carrier smoke on VMs A, B, and C
-- QUIC DATAGRAM carrier smoke through Traefik UDP forwarding on VMs A, B, and C
-- HTTP/3 DATAGRAM carrier smoke through Traefik UDP forwarding on VMs A, B, and C
+Current release evidence is summarized in `docs/project-living-assessment.md`
+and `docs/releases/v0.9.2.md`. Carrier-specific VM proof should be recorded
+there or in a dated benchmark/release report, not duplicated here.
 
 The Traefik checks use Traefik as a UDP layer-4 forwarder only. Gatherlink
 packet semantics remain inside the carrier adapter and Rust dataplane.

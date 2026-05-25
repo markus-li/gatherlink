@@ -90,10 +90,13 @@ Useful commands should include:
 gatherlink config show --canonical path/to/config.json
 gatherlink config show --runtime path/to/config.json
 gatherlink config show --runtime --json path/to/config.json
+gatherlink config summary path/to/config.json
 ```
 
 The JSON view is the source for automation. Human terminal views are derived
-from the same data.
+from the same data. `config summary` emits a smaller stable JSON contract for
+scripts and operator checks that need compiled path, service, helper, security,
+and scheduler facts without depending on every runtime DTO field.
 
 ## Secrets
 

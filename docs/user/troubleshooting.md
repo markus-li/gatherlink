@@ -13,7 +13,8 @@ Run the local readiness checker first when the failure is unclear:
 gatherlink doctor --config node-a.json
 ```
 
-For machine-readable output or diagnostics validation:
+For machine-readable output or diagnostics validation, use the schema-versioned
+JSON envelope:
 
 ```bash
 gatherlink doctor \
@@ -23,8 +24,11 @@ gatherlink doctor \
 ```
 
 Doctor output is redacted. It checks local config expansion, the service
-registry, diagnostics JSONL shape, state paths, and whether the Rust dataplane
-binding is importable.
+registry, diagnostics JSONL shape, state paths, package-version agreement,
+tracked release hygiene, optional operator tools, and whether the Rust dataplane
+binding is importable. For QUIC DATAGRAM and HTTP/3 DATAGRAM paths, doctor also
+reports that Python carrier supervision is required before Rust sees a local UDP
+endpoint, plus the effective datagram MTU it can infer from config.
 
 ## Check Persisted State
 
