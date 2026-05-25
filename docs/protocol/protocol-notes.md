@@ -222,13 +222,13 @@ or local plaintext context:
 - `header_len`: fixed compact base header plus fragment-present bit
 - `flags`: compact `kind_flags` only
 - `session_id`: `receiver_index` maps to authenticated session state
-- routing label: not present; do not synthesize one for compatibility views
+- routing label: not present; do not synthesize one for presentation views
 - `payload_len`: derived from authenticated plaintext length
 
-Compatibility adapters may synthesize the older draft `FrameHeader` after
+Runtime presentation adapters may synthesize a v1-style status view after
 decryption by mapping `receiver_index` to `session_id` when needed and deriving
-`payload_len` from the decrypted plaintext length. New code should use compact
-v1 in plaintext mode and compact v2 after secure decryption.
+`payload_len` from the decrypted plaintext length. Hot-path code should use
+compact v1 in plaintext mode and compact v2 after secure decryption.
 
 Handshake packet types are reserved as:
 

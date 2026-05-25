@@ -53,21 +53,19 @@ The current implementation has the first half of that split:
   stale relay state fails closed before Rust receives it.
 - Rust `RelaySessionExecutor` accepts only those compiled facts and checks
   receiver index, expiry, packet size, packet limits, byte limits, and counters.
-- Rust also has a compact hop AEAD outer-envelope unwrap/reseal primitive for
-  an already authorized relay-hop session. It authenticates/decrypts only the
-  hop envelope, applies the compiled checks, and reseals the same opaque
-  endpoint-encrypted packet bytes for the next hop receiver index without
-  learning endpoint service or routing meaning.
+- Rust also has a compact hop AEAD outer-envelope unwrap primitive for an
+  already authorized relay-hop session. It authenticates/decrypts only the hop
+  envelope, applies the compiled checks, and forwards the remaining opaque bytes
+  without learning endpoint service or routing meaning.
 - Rust has a narrow compiled next-hop UDP forwarding primitive for this relay
   executor. Python still chooses the next-hop endpoint, keys, expiry, limits,
   and authorization; Rust only polls the relay socket, drops invalid packets
-  without a network response, reseals valid opaque bytes, and sends to the
+  without a network response, unwraps valid opaque bytes, and sends them to the
   compiled next-hop address.
-- Rust also has a final-hop exit primitive for an already authorized relay-hop
-  session. It authenticates and unwraps only the relay-hop envelope, then emits
-  the still-opaque endpoint-encrypted Gatherlink packet bytes to the local
-  endpoint core socket. The endpoint core remains the only layer that can
-  decrypt endpoint service/control context.
+- For multi-hop paths, the source stacks the relay-hop envelopes in advance.
+  Each untrusted relay removes only the outer envelope addressed to it, then
+  forwards the still-opaque remaining packet. The endpoint core remains the only
+  layer that can decrypt endpoint service/control context.
 - The executor config deliberately omits endpoint `service_id`, endpoint
   `path_id`, route labels, and payload meaning.
 
@@ -92,7 +90,7 @@ check relay replay window
 if replay: silent drop
 check direction, expiry, generation, limits, authorization
 if invalid: silent drop
-reseal opaque endpoint packet bytes and send to Python-compiled next hop/session
+remove this hop envelope and send remaining opaque bytes to Python-compiled next hop/session
 ```
 
 Every failure increments local counters and may emit rate-limited diagnostics.

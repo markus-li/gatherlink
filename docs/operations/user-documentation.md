@@ -7,6 +7,10 @@ The canonical source lives in the repository under `docs/user/`. The GitHub
 Wiki may publish a copy of those docs for easier browsing, but the Wiki must not
 become the source of truth.
 
+General documentation maintenance rules live in
+`docs/operations/documentation-maintenance.md`. This file only adds the
+user-documentation-specific release and Wiki workflow.
+
 ## Shape
 
 Every user-facing page should:

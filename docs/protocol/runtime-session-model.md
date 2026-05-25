@@ -100,13 +100,14 @@ the receiver. The receiver may then dedupe using the decrypted logical
 Dedupe is an optimization and correctness aid for multipath delivery. It must
 not be part of authentication.
 
-## V1 compatibility view
+## V1 Presentation View
 
 Plaintext/lab mode uses the compact v1 logical header because it lacks an
 authenticated session context. Secure receive decrypts to compact v2.
 
-When older code or diagnostics need a v1-style view after secure receive, Python
-or the control plane may build it from authenticated runtime context:
+When diagnostics or operator-facing output need a v1-style view after secure
+receive, Python or the control plane may build it from authenticated runtime
+context:
 
 ```text
 version     <- session/protocol context
@@ -117,10 +118,10 @@ path_id     <- compact v2 path_id
 sequence    <- compact v2 sequence
 ```
 
-New hot-path code should prefer compact v2 after decryption and should not
-reintroduce redundant plaintext fields.
+Hot-path code should use compact v2 after decryption and should not reintroduce
+redundant plaintext fields.
 
-Do not keep routing labels as runtime compatibility fields. Routing through
+Do not keep routing labels as runtime presentation fields. Routing through
 untrusted peers is represented by outer routing/relay-hop headers and
 authenticated relay session state. Endpoint service/exit decisions happen only
 after endpoint decrypt from authenticated service/control context.

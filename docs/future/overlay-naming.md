@@ -41,7 +41,7 @@ The dataplane should use compact IDs:
 - path_id
 
 Route context is derived from authenticated service/config/control state when a
-compatibility view needs it. It is not a secure plaintext packet label.
+presentation view needs it. It is not a secure plaintext packet label.
 
 ## MagicDNS-like idea
 

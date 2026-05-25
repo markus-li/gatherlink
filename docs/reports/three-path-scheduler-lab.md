@@ -1,10 +1,5 @@
 # Three-path scheduler lab report
 
-Status: historical report from the scheduler implementation period. It records
-the deterministic scheduler matrix and saved lab evidence used to build the v0.9
-scheduler. Current scheduler behavior is specified in `docs/runtime/scheduler.md`
-and current release gates are tracked in `docs/operations/v0.9-release-checklist.md`.
-
 This report combines deterministic scheduler-policy decisions with saved three-path lab snapshots. The deterministic matrix checks every Python scheduler policy and the Rust compile target it maps to. The lab snapshots check the current runnable local testbed: network shaping, bidirectional UDP traffic, per-path counters, control metadata, and NTP status.
 
 ## Scheduler policy matrix
@@ -20,6 +15,9 @@ This report combines deterministic scheduler-policy decisions with saved three-p
 | clean-balanced | `least_queue` | `least_queue` | path-a | lowest queue pressure |
 | clean-balanced | `earliest_completion_first` | `earliest_completion_first` | path-a | lowest latency plus transmit time |
 | clean-balanced | `blocking_estimation` | `blocking_estimation` | path-a | lowest completion time plus reorder hold |
+| clean-balanced | `ordered_multipath` | `ordered_multipath` | path-a | earliest safe service-flow arrival |
+| clean-balanced | `flowlet_adaptive` | `adaptive` | path-a | flowlet stickiness with adaptive fallback score |
+| clean-balanced | `latency_guarded_capacity` | `balanced` | path-a | capacity among latency-safe paths |
 | clean-balanced | `balanced` | `balanced` | path-a | best hybrid capacity/latency/loss/queue score |
 | clean-balanced | `adaptive` | `adaptive` | path-a | best hybrid capacity/latency/loss/queue score |
 | loss-on-fast-path | `round_robin` | `round_robin` | path-a | first eligible path in weighted sequence |
@@ -31,6 +29,9 @@ This report combines deterministic scheduler-policy decisions with saved three-p
 | loss-on-fast-path | `least_queue` | `least_queue` | path-a | lowest queue pressure |
 | loss-on-fast-path | `earliest_completion_first` | `earliest_completion_first` | path-a | lowest latency plus transmit time |
 | loss-on-fast-path | `blocking_estimation` | `blocking_estimation` | path-a | lowest completion time plus reorder hold |
+| loss-on-fast-path | `ordered_multipath` | `ordered_multipath` | path-b | earliest safe service-flow arrival |
+| loss-on-fast-path | `flowlet_adaptive` | `adaptive` | path-b | flowlet stickiness with adaptive fallback score |
+| loss-on-fast-path | `latency_guarded_capacity` | `balanced` | path-b | capacity among latency-safe paths |
 | loss-on-fast-path | `balanced` | `balanced` | path-b | best hybrid capacity/latency/loss/queue score |
 | loss-on-fast-path | `adaptive` | `adaptive` | path-b | best hybrid capacity/latency/loss/queue score |
 | high-capacity-slow-path | `round_robin` | `round_robin` | path-a | first eligible path in weighted sequence |
@@ -42,6 +43,9 @@ This report combines deterministic scheduler-policy decisions with saved three-p
 | high-capacity-slow-path | `least_queue` | `least_queue` | path-a | lowest queue pressure |
 | high-capacity-slow-path | `earliest_completion_first` | `earliest_completion_first` | path-b | lowest latency plus transmit time |
 | high-capacity-slow-path | `blocking_estimation` | `blocking_estimation` | path-b | lowest completion time plus reorder hold |
+| high-capacity-slow-path | `ordered_multipath` | `ordered_multipath` | path-b | earliest safe service-flow arrival |
+| high-capacity-slow-path | `flowlet_adaptive` | `adaptive` | path-b | flowlet stickiness with adaptive fallback score |
+| high-capacity-slow-path | `latency_guarded_capacity` | `balanced` | path-b | capacity among latency-safe paths |
 | high-capacity-slow-path | `balanced` | `balanced` | path-b | best hybrid capacity/latency/loss/queue score |
 | high-capacity-slow-path | `adaptive` | `adaptive` | path-b | best hybrid capacity/latency/loss/queue score |
 | queue-pressure | `round_robin` | `round_robin` | path-a | first eligible path in weighted sequence |
@@ -53,6 +57,9 @@ This report combines deterministic scheduler-policy decisions with saved three-p
 | queue-pressure | `least_queue` | `least_queue` | path-b | lowest queue pressure |
 | queue-pressure | `earliest_completion_first` | `earliest_completion_first` | path-a | lowest latency plus transmit time |
 | queue-pressure | `blocking_estimation` | `blocking_estimation` | path-a | lowest completion time plus reorder hold |
+| queue-pressure | `ordered_multipath` | `ordered_multipath` | path-a | earliest safe service-flow arrival |
+| queue-pressure | `flowlet_adaptive` | `adaptive` | path-a | flowlet stickiness with adaptive fallback score |
+| queue-pressure | `latency_guarded_capacity` | `balanced` | path-a | capacity among latency-safe paths |
 | queue-pressure | `balanced` | `balanced` | path-a | best hybrid capacity/latency/loss/queue score |
 | queue-pressure | `adaptive` | `adaptive` | path-a | best hybrid capacity/latency/loss/queue score |
 | jitter-reorder-risk | `round_robin` | `round_robin` | path-a | first eligible path in weighted sequence |
@@ -64,6 +71,9 @@ This report combines deterministic scheduler-policy decisions with saved three-p
 | jitter-reorder-risk | `least_queue` | `least_queue` | path-a | lowest queue pressure |
 | jitter-reorder-risk | `earliest_completion_first` | `earliest_completion_first` | path-a | lowest latency plus transmit time |
 | jitter-reorder-risk | `blocking_estimation` | `blocking_estimation` | path-a | lowest completion time plus reorder hold |
+| jitter-reorder-risk | `ordered_multipath` | `ordered_multipath` | path-a | earliest safe service-flow arrival |
+| jitter-reorder-risk | `flowlet_adaptive` | `adaptive` | path-a | flowlet stickiness with adaptive fallback score |
+| jitter-reorder-risk | `latency_guarded_capacity` | `balanced` | path-a | capacity among latency-safe paths |
 | jitter-reorder-risk | `balanced` | `balanced` | path-a | best hybrid capacity/latency/loss/queue score |
 | jitter-reorder-risk | `adaptive` | `adaptive` | path-a | best hybrid capacity/latency/loss/queue score |
 
@@ -114,10 +124,6 @@ These snapshots were taken from fresh three-path lab starts for each named mode.
 - `cargo fmt --check`: passed.
 - `cargo test -q`: passed, including the Rust scheduler primitive tests.
 
-## Historical limitation at the time of this report
+## Current limitation
 
-At the time this report was created, the remaining scheduler integration gap
-was the live Python loop that converts telemetry into refreshed scheduler
-primitives and hot-reapplies them to Rust during the run. That later moved into
-the v0.9 implementation; use this report as evidence/rationale rather than as the
-current scheduler backlog.
+The runnable lab now uses the Rust path transport for user traffic and control duplication. The remaining scheduler integration gap is the live Python loop that converts telemetry into refreshed scheduler primitives and hot-reapplies them to Rust during the run.

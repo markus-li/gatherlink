@@ -2,7 +2,7 @@
 
 Diagnostics are structured facts first and terminal text second.
 
-The current v0.9 path has three operator surfaces:
+The current operator path has three diagnostic surfaces:
 
 - `gatherlink services status NAME` for one live service snapshot
 - `gatherlink services monitor NAME...` for continuously refreshed counters

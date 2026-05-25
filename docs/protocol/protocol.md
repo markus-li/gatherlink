@@ -335,7 +335,9 @@ Initial message types:
 | 9 | `u16 service_id`, `u8 target_len`, UTF-8 target | Endpoint assertion for verification only; never applied as config |
 | 10 | `u16 service_id`, `u8 reason_len`, UTF-8 reason | Generic peer service-disable assertion; stops traffic for that service with loud diagnostics |
 | 11 | `u16 path_id`, `u16 tx_link_mtu`, `u16 tx_frame_mtu`, `u16 rx_link_mtu`, `u16 rx_frame_mtu` | Directional passive path MTU observation; zero means unknown |
-| 12 | `u16 service_id`, `u16 fanout`, `u32 fanout_below_bytes` | Python-owned service scheduler policy FYI; peer Python may compile this into local Rust receive expectations |
+| 12 | `u16 service_id`, `u16 fanout`, `u32 fanout_below_bytes`, `u64 flowlet_idle_us`, `u64 flowlet_max_hold_us`, `u32 path_run_datagrams` | Python-owned service scheduler policy FYI; peer Python may compile this into local Rust receive expectations |
+| 13 | `u16 path_id`, pressure counters | Directional pressure facts: loss, queue, send failures, gaps, reorder depth/age, scheduler in-flight, predicted delivery, and local drops |
+| 14 | three `u8 len`, UTF-8 strings | This node's local TX scheduler status: configured policy, effective policy, and compiled Rust mode; diagnostic only |
 
 Rust handles reserved service ids mechanically. Any frame whose `service_id` is
 in `0..255` is never emitted to an application UDP target; Rust records cheap
@@ -402,6 +404,14 @@ This is enough for real telemetry:
   and rolling-mean latency in microseconds. Like capacity, these are peer-view
   facts on the wire; Python converts them into local `tx`/`rx` meaning before
   display or scheduler use.
+- peers can advertise sparse `DataTransmitSample` control messages for real
+  payload traffic. These samples reference the existing data-frame `path_id`
+  and sequence range, plus a transmit timestamp in the sender's current shared
+  Gatherlink clock domain. Receivers match that report with their Rust-recorded
+  receive stamp for the same real data sequence, apply Python-owned clock
+  confidence/RTT sanity checks, and only then promote the result into
+  scheduler-visible `data-traffic-one-way` latency. This deliberately keeps
+  normal data frames timestamp-free.
 - peers can advertise `PathMtu` control messages with directional MTU facts:
   `tx_link_mtu`, `tx_frame_mtu`, `rx_link_mtu`, and `rx_frame_mtu`. A missing
   direction is encoded as zero, just like capacity/latency. Python records peer
@@ -421,7 +431,8 @@ This is enough for real telemetry:
   protection, telemetry windows, and later crypto policy.
 - service status should expose control metadata telemetry, including sent and
   received frame/message/byte counts, last send/receive time, last source, and
-  the current path-id/name, service-id/name, path capacity, path latency, and internal clock sync state
+  the current path-id/name, service-id/name, local/peer scheduler status, path
+  capacity, path latency, and internal clock sync state
 
 Service metadata is intentionally only a friendly mapping from compact
 `service_id` to service name. It does not set target IP addresses, target ports,
@@ -434,6 +445,18 @@ an FYI. The peer Python process records what the other side expects and may
 compile the relevant receive expectation into local Rust. This is how expected
 fanout duplicates stay distinct from unexpected duplicate/replay traffic without
 making Rust infer policy from packet contents.
+
+The compact FYI policy is not a remote path override. Local
+`scheduler_allowed_paths` and `scheduler_path_weights` remain local config and
+must be preserved unless a future authenticated config-apply message explicitly
+and safely replaces them. This prevents a peer's generic policy advertisement
+from erasing local traffic-class separation such as stable/fast WireGuard
+service path sets.
+
+Scheduler status metadata is separate from service scheduler policy metadata.
+It reports a node's own local TX scheduler mode for diagnostics and benchmark
+correlation. It does not command the peer and it does not imply both directions
+of a connection use the same scheduler.
 
 Application-facing UDP services use one local listen port per service. The
 listen port identifies which configured service received the payload; all

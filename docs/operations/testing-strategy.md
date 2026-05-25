@@ -31,13 +31,9 @@ Suggested default development verification:
 - docs that affect implementation guidance: update or add tests in the code
   chat when that guidance is implemented
 
-Durable docs should not record volatile test totals. Write down the command,
-the scope, and whether it passed; leave exact counts to the test runner output
-or release artifact for that specific run.
-
-Implementation TODOs may stay in docs and active code when they are searchable
-and tied to a clear feature area, roadmap, audit follow-up, or release gate.
-Remove them when resolved. Prefer this over hiding pending work in vague prose.
+Durable docs should not record volatile test totals. The canonical maintenance
+rules for volatile facts and TODOs live in
+`docs/operations/documentation-maintenance.md`.
 
 ## Lab Contract
 

@@ -17,7 +17,5 @@ authorization. Promote a topic into a release roadmap before building it.
 
 - Keep these as design notes until a release roadmap promotes them.
 - Do not create runtime placeholder packages from future notes.
-- Do not duplicate a concise doc with a `-full.md` copy. If a topic needs more
-  detail, add it to the canonical file or split by a clearer subject name.
-- Cross-link to canonical docs when a design note depends on current protocol,
-  runtime, helper, or operations behavior.
+- Follow `docs/operations/documentation-maintenance.md` for duplication,
+  canonical-linking, and volatile-fact rules.

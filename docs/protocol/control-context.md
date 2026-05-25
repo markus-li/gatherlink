@@ -72,9 +72,14 @@ Discovery and remote IPC/status are different control-plane behaviors.
 
 Discovery is continuous and sparse. It uses authenticated control metadata to
 advertise stable facts such as service id/name mappings, path names, capacity,
-MTU, disabled-service assertions, and endpoint assertions for verification. It
-should run at a low baseline cadence and also send promptly when an important
-fact changes. Discovery is cheap enough to keep on, but it must not become a
+MTU, disabled-service assertions, endpoint assertions for verification, and
+compact path-pressure summaries. Path-pressure summaries are receiver feedback:
+loss, queue, send-failure, reorder, sender in-flight, predicted delivery,
+socket-buffer, and drop facts that Python may use to recompile scheduler
+credits or path health. They are not user-payload
+acknowledgements and do not add retransmission semantics to ordinary UDP. The
+cadence should stay low at baseline and send promptly when an important fact
+changes. Discovery is cheap enough to keep on, but it must not become a
 continuous live-status stream.
 
 Remote IPC/status is explicit, louder, temporary, and read-only. It uses the
@@ -84,6 +89,14 @@ request while it is still interested; the peer stops sending remote status when
 the request expires. If no fresh response is available, operator views should
 show the remote status as stale or unknown rather than pretending the remote
 service is locally registered.
+
+Remote status is also the first explicit internal metadata ack/retry surface.
+Each request carries a request id, the requester tracks pending ids, and a
+matching response acknowledges that internal metadata request. Timed-out pending
+requests are counted locally and a later request may be sent while the operator
+interest window is still active. This reliability behavior is deliberately
+limited to the reserved remote-status service lane; it must not create hidden
+retransmission or delivery promises for ordinary user UDP payloads.
 
 Learned remote services are read-only discovered facts. They may appear in
 operator listings as remote entries, but the local service registry remains the

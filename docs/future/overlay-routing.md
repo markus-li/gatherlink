@@ -127,17 +127,12 @@ Hop redirects can exist later, but should be constrained:
 - policy-checked
 - bounded by hop limit
 
-## Explicit non-goals
+## Boundary
 
-Overlay routing must not become:
-
-- BGP/OSPF replacement
-- LAN routing daemon
-- firewall controller
-- NAT controller
-- L7 router
-- hidden dynamic mesh
-- opaque SD-WAN controller
+Overlay routing must follow the project boundaries in
+`docs/architecture/architecture-contract.md` and the relay/session model in
+`docs/protocol/relay-session-lifecycle.md`. This note only describes future
+overlay planning ideas; it is not a replacement for those canonical boundaries.
 
 ## Diagnostics
 

@@ -30,6 +30,50 @@ Ed25519 signs identity, topology, and authority documents; X25519 establishes
 ephemeral transport secrets. This avoids making one key type carry every
 security meaning in the system.
 
+## WireGuard-Inspired Posture
+
+Gatherlink intentionally copies several security *principles* from the
+WireGuard protocol while remaining its own protocol and packet format. This is
+design inspiration, not a claim of WireGuard compatibility, and the project
+should avoid copying implementation code unless license review allows it.
+
+Current posture:
+
+1. Silent receive for unauthenticated traffic: aligned. Public listeners should
+   not emit errors, version replies, or scanner-visible diagnostics.
+2. Small fixed packet classes: aligned. Data, handshake initiation, handshake
+   response, and cookie reply are fixed public classes.
+3. Receiver index as public lookup key: aligned for encrypted data and relay
+   packets. Public data packets should reveal only opaque receiver/session
+   lookup state, counters, ciphertext, and tags.
+4. No unauthenticated negotiation: aligned. Version, suite, topology, relay
+   permission, and capability decisions belong in signed config/topology or
+   authenticated handshake payloads.
+5. Cookie-based handshake DoS defense: packet shape reserved. Full cookie
+   enforcement remains future work.
+6. Short rate limiting instead of harsh source bans: future work. Unknown
+   sources may be rate-limited; active or recently authenticated peers should
+   not be blocked by spoofed invalid packets.
+7. Roaming-friendly identity: intended direction. Peer identity is
+   cryptographic, not source IP; any endpoint update must be driven by
+   authenticated traffic and explicit policy.
+8. Minimal cryptographic choices: aligned. Keep one preferred modern suite and
+   avoid user-selectable cipher-suite sprawl.
+9. Key rotation before limits: v0.9.2 work. Rekey before counter exhaustion,
+   age expiry, or volume thresholds.
+10. Replay windows per session/key: aligned. Replay state is scoped to
+    traffic keys and receiver indexes and resets on replacement session facts.
+11. No compression before encryption by default: aligned as a policy. Future
+    compression, if ever added, must be explicit, bounded, service-scoped, and
+    side-channel reviewed.
+12. Small auditable security surface: aligned as an architecture goal. Rust
+    handles compact packet execution; Python owns policy; helpers stay outside
+    the core.
+
+Unfinished items from this checklist belong in
+`docs/reports/future-roadmap-pipeline.md` unless a release roadmap promotes a
+narrow slice.
+
 ## Current Implementation Stage
 
 The current Rust dataplane can run path transports in two modes:
@@ -261,11 +305,10 @@ using `service_id` plus authenticated config/control context. If a future mode
 needs per-hop label swapping, it should add a separate per-hop wrapper instead
 of exposing endpoint service/path metadata in the end-to-end data envelope.
 
-Handshake packets are also fixed-shape. They should use a small packet type byte
-followed by the Noise message bytes and optional DoS-cookie fields. The exact
-handshake message sizes are owned by the selected Noise/WireGuard-style
-implementation, but the receiver rules below are part of the Gatherlink
-protocol contract.
+Handshake packets are fixed-shape. The Noise message body is owned by the
+selected Noise/WireGuard-style implementation, but Gatherlink reserves the
+outer anti-DoS fields now so cookie/proof-of-return-path support can be added
+without changing data packets later.
 
 No packet contains unauthenticated feature negotiation, version replies, debug
 strings, or parse errors.
@@ -374,6 +417,37 @@ Handshake packet classes:
 0x01 encrypted data
 ```
 
+Handshake initiation and response packets use:
+
+```text
+offset size field
+0      1    packet_type        0x10 initiation, 0x11 response
+1      N    noise_message      fixed shape for the selected handshake pattern
+1+N    16   mac1               static-key admission MAC
+17+N   16   mac2               cookie/proof MAC, all zero when no cookie is used
+```
+
+The `mac1`/`mac2` trailer is part of the handshake packet contract from the
+start, even before full cookie enforcement is implemented. Receivers may ignore
+or soft-validate `mac2` until cookie mode is implemented, but the bytes must be
+present so future cookie support does not require a packet-shape migration.
+
+Cookie replies use:
+
+```text
+offset size field
+0      1    packet_type        0x12 cookie reply / retry token
+1      16   request_mac1       mac1 from the accepted initiation/response attempt
+17     24   nonce              random nonce for encrypted cookie material
+41     32   encrypted_cookie   encrypted cookie/proof material
+```
+
+Cookie replies are the only unauthenticated network response class, and only
+when the request already proves enough knowledge to avoid being a reflection or
+scanner oracle. The encrypted cookie construction and exact MAC keys are owned
+by the handshake implementation, but the outer packet shape above is the
+Gatherlink compatibility contract.
+
 The receiver must only send `0x11` after the initiation decrypts/authenticates
 for the local static X25519 key and maps to an allowed peer or approved
 bootstrap token. It must only send `0x12` when the request proves knowledge of
@@ -385,6 +459,11 @@ network behavior: no response.
 The initiator may retransmit handshake initiation with jittered backoff. The
 responder must not create expensive peer/session state until the initiation has
 passed the cheap public checks and authenticated Noise processing.
+
+This handshake extension does not change encrypted data packets, compact v1/v2
+logical headers, relay-hop packet headers, service ids, path ids, or receiver
+index semantics. Anti-DoS compatibility lives only in the handshake packet
+classes.
 
 ## Packet Envelope
 
@@ -494,8 +573,7 @@ Batching should be used to amortize relay overhead for small payloads.
 
 The compact v1 logical frame is the versioned endpoint header used by plaintext
 lab mode. Secure transport decrypts to v2, which is the same layout without the
-visible `version` byte. Older 38-byte draft headers should be treated as
-migration scaffolding.
+visible `version` byte. Compact v1/v2 are the settled logical frame formats.
 
 V1 plaintext/lab header:
 
@@ -558,14 +636,14 @@ plaintext context:
   state instead of endpoint-visible packet fields
 - `payload_len`: derived from authenticated plaintext length
 
-After decryption, runtime code may expose a compatibility view that looks like
-the older 38-byte draft `FrameHeader`. That view is synthesized, not parsed from
-the packet:
+After decryption, runtime code may expose a presentation view for diagnostics,
+status, and older operator-facing names. That view is synthesized from compact
+v2 plus authenticated runtime context, not parsed from the packet:
 
 ```text
 version     <- session/protocol context
 kind        <- compact v2 kind_flags
-header_len  <- legacy compatibility value only; compact wire uses fixed base plus fixed fragment metadata
+header_len  <- derived display value; compact wire uses fixed base plus fixed fragment metadata
 flags       <- compatibility flags, normally zero
 session_id  <- receiver_index/session mapping
 service_id  <- compact v2 service_id
@@ -574,9 +652,9 @@ sequence    <- compact v2 sequence
 payload_len <- decrypted plaintext length minus compact header/fragment metadata
 ```
 
-New code should prefer compact v1 in plaintext mode and compact v2 after secure
-decryption. The compatibility view exists only to reuse older draft-header code
-paths while the dataplane is being migrated.
+Runtime and hot-path code should use compact v1 in plaintext mode and compact
+v2 after secure decryption. Presentation views must not add wire-visible fields
+or change packet parsing.
 
 ## Sessions, Paths, And Duplicates
 

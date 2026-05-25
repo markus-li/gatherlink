@@ -194,3 +194,6 @@ This is enough for the local lab and leaves room for richer path metrics later.
 Drop events are local diagnostics for silent network drops such as failed AEAD,
 replay rejection, unknown receiver index, or relay authorization failure. They
 must not imply that a packet-level error response was sent to the peer.
+
+
+Carrier events include `carrier.ready`, `carrier.closed`, `carrier.connect_failed`, `carrier.datagram_sent`, `carrier.datagram_received`, and `carrier.datagram_dropped`. They are best-effort diagnostics and must not block carrier packet movement.
