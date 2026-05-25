@@ -21,16 +21,26 @@ and historical reports.
 | Diagnostics or operator status | `docs/operations/diagnostics-dictionary.md` | `docs/operations/diagnostics-events.md`, `docs/operations/diagnostics.md`, `docs/architecture/api-surface.md` |
 | Failure behavior | `docs/runtime/failure-model.md` | `docs/runtime/resource-guardrails.md`, `docs/runtime/state-persistence.md` |
 | Tests to write | `docs/operations/testing-strategy.md` | the relevant feature doc |
+| Building release slices | `docs/operations/development-discipline.md` | `docs/operations/release-development-process.md`, the active roadmap |
+| Maintaining docs | `docs/operations/documentation-maintenance.md` | the specific directory README |
 | Labs and demos | `docs/labs/local-dual-path-lab.md` | `docs/labs/wsl-two-distro-lab.md`, `docs/labs/real-vm-acceptance.md`, `docs/labs/lab-demo.md`, `docs/protocol/plaintext-security-mode.md` |
 | Where code lives | `docs/architecture/source-map.md` | `docs/architecture/architecture-contract.md` |
-| Future design notes | `docs/future/README.md` | `docs/reports/v0.9.1-roadmap.md`, `docs/reports/future-roadmap-pipeline.md` |
+| Future design notes | `docs/future/README.md` | `docs/reports/future-roadmap-pipeline.md`, `docs/reports/v0.9.2-roadmap.md` |
 | Releasing v0.9 | `docs/operations/v0.9-release-checklist.md` | `docs/operations/release-development-process.md`, `docs/reports/v0.9-roadmap.md`, `docs/labs/real-vm-acceptance.md` |
-| Release notes | `docs/releases/v0.9.1.md` | `docs/releases/v0.9.0.md`, `docs/project-living-assessment.md`, `docs/operations/v0.9-release-checklist.md` |
-| Project status and next work | `docs/project-living-assessment.md` | `docs/reports/README.md`, `docs/reports/v0.9.1-roadmap.md`, `docs/operations/testing-strategy.md`, `docs/helpers/helper-priorities.md` |
+| Release notes | `docs/releases/v0.9.2.md` | `docs/releases/v0.9.1.md`, `docs/releases/v0.9.0.md`, `docs/project-living-assessment.md`, `docs/operations/v0.9-release-checklist.md` |
+| Project status and next work | `docs/project-living-assessment.md` | `docs/releases/v0.9.2.md`, `docs/reports/README.md`, `docs/reports/future-roadmap-pipeline.md`, `docs/operations/testing-strategy.md` |
+| Project story | `docs/project-story.md` | `docs/architecture/architecture-contract.md`, `docs/project-living-assessment.md` |
 
 ## Canonical Docs
 
 These docs are current implementation guidance.
+
+## Project Context
+
+- `docs/project-story.md`: how Gatherlink was shaped, what design boundaries
+  matter, and why the architecture looks the way it does
+- `docs/project-living-assessment.md`: current release-health assessment,
+  release gates, risks, and near-term priority order
 
 ## User Docs
 
@@ -50,6 +60,10 @@ User documentation is for people running Gatherlink, not developing it.
 - `docs/architecture/architecture.md`: concise architecture overview
 - `docs/architecture/design-principles.md`: project design principles
 - `docs/architecture/performance-philosophy.md`: where performance work belongs
+- `docs/benchmarks/README.md`: repeatable benchmark strategy and comparison
+  layers
+- `docs/benchmarks/hyperv-performance-log.md`: current Hyper-V benchmark
+  evidence and bottleneck notes
 - `docs/architecture/source-map.md`: where code lives and which boundary owns it
 - `docs/architecture/api-surface.md`: expected public/local APIs
 - `docs/architecture/plugin-strategy.md`: extension/plugin stance
@@ -60,8 +74,8 @@ User documentation is for people running Gatherlink, not developing it.
   service ids, aggregation, and fragmentation
 - `docs/protocol/security.md`: crypto model, replay protection, handshake posture, identity,
   stealth receive, and secure relay forwarding
-- `docs/protocol/runtime-session-model.md`: node identities, peer sessions, services, paths,
-  receiver indexes, duplicates, and v1 compatibility views
+- `docs/protocol/runtime-session-model.md`: node identities, peer sessions,
+  services, paths, receiver indexes, duplicates, and v1 presentation views
 - `docs/protocol/control-context.md`: authenticated runtime control state, service mappings,
   generations, helper control, and security limits
 - `docs/protocol/relay-session-lifecycle.md`: encrypted relay-hop forwarding lifecycle
@@ -102,6 +116,11 @@ User documentation is for people running Gatherlink, not developing it.
   v0.9
 - `docs/operations/v0.9.1-release-artifacts.md`: local v0.9.1 artifact and
   GitHub Wiki payload preparation
+- `docs/operations/development-discipline.md`: standing implementation rules
+  for roadmap status, ownership boundaries, tests, performance evidence, and
+  commit hygiene
+- `docs/operations/documentation-maintenance.md`: canonical doc navigation,
+  duplication, volatile-fact, TODO, and user-doc writing rules
 - `docs/operations/release-development-process.md`: reusable three-pass
   implementation, verification, and boundary-review process for release work
 - `docs/operations/testing-strategy.md`: unit, integration, relay, DNS, helper, and golden-vector
@@ -120,13 +139,15 @@ User documentation is for people running Gatherlink, not developing it.
   through Traefik UDP forwarding
 - `docs/labs/http3-datagram-carrier.md`: v0.9.1 HTTP/3 DATAGRAM carrier lab
 - `docs/reports/README.md`: status and purpose of every report file
-- `docs/reports/v0.9-roadmap.md`: v0.9 implementation order and acceptance target
+- `docs/reports/v0.9-roadmap.md`: closed v0.9 implementation order and acceptance target
 - `docs/reports/v0.9-code-audit-followups.md`: closed source/docs alignment
   findings from the v0.9 audit
-- `docs/reports/v0.9.1-roadmap.md`: v0.9.1 hardening and small-site operations
+- `docs/reports/v0.9.1-roadmap.md`: closed v0.9.1 hardening and small-site operations
   roadmap after VM acceptance and soak
-- `docs/reports/future-roadmap-pipeline.md`: post-v0.9.1 pipeline ideas that are
-  shaped but not assigned to a release
+- `docs/reports/v0.9.2-roadmap.md`: v0.9.2 stability, cleanliness, polish,
+  and final gate evidence trail
+- `docs/reports/future-roadmap-pipeline.md`: shaped future ideas that are not
+  assigned to the active release
 - `docs/project-living-assessment.md`: current release-health assessment,
   release gates, risks, and near-term priority order
 - `docs/operations/appliance-update-strategy.md`: appliance update and rollback posture
@@ -192,58 +213,8 @@ These are reference material, not the primary spec:
 Use them for rationale and old comparisons. Promote still-current decisions into
 canonical docs before implementing from them.
 
-## Stale Information Rule
+## Maintenance Rules
 
-If two docs disagree:
-
-1. Prefer `docs/protocol/protocol.md` for wire layout.
-2. Prefer `docs/protocol/security.md` and `docs/protocol/relay-session-lifecycle.md` for secure transport
-   and relay behavior.
-3. Prefer `docs/protocol/runtime-session-model.md` for sessions, services, paths, and
-   receiver indexes.
-4. Prefer `docs/runtime/config-runtime-state.md` for config/runtime boundaries.
-5. Prefer `docs/helpers/helper-priorities.md` for helper scope and priority.
-6. Prefer `docs/operations/v0.9-operator-runbook.md` and
-   `docs/operations/v0.9-troubleshooting-guide.md` for current operator flows.
-7. Treat reports and study notes as historical unless a canonical doc cites
-   them.
-
-## Keeping Navigation Useful
-
-When adding or changing docs:
-
-- update this file if the new doc is a likely entry point
-- keep one concise doc as the canonical implementation target
-- do not add `-full.md` companion docs; expand the canonical doc or split by a
-  clearer subject name
-- link from feature docs to the canonical boundary doc they depend on
-- avoid duplicating active protocol, crypto, config, or helper-scope decisions
-- do not record volatile totals such as test counts, file counts, generated
-  artifact counts, or other snapshot numbers; record commands, scope, and
-  pass/fail status instead
-- implementation TODOs are allowed when they are searchable and tied to a clear
-  feature area, roadmap, audit follow-up, or release gate; remove them when the
-  work is done instead of letting stale notes become pseudo-requirements
-- keep transient operational facts out of durable docs unless they are part of
-  a dated release or acceptance report: generated report paths/timestamps,
-  personal machine paths, VM inventory, hostnames, keys, raw command dumps,
-  dependency popularity claims, and CI/test totals should not appear in
-  canonical docs
-- dependency or library choice claims that may age should live in
-  `docs/operations/library-selection.md` or a dated decision/report note, not as
-  timeless assertions in user or protocol docs
-
-## Writing User Documentation
-
-User documentation must stay short, step-by-step, and scenario-based.
-
-- write for common real uses, not every possible feature
-- split usage by helper or workflow, especially SOCKS5 and WireGuard
-- link to `docs/user/config-cookbook.md` for config patterns
-- link to `docs/operations/v0.9-operator-runbook.md` for day-to-day operation
-- keep commands copyable and examples small
-- explain only what the user needs to run, check, and stop the service
-- put troubleshooting near the user path: status, logs, monitor, diagnostics
-- mention current platform testing plainly: Debian tested, most Linux expected
-- ask users to report bugs as GitHub issues
-- move implementation rationale to design docs, not user docs
+Use `docs/operations/documentation-maintenance.md` for canonical source-of-truth
+rules, stale-information handling, duplication rules, volatile-fact policy,
+TODO handling, dependency-claim posture, and user-documentation style.

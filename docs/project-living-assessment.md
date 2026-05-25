@@ -1,6 +1,6 @@
 # Project Living Assessment
 
-Last updated: 2026-05-20
+Last updated: 2026-05-26
 
 This is the current release-health assessment for Gatherlink. It is not a
 protocol spec, implementation diary, or historical milestone tracker. Keep it
@@ -21,9 +21,9 @@ Rules:
 - do not keep counts, inventories, old milestone checklists, or implementation TODO
   copies here
 - if a finding changes release readiness, say whether it is a tag blocker,
-  v0.9.1 completion item, or future pipeline work
+  v0.9.2 completion item, or future pipeline work
 
-Canonical docs:
+Reference docs:
 
 - `docs/README.md`
 - `docs/architecture/architecture-contract.md`
@@ -36,207 +36,62 @@ Canonical docs:
 - `docs/helpers/helper-priorities.md`
 - `docs/labs/lab-demo.md`
 - `docs/operations/testing-strategy.md`
+- `docs/operations/documentation-maintenance.md`
+- `docs/benchmarks/README.md`
 - `docs/operations/v0.9-release-checklist.md`
-- `docs/reports/v0.9-roadmap.md`
-- `docs/reports/v0.9.1-roadmap.md`
+- `docs/reports/v0.9.2-roadmap.md`
 - `docs/reports/future-roadmap-pipeline.md`
-- `docs/reports/v0.9-code-audit-followups.md`
 
 ## Current Judgement
 
-Gatherlink is past the v0.9 tag and is at v0.9.1 release-candidate state for the
-same deliberately narrow Debian personal/lab and small-site scope. The current
-tree contains real v0.9.1 implementation slices for DNS-over-HTTPS upstreams,
-standard datagram carrier adapters, local release artifacts, lab bundle
-generation, topology diffing, session-rotation policy helpers, VM report JSON,
-and the guarded experimental local status write endpoint.
+Gatherlink v0.9 and v0.9.1 are closed release baselines. The current `dev`
+branch is tag-ready for the selected v0.9.2 stability and polish scope, subject
+to the final maintainer tag/merge step.
 
-The main remaining v0.9.1 work is final release hygiene, not broad product
-design. Do not tag v0.9.1 until the local release gate has been rerun from a
-clean tree, the local editable install/package metadata reports 0.9.1, release
-artifacts build and doctor-check successfully, and the recorded VM/proxy
-evidence is retained with the release notes.
+V0.9.2 is not a feature-expansion release. It improves stability, cleanliness,
+observability, and operator confidence around the already-existing v0.9/v0.9.1
+system. The release note is `docs/releases/v0.9.2.md`; detailed evidence is in
+`docs/reports/v0.9.2-roadmap.md`.
 
-The core system has:
+Use canonical docs for details:
 
-- a Rust packet executor for compact UDP frame handling, AEAD, replay
-  protection, dedupe, batching, fragmentation, queues, counters, sockets, and
-  scheduler facts
-- a Python control/runtime layer for config, validation, provisioning,
-  lifecycle, helpers, diagnostics, monitoring, release tooling, and operator
-  meaning
-- authenticated config-facing session setup that compiles down to compact AEAD
-  facts for Rust
-- relay-hop execution and routing without plaintext routing labels
-- production-owned sparse discovery, remote-status, and monitor-cadence control
-  paths
-- managed helper slices for SOCKS5 TCP CONNECT, TCP forwarding, DNS direct,
-  tunnel, and DoH upstreams, WireGuard planning/transport proof, and the narrow
-  time helper
-- Python-owned QUIC DATAGRAM and HTTP/3 DATAGRAM carrier adapters that wrap
-  opaque Gatherlink packets around the Rust UDP packet executor
-- local, WSL, Hyper-V VM, relay/routing VM, and soak evidence for the declared
-  v0.9 scope, with v0.9.1 local carrier and artifact gates now added
+- architecture and ownership: `docs/architecture/architecture-contract.md`
+- protocol and security: `docs/protocol/protocol.md` and
+  `docs/protocol/security.md`
+- runtime/session model: `docs/protocol/runtime-session-model.md`
+- helper scope: `docs/helpers/helper-priorities.md`
+- current release evidence: `docs/releases/v0.9.2.md` and
+  `docs/reports/v0.9.2-roadmap.md`
+- release evidence: `docs/releases/v0.9.0.md`, `docs/releases/v0.9.1.md`,
+  `docs/releases/v0.9.2.md`, and `docs/operations/v0.9-release-checklist.md`
 
 ## Release Scope
 
-V0.9 and v0.9.1 are for Debian personal/lab users and small sites.
+V0.9, v0.9.1, and v0.9.2 are for Debian personal/lab users and small sites.
 
-Supported shape:
+Supported shape and non-goals are defined in
+`docs/architecture/architecture-contract.md`. Release-specific user posture is
+covered by `docs/operations/v0.9-operator-runbook.md` and
+`docs/user/README.md`.
 
-- Debian is the tested and supported platform
-- CLI operation is the supported operator interface
-- Rust owns packet execution and compact facts
-- Python owns policy, config, orchestration, helpers, diagnostics, and UX
-- UDP services are carried over configured Gatherlink paths
-- encryption is the normal production path
-- invalid encrypted packets and invalid relay packets are silently dropped on
-  the network side
-- no plaintext routing is supported
-- untrusted peers route only through authenticated outer routing/relay-hop
-  context
+Deferred beyond the v0.9/v0.9.1/v0.9.2 line unless a later roadmap promotes
+them: see `docs/reports/future-roadmap-pipeline.md`.
 
-Project non-goals:
+## Release Gates And Feature State
 
-- general SD-WAN behavior
-- firewall, NAT, LAN routing, or DPI ownership
+V0.9 and v0.9.1 evidence is recorded in the release notes and release
+checklist. V0.9.2 release gates are defined in
+`docs/reports/v0.9.2-roadmap.md`.
 
-These are not normal backlog items. They should stay out of Gatherlink unless
-the project is intentionally redefined, because they would blur the packet
-transport/helper boundary and turn Gatherlink into a different kind of system.
-A narrow Linux endpoint-protection helper may be considered later, but only as
-helper-owned integration for explicit Gatherlink endpoint scenarios. It must not
-become general firewall, NAT, LAN routing, or SD-WAN policy ownership.
-
-Deferred beyond the v0.9/v0.9.1 line unless a later roadmap promotes them:
-
-- production GUI
-- broad platform support beyond Debian
-- automatic update/rollback channels
-- WSS, TCP/TLS, CONNECT-UDP/MASQUE, and obfuscation carriers
-- broad multi-hop relay policy automation beyond the implemented first slice
-- optional WireGuard interface lifecycle automation
-
-## Release Gates
-
-Passed or recorded v0.9 evidence:
-
-- Rust workspace tests and formatting checks
-- Python lint, formatting, compile, and pytest checks
-- local lab Rust smokes across plaintext, encrypted, multipath, IPv6, and shared
-  sink shapes
-- WSL acceptance gate with encrypted multipath behavior, degradation,
-  recovery, monitoring, diagnostics, and clean close
-- Hyper-V two-Debian-VM core acceptance
-- DNS tunnel upstream VM proof
-- active stream-helper VM proof for SOCKS5/TCP helper transport behavior
-- WireGuard endpoint/UDP transport VM proof
-- relay WireGuard VM proof through an untrusted VM C, proving the
-  routing/relay-hop shape
-- one-hour operator soak
-- local hidden-sink remote-status proof
-- three-WSL shared-sink remote-status proof
-
-Added v0.9.1 local evidence in the current tree:
-
-- Rust crate metadata and root Python project metadata are at 0.9.1
-- DNS-over-HTTPS helper upstream implementation and tests
-- QUIC DATAGRAM and HTTP/3 DATAGRAM carrier adapters with local byte-preserving
-  smoke coverage
-- three-VM direct carrier and Traefik UDP-forwarded proxy carrier smoke evidence
-  for both QUIC DATAGRAM and HTTP/3 DATAGRAM
-- bridge tests proving non-UDP carriers fail closed if sent directly to the
-  Rust UDP DTO path without Python carrier supervision
-- local release artifact tooling for tracked source archives, Python wheels,
-  Rust helper binaries, checksums, and `docs/user/` Wiki payloads
-- doctor checks for release artifact shape
-- VM acceptance JSON report schema and tests
-- lab bundle generation/preflight/cleanup planning tests
-- guarded `POST /v1/services/{name}/close` status HTTP endpoint with write
-  expiry tests
-
-Before tagging `v0.9.1`:
-
-- rerun the full local v0.9.1 release gate from `docs/releases/v0.9.1.md`
-- refresh or reinstall the local editable package so `importlib.metadata`
-  reports 0.9.1
-- build release artifacts with `--version 0.9.1` and validate them with
-  `gatherlink doctor --release-artifacts`
-- confirm committed files contain no private VM hostnames, addresses, inventory
-  paths, keys, or operator-only material
-- retain the operator-run VM/proxy carrier evidence referenced by
-  `docs/releases/v0.9.1.md`
-- tag from a clean source/docs-aligned tree
-
-## Current Feature State
-
-Implemented and in v0.9 scope:
-
-- compact v1/v2 frames
-- AEAD envelope and replay protection
-- Rust UDP dataplane
-- multipath scheduling primitives with live reapply
-- batching, fragmentation/reassembly, dedupe, and counters
-- PyO3 bridge
-- config validation and runtime expansion
-- service registry, local monitor, and remote-observability path
-- diagnostics bus and JSONL sink
-- authenticated session planning/exchange first slice
-- signed topology/provisioning first slice
-- relay session authorization and hop execution first slice
-- relay fabric discovery/health helper slice
-- persistence and local secret UX first slice
-- SOCKS5 TCP CONNECT helper over Gatherlink UDP transport with companion exit
-- TCP forwarding helper over Gatherlink UDP transport with companion exit
-- DNS helper direct, Gatherlink-tunnel, and DNS-over-HTTPS upstream paths with
-  cache, IDNA, and AD-bit DNSSEC handling
-- WireGuard planning/config helper and endpoint/UDP transport proof
-- narrow time helper
-- local release artifact builder and release-artifact doctor checks
-- operator-safe lab bundle generation and scoped cleanup planning
-- signed topology diff command
-- session rotation policy helper decisions
-- experimental status HTTP helper with guarded service-close write endpoint
-- QUIC DATAGRAM and HTTP/3 DATAGRAM carrier adapters around opaque Gatherlink
-  packets, supervised by Python before Rust sees local UDP endpoints
-
-Implemented but intentionally limited:
-
-- runtime reload currently covers scheduler reapply; broader config reload is
-  future/polish
-- WireGuard helper does not own interface lifecycle
-- DNSSEC support is upstream-AD oriented; full local validation remains optional
-  later work
-- relay policy automation is a first slice, not a full mesh controller
-- REST API is experimental helper/service work, loopback by default, and not
-  stable remote management UX
-- QUIC/H3 carrier support has local adapter smoke coverage and three-VM
-  acceptance coverage for direct carriers plus Traefik UDP-forwarded proxy
-  carriers. Impaired-network proxy soak remains separate lab evidence.
-
-Deferred:
-
-- full live rekey wiring beyond the current policy helper
-- richer trust-root lifecycle UX beyond topology diffing
-- broader diagnostics polish, including carrier connect/reconnect/drop events
-- optional DNS full local DNSSEC validation
-- optional WireGuard lifecycle automation
-- broader multi-hop relay policy automation
-- future carrier, obfuscation, package-update, rollback, UI, policy, and
-  compatibility work belongs in `docs/reports/future-roadmap-pipeline.md`
+Do not duplicate feature inventories here. Current implementation boundaries
+belong in canonical architecture, protocol, runtime, helper, and operations
+docs. Historical release contents belong in `docs/releases/`.
 
 ## Architecture Health
 
-The strongest part of the project remains the responsibility boundary:
-
-- Rust executes compact packet facts.
-- Python decides what those facts mean.
-- Helpers stay outside the core packet executor.
-- Lab code may enable, accelerate, or prove production hooks, but it must not be
-  the only implementation of production behavior.
-- Deferred ideas stay in docs until they have real behavior and tests.
-
-This boundary should remain protected during every v0.9.1 and future change.
+The strongest part of the project remains the responsibility boundary defined
+in `docs/architecture/architecture-contract.md`. Protect that boundary during
+every v0.9.2 and future change.
 
 Current watch points:
 
@@ -254,26 +109,26 @@ developer as a practical tool for aggregating a fiber connection and a 5G
 connection, plus extensive local, WSL, VM, soak, and simulated-network checks.
 More live-user feedback is needed before claiming broader production maturity.
 
-Security has not had an external audit. The design follows modern authenticated
-encryption and WireGuard-like packet posture where appropriate, but v0.9 should be
-presented honestly as unaudited software for personal/lab and small-site use.
+Security has not had an external audit. Present the project honestly as
+unaudited software for personal/lab and small-site use.
 
 ## Near-Term Priority
 
-1. Rerun the v0.9.1 local gate listed in `docs/releases/v0.9.1.md` from a clean
-   tree.
-2. Refresh local package metadata and build/doctor-check v0.9.1 artifacts.
-3. Retain the three-VM direct/proxied carrier evidence referenced by the release
-   notes.
-4. Recheck release hygiene: secrets, private paths, README, `SECURITY.md`, and
-   release notes.
-5. Tag `v0.9.1` only from a clean source/docs-aligned tree.
+1. Tag v0.9.2 from the cleaned release branch after final maintainer review.
+2. Keep the v0.9.2 release note compact and no more optimistic than the
+   evidence.
+3. Use `docs/reports/future-roadmap-pipeline.md` for post-v0.9.2 ideas until a
+   new release roadmap is opened.
+4. Treat the 15-minute and 30-minute v0.9.2 soaks as passed; the 1-hour soak
+   was explicitly waived for this release gate.
+5. Keep v0.9, v0.9.1, and v0.9.2 roadmaps historical once the tag is cut.
 
 ## Final Assessment
 
-Gatherlink is functionally at v0.9.1 release-candidate quality for its declared
-scope. The current tree backs the main v0.9.1 claims with code, tests, local
-carrier smokes, artifact tooling, and recorded VM/proxy carrier evidence, but
-the release should not be tagged until the full local gate, artifact
-build/doctor check, metadata refresh, and final hygiene pass have been rerun
-against the current HEAD.
+Gatherlink is at v0.9.2 release-candidate state for the selected stability,
+observability, scheduler-honesty, helper-proof, and operator-polish scope. Full
+source checks, local labs, VM acceptance, helper acceptance, direct carrier VM
+smokes, shared-sink proof, relay/WireGuard proof, release-artifact validation,
+and the 15-minute and 30-minute soaks have passed on the committed dev branch.
+The 60-minute soak is waived for this release, and full autonomous live rekey
+automation remains future work rather than a v0.9.2 claim.

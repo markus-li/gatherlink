@@ -14,8 +14,14 @@ not a general proxy framework.
 ## Hard boundaries
 
 Gatherlink must not become responsible for firewall policy, NAT policy, traffic
-shaping, QoS, IDS/IPS, firewall-style DPI, L7 routing, or enterprise LAN orchestration.
+shaping, host/network QoS, IDS/IPS, firewall-style DPI, L7 routing, or enterprise LAN orchestration.
 Those belong in OPNsense, OpenWrt, UniFi, MikroTik, Fortinet, Linux routing, or other tools.
+
+Gatherlink may still implement narrow internal service fairness for its own
+virtual UDP services. That means Python can compile per-service runner budgets,
+priorities, and path eligibility so one Gatherlink service does not starve
+another inside the userland process. It must not inspect inner traffic, set
+host-wide QoS policy, or become the system traffic manager.
 
 A future Linux endpoint-protection helper may manage a narrow set of kernel
 firewall/NAT primitives for explicit Gatherlink endpoint scenarios, but it must
@@ -200,6 +206,11 @@ loss estimate, reorder hold time, and in-flight limits, but it must not decide
 how those values are derived. That keeps production scheduling explainable:
 policy and smoothing stay in Python, while Rust receives deterministic
 per-path values that are cheap to consult in the packet path.
+
+Scheduler policy is directional. A node's scheduler controls only its local
+transmit choices. The peer can advertise its own configured/effective TX
+scheduler status as diagnostics, but that is not a remote command and does not
+require both sides of a service to run the same policy.
 
 ## Receiver metrics
 
@@ -394,7 +405,7 @@ Correct model:
     metrics/history -> advisor -> scheduler parameters -> deterministic scheduler
 
 The advisor should run locally by default and use lightweight statistical or ML
-techniques, not LLM-based hot-path routing.
+techniques, not opaque hot-path routing.
 
 ## IPsec helper
 

@@ -1,10 +1,10 @@
 # Future Roadmap Pipeline
 
-This is not a v0.9.2 roadmap.
+This is not the v0.9.2 roadmap.
 
-It is a holding area for well-shaped post-v0.9.1 work: things that may become
-v0.9.2, v0.9.3, or later after v0.9.1 has real usage, VM results, and soak data.
-Nothing here is implementation authorization by itself.
+It is a holding area for well-shaped work outside the active release roadmap.
+Anything promoted into v0.9.2 belongs in `docs/reports/v0.9.2-roadmap.md`,
+not here. Nothing here is implementation authorization by itself.
 
 ## Promotion Rules
 
@@ -17,43 +17,537 @@ A pipeline item can be promoted into a real release roadmap only when it has:
 - a migration story from existing configs
 - no conflict with the project laws
 
-Project laws still apply:
-
-- Rust executes compact facts; Python owns meaning and lifecycle.
-- Helpers never become core.
-- Carriers transport the same Gatherlink UDP-format carrier packet.
-- No plaintext routing.
-- Routing uses authenticated session/control context and relay-hop state.
-- Deferred work stays docs-only until it has real behavior and tests.
+Project laws still apply. The canonical policy home is
+`docs/architecture/architecture-contract.md`; this pipeline should not duplicate
+permanent boundaries except where an item needs a local release-promotion note.
 
 ## Source TODO Parking Map
 
 Searchable implementation TODOs may stay in source when they are tied to a
 roadmap home. Current parking:
 
-- `scheduler-telemetry`, `adaptive-scheduler`, `scheduler-hot-reapply`,
-  `queue-stats`, and `rust-stats`: scheduler telemetry and fairness hardening
-  in this future pipeline.
+- `scheduler-telemetry`, `adaptive-scheduler`, `queue-stats`, and
+  `rust-stats`: the narrow live queue telemetry/fairness slice is promoted to
+  v0.9.2. Larger adaptive optimization remains future-only after v0.9.2 proves
+  the telemetry.
+- `scheduler-hot-reapply`: implemented for scheduler status; broader live
+  reload remains future-only.
 - `path-interface-discovery`, `path-transport-discovery`, and `dataplane-mtu`:
-  future path/carrier discovery and MTU hardening.
+  narrow MTU/datagram hardening is promoted to v0.9.2. Automatic path/interface
+  discovery remains future-only.
 - `service-id-registry`, `service-scheduler-policy`, `service-return-policy`,
   and `shared-sink-provisioning`: v0.9 production discovery/shared-sink closure
   first, then future config/provisioning polish if needed.
 - `config-schema-migration`: future config compatibility work once persisted
   appliance configs exist.
-- `dns-helper` and `dns-policy`: v0.9.1 DNS helper deepening or future DNS
-  advanced modes, depending on scope.
-- `helper-diagnostics` and `logging-diagnostics`: v0.9.1 diagnostics polish and
-  future metrics/event integrations.
+- `dns-helper` and `dns-policy`: honest current DNS policy behavior belongs in
+  v0.9.2; richer DNS advanced modes remain future-only.
+- `dns-doh`: current explicit DoH upstream behavior belongs in v0.9.2; richer
+  DoH policy, bootstrap, and validation combinations remain future-only.
+- `helper-diagnostics` and `logging-diagnostics`: the narrow doctor/operator
+  polish slice belongs in v0.9.2; broader metrics/event integrations remain
+  future-only.
+- `perf`: narrow socket, pacing, queue, and scheduler execution hints may be
+  v0.9.2 work only when backed by benchmarks; broader kernel, batching, or
+  hot-path relocation decisions remain future performance work.
 - `time-quality`: future time quality and authenticated time sources.
-- `status-http-helper` and `status-http-write-api`: v0.9.1 REST write decision or
-  future local REST API hardening.
-- `cleanup-scope`: v0.9.1 operator-safe lab bundles and guided cleanup.
+- `status-http-helper` and `status-http-write-api`: future local REST API
+  hardening after the guarded local status endpoint has more use.
+- `traffic-split-platforms`: current helper output is Debian/nft oriented;
+  non-Debian firewall or policy-routing backends remain future compatibility
+  work.
+- `cleanup-scope`: v0.9.2 should decide whether lab bundle cleanup remains
+  plan-only or gains guarded execution; broader recovery tooling remains
+  future-only.
+- `listen-port-policy`: promoted to `docs/reports/v0.9.2-roadmap.md`.
+- `handshake-abuse-protection`, `listen-allow-deny`, and `stealth-scan-tests`:
+  future security and DoS-resistance hardening.
+
+## UDP Multipath Pipeline After V0.9.2
+
+V0.9.2 promotes the narrow live-telemetry and scheduler-honesty work needed to
+make existing configured paths behave better. The following related items stay
+future unless a later roadmap promotes them explicitly.
+
+### Dynamic Path Discovery And Path Manager
+
+Why it is interesting:
+
+- configured paths are enough for v0.9.2 optimization
+- automatic discovery, addition, and removal of paths is useful later for
+  appliance-like deployments and changing network environments
+
+Boundary:
+
+- Python owns discovery, policy, and operator explanation
+- Rust only receives compiled path additions/removals and socket facts
+
+Promotion requirements:
+
+- config/runtime migration story
+- diagnostics for discovered, rejected, added, removed, and flapping paths
+- lab proof that automatic path changes do not disturb existing services
+
+### Post-V0.9.2 Multipath Performance Follow-Up
+
+Why it is interesting:
+
+- v0.9.2 should capture the MPTCP/WireGuard lessons that fit Gatherlink's UDP
+  scope, but some deeper performance questions need longer evidence before they
+  become release commitments
+- WireGuard's strongest speed advantages come from kernel placement, mature
+  batching/segmentation paths, tiny hot paths, and years of edge-case tuning;
+  Gatherlink should learn from those without pretending to be WireGuard
+- MPTCP's deeper congestion-window coupling and reinjection behavior is useful
+  to study, but ordinary Gatherlink UDP payloads must remain best-effort unless
+  a future service explicitly requests reliability semantics
+
+Future work:
+
+- profile datagrams-per-second and syscall counts before changing scheduler or
+  batching constants again
+- compare AEAD backends and hardware acceleration on the same host
+- decide whether any carrier send/receive work should move deeper into Rust for
+  speed, based on profiling rather than architecture taste
+- explore congestion fairness beyond local credits without adding TCP semantics
+  to normal UDP payloads
+- consider optional reliability only for reserved Gatherlink metadata or
+  explicitly reliable future services, never as hidden behavior for application
+  UDP
+- keep improving WireGuard-over-Gatherlink measurement with one-path,
+  three-path, relay, clean, shaped, lossy, and reverse-direction profiles
+- develop a TCP-aware proxy helper profile where TCP streams use explicit or
+  transparent proxying over Gatherlink while non-TCP traffic continues through
+  WireGuard-over-Gatherlink
+
+Promotion requirements:
+
+- repeatable benchmark reports with CPU, Linux UDP counters, path split, drops,
+  queue pressure, and clean/degraded offered rates
+- proof that any extra complexity beats the current Rust hot path under VM and
+  non-VM conditions
+- clear docs showing what is UDP best-effort, what is Gatherlink metadata
+  reliability, and what remains future-only
+
+### TCP-Aware Proxy Plus WireGuard Hybrid
+
+Why it is interesting:
+
+- MPTCP is strong for TCP because it is TCP-aware; a single
+  WireGuard-over-Gatherlink UDP peer flow cannot expose inner TCP streams
+- a Gatherlink TCP proxy helper can expose stream ids, backlog, open/close,
+  reset, credit, and traffic-class hints without putting TCP semantics in Rust
+- non-TCP traffic can remain inside WireGuard-over-Gatherlink, keeping VPN
+  behavior, keys, interfaces, and routes with WireGuard
+
+Future work:
+
+- explicit TCP proxy mode using configured listen endpoints
+- transparent TCP proxy mode using Debian TPROXY/nftables/policy-routing rules
+  owned by the traffic-split/firewall helper
+- companion exit helper that connects to the configured or preserved original
+  destination
+- stream-level scheduler hints so one TCP stream stays sticky while separate
+  TCP streams can spread across paths
+- diagnostics showing explicit proxy, transparent proxy, or WireGuard fallback
+  path per flow
+
+Boundary:
+
+- TCP stream meaning stays in the Python helper
+- firewall/TPROXY mutation stays in a narrow opt-in Debian helper
+- WireGuard owns non-TCP tunnel behavior
+- Rust still carries framed encrypted service payloads and compact scheduler
+  facts only
+
+Promotion requirements:
+
+- explicit-mode tests first, without firewall interception
+- transparent-mode lab/VM proof that original destinations are preserved and
+  Gatherlink/control/local-management traffic cannot loop through the proxy
+- benchmarks comparing TCP proxy over Gatherlink against WG-over-GL and direct
+  WireGuard path-set baselines on clean, fiber+5G, Starlink+5G, and LTE-style
+  profiles
+- cleanup/revert tests proving only Gatherlink-labeled firewall objects are
+  removed
+
+### Rust Userspace WireGuard Backend Comparisons
+
+Why it is interesting:
+
+- GotaTun is Mullvad's Rust userspace WireGuard implementation and is forked
+  from BoringTun
+- BoringTun is Cloudflare's Rust userspace WireGuard implementation, with the
+  `boringtun-cli` executable for Linux and macOS
+- the upstream project provides a Linux userspace binary and library and can be
+  configured through normal `wg` tooling
+- these are the most interesting Rust candidates to compare against
+  `wireguard-go` for Gatherlink's high-rate WireGuard-over-Gatherlink paths
+
+Implemented comparison tooling:
+
+- `tools/hyperv/install_gotatun_backend.sh` installs a pinned GotaTun source
+  ref on the Debian VM lab nodes without adding it to Gatherlink dependencies
+- `tools/hyperv/install_boringtun_backend.sh` installs a pinned
+  `boringtun-cli` crate version on the Debian VM lab nodes without adding it to
+  Gatherlink dependencies
+- `tools/hyperv/run_wireguard_onehop_speed.sh --implementation gotatun`
+- `tools/hyperv/run_wireguard_onehop_speed.sh --implementation boringtun`
+  runs the same one-hop WireGuard matrix shape used for kernel WireGuard and
+  `wireguard-go`
+- `tools/hyperv/run_performance_matrix.sh` accepts
+  `wireguard-gotatun-onehop` and `wireguard-boringtun-onehop` so Rust
+  userspace rows can sit beside the existing kernel and `wireguard-go` rows
+
+Remaining work:
+
+- run the same WireGuard-over-Gatherlink benchmark matrix with kernel
+  WireGuard, `wireguard-go`, GotaTun, and BoringTun where each backend is
+  available
+- compare clean high-rate one-hop, clean mixed TCP+UDP, fiber+5G, Starlink+5G,
+  Starlink queue dynamics, five-Starlink correlated, and LTE-style profiles
+- record CPU, datagrams per second, retransmits, UDP loss, queue pressure,
+  direct userspace-WireGuard path-set baseline, WG-over-GL result, `WG Gate`,
+  and `Vendor Gate`
+- document Linux capability, privilege-drop, `fwmark`, `wg-quick`, and daemon
+  behavior differences before presenting a Rust userspace backend as an
+  operator option
+- retest GotaTun when upstream lands more desktop/Linux performance work; the
+  current VM one-hop evidence shows GotaTun `v0.7.0` still below
+  `wireguard-go` for simultaneous TCP on this host
+- keep `wireguard-go` as the primary userspace WireGuard comparison baseline
+  until repeated evidence says otherwise; both tested Rust userspace clients
+  were roughly around half of `wireguard-go` for simultaneous TCP in the
+  2026-05-25 clean Hyper-V VM shape
+
+Boundary:
+
+- Gatherlink must not implement WireGuard protocol behavior itself
+- GotaTun and BoringTun are optional helper/backend comparisons, not core
+  dependencies
+- Python helper/orchestration owns backend selection, process lifecycle,
+  diagnostics, and benchmark reporting
+- Rust dataplane still carries opaque WireGuard UDP service payloads and does
+  not learn WireGuard packet meaning
+
+Expected result:
+
+- baseline expectation is similar performance to `wireguard-go`
+- better or worse results must be treated as evidence to investigate, not as a
+  reason to change the helper default immediately
+- kernel WireGuard remains the normal production ceiling where available
+
+Promotion requirements:
+
+- reproducible install/build instructions for each pinned Rust userspace
+  backend version
+- direct Rust-backend versus `wireguard-go` tests outside Gatherlink
+- Gatherlink-carried Rust-backend versus `wireguard-go` tests on the demanding
+  and highest-paced profiles listed above
+- no new release claim until results are repeated and docs explain backend
+  limits clearly
+
+### UDP Congestion Fairness Beyond Local Credits
+
+Why it is interesting:
+
+- v0.9.2 credits and pacing protect Gatherlink from overrunning its own paths
+- broader fairness against other traffic may require a more explicit
+  congestion-control model
+- Starlink/mobile links may need path-local capacity responsiveness policies so
+  Python can react quickly to queue growth or capacity collapse without making
+  stable wired paths flap
+
+Boundary:
+
+- this must not become TCP semantics or hidden retransmission
+- Python owns congestion policy; Rust executes bounded pacing/credit primitives
+
+Promotion requirements:
+
+- repeatable tests showing fairness against competing traffic
+- no hidden reliability for UDP payloads
+- operator controls and diagnostics that explain when Gatherlink self-limits
+- evidence that `conservative`, `adaptive`, and `volatile` capacity
+  responsiveness policies improve Starlink/mobile-style profiles without
+  destabilizing clean or wired profiles
+
+### Connection Profiling And Path Profile Inference
+
+Why it is interesting:
+
+- real Starlink, 5G, LTE, Wi-Fi, and consumer-router paths differ in ways that
+  static lab profiles only approximate
+- before relying on automatic scheduler inference, operators should be able to
+  profile a real connection well enough to reproduce its important behavior in
+  the lab
+- future device helpers, such as a 5G modem/router helper or Starlink stats
+  helper, can provide strong path hints without becoming scheduler authority
+
+Future work:
+
+- a Python helper that records per-path capacity over time, latency, jitter,
+  latency-under-load, queue age, drops, outage/handoff events, recovery time,
+  and correlated events across paths
+- optional helper integrations for device-specific facts, for example
+  Starlink obstruction/ping-drop/router statistics or 5G modem radio
+  technology, signal quality, bearer state, and reconnect events
+- a profile exporter that turns observed behavior into a lab shape usable by
+  the VM/lab harness, including capacity steps, jitter bursts, queue growth,
+  loss windows, and recovery ramps
+- a path-profile inference layer that combines fixed config, lab metadata,
+  helper hints, long-window behavioral telemetry, and weak network identity
+  hints into a confidence-scored profile such as `wired_stable`,
+  `cellular_like`, `starlink_like`, `satellite_like`, `volatile_wireless`, or
+  `unknown`
+
+Boundary:
+
+- Python owns profile inference and all scheduler parameter changes
+- fixed operator config wins over inference
+- lab profile metadata can seed the profile for short tests
+- helper hints are inputs, not authority; Python decides how much to trust them
+- Rust receives only compiled scheduler primitives, not device or access-type
+  meaning
+- this is post-v0.9.2 discovery work and must not become an active v0.9.2 gate
+
+Promotion requirements:
+
+- long-running profiler tests on at least one stable wired, one cellular-like,
+  and one Starlink-like or simulated Starlink-like path
+- exported lab profile can reproduce the measured path's rough throughput,
+  latency-under-load, jitter, loss, and recovery shape closely enough for
+  scheduler comparisons
+- diagnostics show configured profile, inferred profile, confidence, hint
+  sources, active responsiveness policy, and why the profile changed
+- tests prove fixed config overrides inference and that short benchmark
+  profiles can inject their intended path type without waiting for long-window
+  inference
+- no device helper may mutate a router/modem/dish unless that behavior is a
+  separate explicit helper command with its own opt-in and diagnostics
+
+### Mature WireGuard-Inspired Hardening
+
+Why it is interesting:
+
+- Gatherlink can keep learning from WireGuard's operational simplicity,
+  anti-abuse posture, rekey discipline, endpoint handling, and small packet
+  surface
+- some of that is already represented in v0.9.2 pre-work, but not all of it is
+  release-scoped
+
+Future work:
+
+- full cookie-based handshake DoS enforcement
+- more mature endpoint mobility/roaming rules
+- deeper rekey timer and volume-threshold validation
+- long-run edge-case testing for replay, stale sessions, and malformed traffic
+
+Boundary:
+
+- do not claim WireGuard compatibility
+- do not turn Gatherlink into an L3 VPN product
+- do not move identity, helper, DNS, or operator policy into Rust
+
+## Security And Abuse-Resistance Pipeline
+
+### WireGuard-Inspired Security Completion
+
+Why it is interesting:
+
+- `docs/protocol/security.md` defines the canonical WireGuard-inspired security
+  posture for Gatherlink
+- several items are already aligned, but some remain future work after v0.9.2
+  reserves handshake anti-DoS packet fields
+- keeping the remaining items grouped here prevents them from being scattered
+  across unrelated roadmaps
+
+Future work to complete or deepen:
+
+- full cookie-based handshake DoS enforcement using the reserved handshake
+  `mac1`/`mac2` and cookie-reply packet shapes
+- short rate limiting for unknown handshake/auth sources, with active/recent
+  authenticated peer exemptions
+- roaming-friendly authenticated endpoint update rules, if runtime peer
+  endpoint mobility becomes needed
+- explicit crypto-suite migration policy that preserves the "minimal choices"
+  posture instead of adding user-selectable cipher sprawl
+- side-channel-reviewed compression policy if compression is ever considered;
+  default remains no compression before encryption
+- security-surface review that keeps helper, carrier, REST, and diagnostics
+  code outside the packet-authentication trusted core
+
+Boundary:
+
+- follow `docs/protocol/security.md` as the canonical security posture
+- do not change encrypted data packet headers unless a later release roadmap
+  explicitly promotes a protocol revision
+- do not turn WireGuard inspiration into WireGuard compatibility claims
+
+Promotion requirements:
+
+- tests proving silent receive still holds under malformed traffic and scans
+- tests proving active/recent authenticated peers are not penalized by spoofed
+  invalid packets
+- golden packet tests for any promoted handshake or cookie behavior
+- threat-model note for endpoint mobility, compression, or crypto migration
+  before any of those are implemented
+
+### Listen Source Allow/Deny Policy
+
+Why it is interesting:
+
+- exposed Gatherlink UDP and alternative transport ports should be able to drop
+  unwanted sources before expensive authentication work
+- small sites often know the expected peer addresses or relay addresses
+- allow/deny lists make accidental public exposure less risky without changing
+  packet format
+
+Boundary:
+
+- follow `docs/architecture/architecture-contract.md` and
+  `docs/protocol/security.md`
+- this is listener admission policy, not routing policy
+- defaults should remain usable for roaming peers, but hardened deployments
+  should be able to opt into strict source policy
+
+Expected shape:
+
+- per-listener allow and deny CIDR lists for native Gatherlink UDP listeners
+- equivalent policy hooks for QUIC DATAGRAM, HTTP/3 DATAGRAM, and future carrier
+  listeners
+- deny rules checked before allow rules, then default policy
+- local diagnostics for denied packets without network responses
+- config and doctor warnings when a listener is externally reachable without
+  explicit source policy
+
+Promotion requirements:
+
+- unit tests for IPv4, IPv6, CIDR overlap, deny-before-allow, and default policy
+- VM/lab proof for native UDP and at least one alternative carrier
+- redacted diagnostics that identify rule ids without leaking secrets
+- docs explaining NAT/shared-IP trade-offs and roaming-peer behavior
+
+### WireGuard-Like Handshake Abuse Protection
+
+Why it is interesting:
+
+- fake authenticated packets should not be able to repeatedly drive expensive
+  authentication or handshake work
+- unknown sources should be cheap to reject before expensive crypto or
+  handshake work
+- active and recently authenticated peers must not be vulnerable to source-IP
+  spoofing that creates punitive bans
+- the default should be WireGuard-like: silent drop, cheap authentication
+  admission, cookie/proof-of-return-path under load, and short rate limits
+  rather than long default source bans
+
+Recommended initial pattern:
+
+- use the reserved handshake anti-DoS fields defined in
+  `docs/protocol/security.md` for cookie-style proof-of-return-path behavior
+  when exposed handshake/auth setup needs protection before a session exists
+- apply short per-source handshake/auth rate limits for unknown sources
+- use IPv6 prefix-aware limiting for source addresses, similar in spirit to
+  WireGuard's `/64` treatment
+- invalid packets from active or recently authenticated sources are silently
+  dropped and counted, but do not trigger source backoff
+- a successful authenticated packet clears or suppresses source penalty state
+- local diagnostics are rate-limited and never create network-visible errors
+
+Optional unknown-source backoff:
+
+- long backoff may be useful for repeated failures from sources with no active
+  or recent authentication, but it should be a secondary tool rather than the
+  main default defense
+- if enabled, start conservatively with `1 minute`, then `5 minutes`, then
+  `15 minutes`, then cap at `1 hour`
+- reaching the `1 hour` cap after four failed authentication windows is a
+  reasonable first proposal for unknown sources only
+- failure levels should decay after a quiet period so stale mistakes do not
+  permanently poison a roaming peer
+
+Spoofing and NAT caution:
+
+- UDP source IPs can be spoofed, so a pure source-IP penalty can be abused to
+  temporarily block a legitimate peer if the attacker can guess or observe the
+  peer address
+- shared NATs may put several peers behind one public address
+- IPv6 privacy addresses may require careful prefix-level handling
+- promotion should evaluate whether penalties key on source IP, source endpoint,
+  listener, peer identity hint after cheap parsing, or a combination
+- excessive invalid traffic from an active/recent source may justify local
+  rate-limiting, but that is a slippery slope: it must not let spoofed traffic
+  degrade a legitimate peer unless the source is far beyond normal error levels
+  and the mitigation is proven safer than simply dropping invalid packets early
+
+Boundary:
+
+- invalid traffic still receives no network response
+- follow `docs/protocol/security.md` for silent-drop and authentication posture
+- this is receive-side abuse protection, not peer reputation or routing policy
+
+Config posture:
+
+- enabled by default
+- disable switch allowed for labs and troubleshooting
+- disabling must emit a local warning in config validation/doctor output and at
+  listener startup
+- expose rate-limit and optional unknown-source backoff settings as advanced
+  settings, but keep defaults conservative and WireGuard-like
+
+Promotion requirements:
+
+- bounded memory for penalty tables
+- per-listener and global limits so spoofed floods cannot create unbounded
+  source-state growth
+- active-session and recent-success exemptions so source backoff cannot be used
+  to block known-good peers
+- tests for cookie/proof-of-return-path behavior under load, short rate limits,
+  optional long-backoff cap behavior, decay, successful clear, disabled mode
+  warning, and diagnostics rate limiting
+- tests must preserve the existing encrypted data packet/header shape; this
+  feature may use handshake packet fields only
+- tests for excessive invalid traffic from an active/recent source, including
+  proof that normal authenticated traffic keeps flowing
+- VM/lab tests with invalid packets, spoof-like source variation, NAT-like
+  shared source behavior, and legitimate recovery after penalty expiry
+- performance tests proving invalid traffic is dropped before expensive crypto
+  or handshake work once a source is rate-limited or penalized
+
+### Stealth And Scan Testing
+
+Why it is interesting:
+
+- Gatherlink's public receive posture should remain WireGuard-like: scanners
+  that do not send valid packets should learn nothing useful from the network
+- source policy and authentication backoff should improve abuse resistance
+  without creating visible error or timing oracles
+- stealth behavior should be tested continuously, not assumed
+
+Expected lab coverage:
+
+- native Gatherlink UDP listener under TCP and UDP scan attempts
+- QUIC DATAGRAM and HTTP/3 DATAGRAM carrier listeners under generic UDP scans
+  and malformed datagram traffic
+- invalid authentication floods before and after source-backoff activation
+- allowlist/denylist behavior from accepted and rejected source addresses
+- verification that invalid traffic gets no network response from the
+  Gatherlink listener
+- local diagnostics are rate-limited and do not change network-visible behavior
+
+Promotion requirements:
+
+- repeatable scan tooling in local lab and VM acceptance
+- packet capture or equivalent evidence for "no response" behavior
+- timing checks where practical, especially before/after backoff activation
+- docs explaining what "stealth" means operationally and what it does not
+  promise
 
 ## Control And Reserved-Service Pipeline
 
-These are potential future protocol lanes, not v0.9 or v0.9.1 commitments unless a
-release roadmap promotes them later.
+These are potential future protocol lanes, not active-release commitments unless
+a release roadmap promotes them later.
 
 ### In-Band Auth/Crypto Lane
 
@@ -69,12 +563,10 @@ Why it is interesting:
 Boundary:
 
 - reserved service id `7` is not active in current code
-- Python owns identity, trust roots, topology checks, transcript validation,
-  rekey policy, and diagnostics
-- Rust may execute only compact authenticated session facts after Python
-  accepts the handshake
-- invalid or unauthenticated handshake inputs must silent-drop on the network
-  and produce local rate-limited diagnostics only
+- follow `docs/protocol/security.md` for handshake, identity, and silent-drop
+  posture
+- this item is about an in-band setup lane, not changing the authenticated
+  session/runtime split
 
 Promotion requirements:
 
@@ -127,11 +619,10 @@ Why it is interesting:
 Boundary:
 
 - future optimization only; not a semantic redesign
-- must carry the exact same opaque Gatherlink UDP-format carrier packets
-- must not move config, helper behavior, routing meaning, carrier selection,
-  diagnostics interpretation, or operator policy into Rust
-- must not create a second behavior path that drifts from the Python-owned
-  carrier contract
+- follow the carrier and ownership contracts in
+  `docs/architecture/architecture-contract.md`
+- compare against the existing Python-owned carrier adapter before promoting a
+  Rust-native path
 
 Promotion requirements:
 
@@ -158,11 +649,10 @@ Why it is interesting:
 
 Boundary:
 
-- future candidate, likely v0.9.2 or later
-- wrapper only for the same Gatherlink UDP-format carrier packet
-- must not replace direct QUIC DATAGRAM or HTTP/3 DATAGRAM
-- must not create HTTP-owned routing, identity, helper, control, encryption, or
-  packet semantics
+- future candidate after v0.9.2 unless a later roadmap promotes it
+- follow the carrier contract in `docs/architecture/architecture-contract.md`
+- this is an additional carrier candidate, not a replacement for direct QUIC
+  DATAGRAM or HTTP/3 DATAGRAM
 - ordinary HTTP reverse proxying is not enough
 
 Promotion requirements:
@@ -191,7 +681,7 @@ Trade-offs:
 Boundary:
 
 - fallback only, not the preferred carrier
-- wrapper only for the same Gatherlink UDP-format carrier packet
+- follow the carrier contract in `docs/architecture/architecture-contract.md`
 - must preserve packet boundaries explicitly inside the stream
 - must expose diagnostics that explain latency, queueing, and fallback state
 
@@ -213,7 +703,7 @@ Boundary:
 
 - fallback only
 - no routing semantics in TLS/SNI
-- wrapper only for Gatherlink UDP-format carrier packets
+- follow the carrier contract in `docs/architecture/architecture-contract.md`
 - must not become the baseline performance path
 
 Promotion requirements:
@@ -257,17 +747,17 @@ Why it is interesting:
 
 Boundary:
 
-- relay policy belongs to Python
-- Rust executes compact next-hop facts only
-- relays must not blindly forward invalid packets
-- no plaintext routing
-- no plaintext routing labels
+- follow `docs/protocol/relay-session-lifecycle.md`,
+  `docs/protocol/relay-trust-model.md`, and
+  `docs/architecture/architecture-contract.md`
+- this item is about automating policy selection and diagnostics, not changing
+  the relay trust model
 
 Promotion requirements:
 
 - VM lab with at least three Debian nodes
 - invalid packet rejection without decrypting endpoint payload
-- relay diagnostics for hop selection, rejection, reseal, and next-hop send
+- relay diagnostics for hop selection, rejection, hop unwrap, and next-hop send
 - loop prevention and bounded forwarding state
 
 ### Peer Failover And Multi-Sink Services
@@ -280,8 +770,7 @@ Why it is interesting:
 Boundary:
 
 - service-to-peer mappings remain authenticated control/topology state
-- no hidden dynamic mesh
-- no endpoint IP/port mutation through control context
+- follow `docs/protocol/control-context.md` for what control context may change
 - failover should be explicit and diagnosable
 
 Promotion requirements:
@@ -301,9 +790,8 @@ Why it is interesting:
 Boundary:
 
 - signed artifacts remain canonical
-- helper never becomes an enrollment authority
-- no secret key leakage
-- operator can inspect bundles before install
+- follow `docs/protocol/security.md` and `docs/future/identity-and-topology.md`
+- this item is about assisted distribution UX, not changing trust authority
 
 Promotion requirements:
 
@@ -323,12 +811,9 @@ Why it is interesting:
 
 Boundary:
 
-- potential future work only, not a v0.9.1 commitment
-- signed artifacts remain canonical
-- any assisted side-loading must be inspectable and must not become a hidden
-  enrollment service
-- secret material must stay redacted in status, diagnostics, reports, and helper
-  output
+- potential future work only, not an active release commitment
+- follow `docs/protocol/security.md` and `docs/future/identity-and-topology.md`
+- this item is about operator UX around trust roots, not packet/session crypto
 
 Promotion requirements:
 
@@ -349,8 +834,8 @@ Why it is interesting:
 Boundary:
 
 - helper detects and reports portal state
-- it must not bypass portals or implement browser automation by default
-- core transport must not depend on it
+- follow helper boundaries in `docs/architecture/architecture-contract.md` and
+  `docs/helpers/captive-portal-helper.md`
 
 Promotion requirements:
 
@@ -368,7 +853,8 @@ Boundary:
 
 - orchestration helper only
 - platform-specific behavior behind Debian compatibility tooling
-- no core dependency
+- follow helper boundaries in `docs/architecture/architecture-contract.md` and
+  `docs/helpers/ipsec-helper.md`
 
 Promotion requirements:
 
@@ -385,8 +871,8 @@ Why it is interesting:
 Boundary:
 
 - advisory only
-- no automatic policy mutation unless explicitly requested
-- must explain every recommendation from visible facts
+- follow helper boundaries in `docs/architecture/architecture-contract.md` and
+  `docs/helpers/policy-advisor.md`
 
 Promotion requirements:
 
@@ -407,12 +893,11 @@ Why it is interesting:
 
 Boundary:
 
-- potential future work only, not a v0.9.1 commitment
-- DNS remains a helper; Rust must not learn DNS semantics
-- dnspython remains the preferred starting point unless a dated library decision
-  changes that
-- DNSSEC validation and DoH must fail closed and report clear diagnostics
-- persistent caching must not leak private query history by default
+- potential future work only, not an active release commitment
+- follow `docs/helpers/dns-helper.md` for DNS helper scope and
+  `docs/operations/library-selection.md` for dependency decisions
+- future work should add behavior only with clear privacy, validation, and
+  diagnostics tests
 
 Promotion requirements:
 
@@ -431,9 +916,9 @@ Why it is interesting:
 
 Boundary:
 
-- potential future work only, not a v0.9.1 commitment
-- SOCKS stays a helper; it must not become core routing or packet policy
-- TCP CONNECT remains the current supported SOCKS5 scope until this is promoted
+- potential future work only, not an active release commitment
+- follow `docs/helpers/socks5-helper.md` for SOCKS helper scope
+- TCP CONNECT remains the current supported scope until this is promoted
 - any multiplexing layer must stay a helper transport abstraction over
   Gatherlink UDP services
 
@@ -455,10 +940,10 @@ Why it is interesting:
 
 Boundary:
 
-- potential future work only, not a v0.9.1 commitment
-- system clock setting remains opt-in and helper-owned
-- Rust consumes compact effective time facts only; Python owns quality scoring
-- dataplane correctness must not depend on wall-clock sync
+- potential future work only, not an active release commitment
+- follow `docs/helpers/time-sync.md` for time-helper scope
+- future work should improve confidence scoring without making dataplane
+  correctness depend on wall-clock sync
 
 Promotion requirements:
 
@@ -469,54 +954,48 @@ Promotion requirements:
 
 ## Operations Pipeline
 
-### Scheduler Telemetry And Fairness Hardening
+### Scheduler Optimization After V0.9.2
 
 Why it is interesting:
 
-- current scheduling already keeps the important boundary: Python decides policy and
-  Rust executes compact per-path facts
-- policies such as `least_queue`, `balanced`, and `adaptive` are useful, but
-  they need better live queue and confidence signals before they should be
-  treated as production-grade automatic optimization
-- small sites may run several services over the same node pair, so scheduler
-  behavior should eventually account for service priority and fairness, not only
-  per-path capacity and latency
+- v0.9.2 promotes the narrow live queue telemetry, fairness, and diagnostics
+  slice into the active roadmap
+- once that is real and tested, later releases may use the same facts for more
+  adaptive policy behavior
+- small sites may eventually want richer optimization than v0.9.2 should carry
 
-Known shortcomings:
+Future-only directions after v0.9.2:
 
-- Rust does not yet expose enough live send-queue telemetry for Python to make
-  a fully honest `least_queue` decision, such as per-path queued packets, queued
-  bytes, oldest queued packet age, and recent drop/backpressure state
-- service priority exists as compiled policy input, but cross-service fairness
-  and starvation prevention need stronger tests and diagnostics
-- adaptive scheduling needs richer smoothing, decay, confidence, and provenance
-  rules before it should react aggressively to noisy measurements
-- receiver-side or peer-reported path quality must be treated as authenticated
-  control/context input with clear trust rules, not as raw Rust-owned policy
-- operator diagnostics should explain why a path was preferred, drained, or
-  avoided instead of only showing the final mode and counters
+- richer adaptive policy modes
+- long-term per-service fairness tuning across many services
+- receiver-side or peer-reported path-quality models
+- operator policy presets for conservative, balanced, and aggressive behavior
+- historical telemetry persistence for trend-aware decisions
+
+Non-goals for this future item:
+
+- re-documenting the v0.9.2 queue telemetry and fairness work
+- treating `least_queue` as production queue-aware before v0.9.2 lands live
+  telemetry
+- adding plaintext routing labels or hidden Rust policy ownership
 
 Boundary:
 
-- Python owns scheduler meaning, telemetry interpretation, smoothing,
-  confidence, service priority, and operator explanations
-- Rust may expose cheap queue facts and execute compiled decisions, but must not
-  grow hidden policy ownership
-- scheduler feedback must not create plaintext routing labels or bypass the
-  authenticated control/session model
+- follow `docs/runtime/scheduler.md`,
+  `docs/protocol/control-context.md`, and
+  `docs/architecture/architecture-contract.md`
+- this item is about richer optimization after v0.9.2 proves the telemetry
 
 Promotion requirements:
 
-- Rust queue telemetry for queued packets, queued bytes, oldest queued age, and
-  backpressure/drop signals
-- Python policy compiler support for smoothing, decay, confidence, and explicit
-  service-priority fairness
-- unit tests for noisy telemetry, stale telemetry, starvation prevention, and
-  deterministic fallback when metrics are missing
-- lab and VM tests under latency, loss, capacity limits, queue pressure, and
-  multiple competing services
-- diagnostics JSON and terminal output that can explain scheduler choices in a
-  way an operator can act on
+- v0.9.2 telemetry and fairness work completed and soaked
+- evidence that a richer policy solves a real operator problem
+- tests for noisy telemetry, stale telemetry, bad peer-reported data, and
+  deterministic fallback
+- lab and VM tests proving better behavior than the v0.9.2 baseline under the
+  same shaped conditions
+- diagnostics that explain richer decisions without exposing secret or routing
+  state
 
 ### Broader Runtime Reload
 
@@ -529,11 +1008,10 @@ Why it is interesting:
 
 Boundary:
 
-- potential future work only, not a v0.9.1 commitment
-- Python owns reload meaning, validation, rollback, and diagnostics
-- Rust may receive compact updated runtime facts only after Python validates the
-  change
-- failed reloads must preserve the previous known-good runtime state
+- potential future work only, not an active release commitment
+- follow `docs/runtime/config-runtime-state.md` for reload ownership and
+  rollback expectations
+- this item is broader than the current scheduler reapply path
 
 Promotion requirements:
 
@@ -554,7 +1032,7 @@ Boundary:
 - localhost only unless separately designed
 - write access remains experimental until explicitly promoted
 - write access should expire automatically unless restarted from CLI
-- CLI behavior remains canonical
+- CLI behavior remains canonical; see `docs/architecture/api-surface.md`
 
 Promotion requirements:
 
@@ -573,7 +1051,8 @@ Boundary:
 
 - read-only by default
 - built from existing diagnostics/status APIs
-- must not create a separate state model
+- follow `docs/operations/diagnostics.md` and
+  `docs/architecture/api-surface.md`
 
 Promotion requirements:
 
@@ -592,10 +1071,9 @@ Why it is interesting:
 
 Boundary:
 
-- potential future work only, not a v0.9.1 commitment
-- integrations consume structured diagnostics/status; they must not create a
-  second state model
-- no secret material in metrics, labels, event streams, or examples
+- potential future work only, not an active release commitment
+- follow `docs/operations/diagnostics.md` for diagnostics/state ownership and
+  `docs/protocol/security.md` for redaction posture
 - remote exposure requires a separate authentication and threat-model decision
 
 Promotion requirements:
@@ -616,10 +1094,10 @@ Why it is interesting:
 
 Boundary:
 
-- potential future work only, not a v0.9.1 commitment
-- safe mode should disable helpers and any future overlay behavior by default
-- inspect, diagnose, stop, rollback, and state-audit commands remain available
-- safe mode must not silently modify secrets, trust roots, or topology bundles
+- potential future work only, not an active release commitment
+- follow `docs/runtime/state-persistence.md` and `docs/protocol/security.md`
+- safe mode should prioritize inspection and recovery over normal service
+  operation
 
 Promotion requirements:
 
@@ -644,10 +1122,10 @@ Boundary:
 
 - Debian remains the only compatibility layer until another platform is
   explicitly promoted
-- update tooling must preserve configs and secrets
-- rollback must be documented before automatic updates
+- follow `docs/operations/appliance-update-strategy.md`,
+  `docs/runtime/state-persistence.md`, and
+  `docs/operations/user-documentation.md`
 - v0.9.1 GitHub release packaging is the baseline, not the final update system
-- repository docs remain canonical even when copied to the GitHub Wiki
 - future improvements may harden the Wiki publishing automation beyond the
   v0.9.1 prepared payload
 
@@ -675,17 +1153,18 @@ Why it is interesting:
 
 Boundary:
 
-- potential future work only, not a v0.9.1 commitment
+- potential future work only, not an active release commitment
 - lab/tooling convenience only, not a runtime dependency
-- must not become a benchmark marketing tool
-- should reuse existing diagnostics and service-status facts
+- follow `docs/operations/testing-strategy.md` and
+  `docs/operations/diagnostics.md`
 
 Promotion requirements:
 
 - focused tests for send, receive, count, timeout, and failure behavior
 - docs showing when to use it instead of external tools
 - lab proof that it covers the common smoke-test paths
-- no volatile generated totals in durable docs
+- follow the volatile-fact rules in
+  `docs/operations/documentation-maintenance.md`
 
 ## Platform Pipeline
 
@@ -702,11 +1181,11 @@ Why it is interesting:
 
 Boundary:
 
-- future candidate only; not v0.9 or v0.9.1 unless a release roadmap promotes it
+- future candidate only unless a release roadmap promotes it
 - helper-owned, opt-in, and Linux-specific
 - limited to explicit Gatherlink endpoint scenarios
-- must not manage general host firewall policy, LAN routing, SD-WAN policy,
-  segmentation, IDS/IPS, QoS, or arbitrary NAT
+- follow the firewall/NAT/helper boundary in
+  `docs/architecture/architecture-contract.md`
 - must use labeled nftables/iptables chains, marks, sets, comments, or other
   explicit hook points so external firewall tools can place rules before and
   after Gatherlink-owned rules
@@ -729,9 +1208,10 @@ Why it is interesting:
 
 Boundary:
 
-- Debian remains the only v0.9/v0.9.1 supported layer
+- Debian remains the only currently supported layer
 - new OS behavior must enter through compatibility modules/scripts
-- no platform conditionals scattered through core logic
+- follow `docs/architecture/architecture-contract.md` for compatibility-layer
+  boundaries
 
 Promotion requirements:
 

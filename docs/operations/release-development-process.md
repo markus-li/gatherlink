@@ -1,7 +1,9 @@
 # Release Development Process
 
 This is the reusable release-building guide. Roadmaps can point here instead of
-copying the same process text into every release-specific document.
+copying the same process text into every release-specific document. The standing
+implementation rules live in `docs/operations/development-discipline.md`; use
+that document together with this process when building release slices.
 
 ## Three-Pass Rule
 
@@ -67,6 +69,27 @@ declaring the slice done:
 - Diagnostics changes: event DTO/bus/sink tests plus a runtime smoke proving
   events are emitted and do not block
 - Docs-only changes: stale-reference search and links/path sanity checks
+
+## Release Notes Gate
+
+Starting with v0.9.2, every release must have a matching release-note file in
+`docs/releases/` before it can be tagged. Release notes should be compact and
+clean, but as complete as possible for the release scope.
+
+Each release note should include:
+
+- what changed since the previous release
+- what was tested, including any skipped or waived gates
+- supported platform reality
+- security posture and audit status
+- known limits and intentionally deferred work
+- links or references to the matching roadmap, release checklist, and evidence
+  docs when the detail belongs there
+
+Do not duplicate long benchmark tables, roadmap prose, or policy text in the
+release note. Summarize the outcome and point to the canonical evidence docs.
+Do not tag a release while the matching release note is missing, stale, or more
+optimistic than the code and test evidence.
 
 ## Boundary Review Questions
 

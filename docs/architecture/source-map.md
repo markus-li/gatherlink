@@ -30,9 +30,12 @@ operator wording.
 
 | Path | Responsibility |
 | --- | --- |
+| `python/gatherlink/bootstrap` | bootstrap endpoint resolution, cache, and connection helpers |
+| `python/gatherlink/carriers` | carrier adapter lifecycle for alternate packet transports; packet semantics stay unchanged |
 | `python/gatherlink/config` | user config loading, schema normalization, validation, runtime DTO expansion |
 | `python/gatherlink/runtime` | core/relay runners, service registry, process supervision, live reapply |
 | `python/gatherlink/cli` | Typer CLI commands and operator entry points |
+| `python/gatherlink/protocol.py` | Python-side compact frame helpers used by control/lab code; Rust remains the hot-path protocol authority |
 | `python/gatherlink/dataplane` | Python adapter around Rust bindings and status mapping |
 | `python/gatherlink/control` | authenticated control metadata parsing and policy compilation |
 | `python/gatherlink/security` | identity/session/provisioning helpers and Python-side security models |
@@ -40,8 +43,10 @@ operator wording.
 | `python/gatherlink/persistence` | state layout, sealed artifacts, audit helpers |
 | `python/gatherlink/platform` | Debian compatibility backend and future OS backends |
 | `python/gatherlink/diagnostics` | structured events, buses, sinks |
+| `python/gatherlink/release` | release artifact helpers and packaging checks |
 | `python/gatherlink/scheduling` | Python-owned scheduling policy, scoring, simulations |
 | `python/gatherlink/paths` | path telemetry and MTU/capacity helpers |
+| `python/gatherlink/shared` | tiny shared utilities with no policy ownership |
 | `python/gatherlink/time` | derived time helper logic and opt-in system time setting support |
 
 ## Helpers
@@ -54,6 +59,7 @@ operator wording.
 | `python/gatherlink/helpers/wireguard` | WireGuard planning/tooling integration, not WireGuard replacement |
 | `python/gatherlink/helpers/relay_fabric` | relay discovery and health helper behavior |
 | `python/gatherlink/helpers/status_http.py` | experimental local status/REST helper |
+| `python/gatherlink/helpers/traffic_split.py` | Debian policy-routing snippet generation for advanced WireGuard split-profile setups |
 | `python/gatherlink/helpers/transport.py` | helper transport abstraction |
 | `python/gatherlink/helpers/udp_stream.py` | helper stream framing over Gatherlink UDP service |
 

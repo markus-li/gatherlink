@@ -3,7 +3,9 @@
 ## Purpose
 
 This document captures durable project principles. It should be treated as a
-guardrail for future implementation and pull requests.
+guardrail for future implementation and pull requests. The canonical ownership
+and boundary contract is `docs/architecture/architecture-contract.md`; this file
+is the short human-readable version.
 
 ## Primary abstraction
 
@@ -15,27 +17,17 @@ local UDP listen -> Gatherlink fabric -> remote UDP emit
 
 Everything else is either orchestration, observability, or optional helper logic.
 
-## Keep the core narrow
+## Keep The Core Narrow
 
-The core must remain focused on virtual UDP services, aggregation frames,
-carrier selection, obfuscation/framing, receiver metrics, path health, MTU
-eligibility, replay protection, bounded queues, and diagnostics events.
+Keep Gatherlink focused on virtual UDP services over a carrier-aware fabric.
+Permanent exclusions and helper carve-outs live in
+`docs/architecture/architecture-contract.md`.
 
-The core must not become a firewall, NAT product, QoS/shaping engine, DPI
-product, L7 router, general proxy ecosystem, or full SD-WAN controller.
+## Keep Ownership Obvious
 
-## Python owns intelligence
-
-Python owns config loading and validation, default expansion, path lifecycle,
-carrier discovery, peer failover, DNS helper, diagnostics, hooks, time quality,
-overlay planning, and scheduler scoring.
-
-## Rust owns execution
-
-Rust executes already-compiled runtime state in the high-speed dataplane.
-Rust should not decide what a user config means, why a path is good or bad,
-which relay is preferred, how DNS should resolve, or how overlay routes are
-planned.
+Python owns meaning; Rust executes compact facts. Detailed module boundaries
+belong in `docs/architecture/source-map.md` and
+`docs/architecture/architecture-contract.md`.
 
 ## Helpers are optional
 
@@ -54,8 +46,8 @@ Linux routers, AdGuard Home, Unbound, and dnsmasq.
 
 ## Non-root by default
 
-Normal Gatherlink operation should not require raw sockets, TUN/TAP,
-iptables/nftables, CAP_NET_ADMIN, policy routing, or root.
+Normal Gatherlink operation should stay unprivileged. The exact host capability
+boundary lives in `docs/architecture/architecture-contract.md`.
 
 ## Boring failure beats clever failure
 
