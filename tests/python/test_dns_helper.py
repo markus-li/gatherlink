@@ -158,6 +158,67 @@ def test_dns_helper_emits_diagnostics_for_upstream_failure() -> None:
     assert event.details["upstream"] == "direct:test@192.0.2.53:53"
 
 
+def test_dns_helper_race_first_valid_uses_first_accepted_upstream() -> None:
+    calls = []
+
+    def fake_upstream(query, upstream):
+        calls.append(upstream.name)
+        response = dns.message.make_response(query)
+        question = query.question[0]
+        if upstream.name == "bad":
+            response.set_rcode(dns.rcode.SERVFAIL)
+            raise OSError("bad upstream")
+        response.answer.append(dns.rrset.from_text(question.name, 60, "IN", "A", "192.0.2.60"))
+        return response
+
+    resolver = DnsHelperResolver(
+        policy=DnsResolverPolicy(
+            strategy="race_first_valid",
+            upstreams=[
+                DnsUpstream(name="bad", address="192.0.2.53"),
+                DnsUpstream(name="good", address="192.0.2.54"),
+            ],
+        ),
+        upstream_resolver=fake_upstream,
+    )
+    query = dns.message.make_query("race.example.", dns.rdatatype.A)
+
+    result = resolver.resolve_wire(query.to_wire())
+    response = dns.message.from_wire(result.response_wire)
+
+    assert response.answer[0][0].address == "192.0.2.60"
+    assert result.diagnostic.upstream == "direct:good@192.0.2.54:53"
+    assert set(calls) == {"bad", "good"}
+
+
+def test_dns_helper_race_continues_after_dnssec_rejection() -> None:
+    def fake_upstream(query, upstream):
+        response = dns.message.make_response(query)
+        question = query.question[0]
+        response.answer.append(dns.rrset.from_text(question.name, 60, "IN", "A", "192.0.2.70"))
+        if upstream.name == "validated":
+            response.flags |= dns.flags.AD
+        return response
+
+    resolver = DnsHelperResolver(
+        policy=DnsResolverPolicy(
+            strategy="race_first_valid",
+            dnssec_mode="require_ad",
+            upstreams=[
+                DnsUpstream(name="unsigned", address="192.0.2.53"),
+                DnsUpstream(name="validated", address="192.0.2.54"),
+            ],
+        ),
+        upstream_resolver=fake_upstream,
+    )
+    query = dns.message.make_query("secure-race.example.", dns.rdatatype.A)
+
+    result = resolver.resolve_wire(query.to_wire())
+
+    assert result.diagnostic.upstream == "direct:validated@192.0.2.54:53"
+    assert result.diagnostic.dnssec.status == "validated_by_upstream"
+
+
 def test_dns_helper_tunnel_upstream_uses_gatherlink_service_endpoint() -> None:
     calls = []
 

@@ -61,6 +61,7 @@ from gatherlink.lab.scenarios import LabPathConfig, LabScenarioConfig
 from gatherlink.paths.capacity import PATH_CAPACITY_DEFAULT_BPS as _PATH_CAPACITY_DEFAULT_BPS
 from gatherlink.paths.capacity import PathCapacityDetector
 from gatherlink.paths.mtu import detect_runtime_path_mtu as _detect_runtime_path_mtu
+from gatherlink.paths.telemetry import DataTrafficLatencyTracker, PathLatencyTracker, take_data_transmit_sample_batch
 from gatherlink.protocol import SERVICE_ID_REMOTE_STATUS as _SERVICE_ID_REMOTE_STATUS
 from gatherlink.runtime.services import (
     ServiceIpcError,
@@ -70,6 +71,7 @@ from gatherlink.runtime.services import (
     request_service,
     service_name,
 )
+from gatherlink.scheduling.metrics import path_pressure_from_path_stats as _path_pressure_from_path_stats
 from gatherlink.time.sink import (
     SINK_TIME_BOOTSTRAP_ENV as _SINK_TIME_BOOTSTRAP_ENV,
 )
@@ -85,9 +87,15 @@ _NTP_STATUS_REFRESH_INTERVAL_SECONDS = 30.0
 _PATH_CAPACITY_CACHE_SCHEMA_VERSION = 1
 _PATH_CAPACITY_CACHE_FILE = "path-capacity-cache.json"
 _PATH_MTU_RECHECK_INTERVAL_SECONDS = 60.0
+_LAB_SCHEDULER_REAPPLY_INTERVAL_SECONDS = 1.0
 _LAB_HIDDEN_SINK_IPC_ENV = "GATHERLINK_LAB_HIDDEN_SINK_IPC"
 _LAB_REMOTE_STATUS_ENV = "GATHERLINK_LAB_REMOTE_STATUS"
 _LAB_REMOTE_STATUS_PROXY_ENV = "GATHERLINK_LAB_REMOTE_STATUS_PROXY"
+_LAB_PACKET_LOG_ENV = "GATHERLINK_LAB_PACKET_LOG"
+_LAB_DATAPLANE_BURST_CYCLES_ENV = "GATHERLINK_LAB_DATAPLANE_BURST_CYCLES"
+_LAB_DATAPLANE_BATCH_SIZE = 512
+_LAB_DATAPLANE_BURST_CYCLES = 8
+_LAB_DATA_TIMING_SAMPLE_CONTROL_INTERVAL_SECONDS = 1.0
 
 LabCleanupResult = _netns.LabCleanupResult
 PathSetupResult = _netns.PathSetupResult
@@ -189,6 +197,50 @@ class StandardCarrierProxySmokeResult(StandardCarrierSmokeResult):
     proxy: str
     proxy_endpoint: str
     upstream_endpoint: str
+
+
+@dataclass(frozen=True)
+class CarrierComparisonRow:
+    """One row in a carrier comparison report."""
+
+    carrier: str
+    path: str
+    ok: bool
+    packets: int = 0
+    bytes: int = 0
+    detail: str = ""
+
+    def export_dict(self) -> dict[str, str | int | bool]:
+        """Return JSON-safe comparison facts."""
+        return {
+            "carrier": self.carrier,
+            "path": self.path,
+            "ok": self.ok,
+            "packets": self.packets,
+            "bytes": self.bytes,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class CarrierComparisonReport:
+    """Repeatable carrier comparison summary for lab and VM reports."""
+
+    count: int
+    rows: tuple[CarrierComparisonRow, ...]
+
+    @property
+    def ok(self) -> bool:
+        """Return whether all requested carrier comparison rows passed."""
+        return all(row.ok for row in self.rows)
+
+    def export_dict(self) -> dict[str, object]:
+        """Return JSON-safe carrier comparison facts."""
+        return {
+            "count": self.count,
+            "ok": self.ok,
+            "rows": [row.export_dict() for row in self.rows],
+        }
 
 
 def ensure_service_not_root() -> None:
@@ -477,6 +529,131 @@ def run_standard_carrier_proxy_smoke(
             payload=payload,
             traefik_bin=resolved_traefik,
         )
+    )
+
+
+def run_standard_carrier_comparison(
+    *,
+    count: int = 3,
+    payload: str = "gatherlink-carrier-compare",
+    include_proxy: bool = False,
+    traefik_bin: str | None = None,
+) -> CarrierComparisonReport:
+    """
+    Compare local UDP, direct QUIC DATAGRAM, and HTTP/3 DATAGRAM carrier paths.
+
+    This is intentionally a lab/report primitive. It reuses the existing smoke
+    transports so acceptance scripts can compare equivalent byte-preservation
+    behavior before moving to shaped or VM-specific carrier tests.
+    """
+    rows: list[CarrierComparisonRow] = [_carrier_row_from_udp_smoke(count=count, payload=payload)]
+    for mode in CarrierMode:
+        rows.append(_carrier_row_from_standard_smoke(mode.value, count=count, payload=payload))
+    if include_proxy:
+        for mode in CarrierMode:
+            rows.append(
+                _carrier_row_from_proxy_smoke(
+                    mode.value,
+                    count=count,
+                    payload=payload,
+                    traefik_bin=traefik_bin,
+                )
+            )
+    return CarrierComparisonReport(count=count, rows=tuple(rows))
+
+
+def _carrier_row_from_udp_smoke(*, count: int, payload: str) -> CarrierComparisonRow:
+    """Return direct UDP comparison facts using the same packet shape."""
+    try:
+        result = _run_direct_udp_smoke(count=count, payload=payload)
+    except Exception as exc:
+        return CarrierComparisonRow(carrier="udp", path="direct", ok=False, detail=str(exc))
+    return CarrierComparisonRow(
+        carrier="udp",
+        path="direct",
+        ok=True,
+        packets=result.packets,
+        bytes=result.bytes,
+        detail=f"client_udp={result.client_udp} server_udp={result.server_udp}",
+    )
+
+
+def _carrier_row_from_standard_smoke(carrier: str, *, count: int, payload: str) -> CarrierComparisonRow:
+    """Return direct standard-carrier comparison facts."""
+    try:
+        result = run_standard_carrier_smoke(carrier, count=count, payload=payload)
+    except Exception as exc:
+        return CarrierComparisonRow(carrier=carrier, path="direct", ok=False, detail=str(exc))
+    return CarrierComparisonRow(
+        carrier=result.carrier,
+        path="direct",
+        ok=True,
+        packets=result.packets,
+        bytes=result.bytes,
+        detail=f"client_udp={result.client_udp} server_udp={result.server_udp}",
+    )
+
+
+def _carrier_row_from_proxy_smoke(
+    carrier: str,
+    *,
+    count: int,
+    payload: str,
+    traefik_bin: str | None,
+) -> CarrierComparisonRow:
+    """Return proxied standard-carrier comparison facts."""
+    try:
+        result = run_standard_carrier_proxy_smoke(
+            carrier,
+            proxy="traefik",
+            count=count,
+            payload=payload,
+            traefik_bin=traefik_bin,
+        )
+    except Exception as exc:
+        return CarrierComparisonRow(carrier=carrier, path="traefik", ok=False, detail=str(exc))
+    return CarrierComparisonRow(
+        carrier=result.carrier,
+        path=result.proxy,
+        ok=True,
+        packets=result.packets,
+        bytes=result.bytes,
+        detail=f"proxy_endpoint={result.proxy_endpoint} upstream_endpoint={result.upstream_endpoint}",
+    )
+
+
+def _run_direct_udp_smoke(*, count: int, payload: str) -> StandardCarrierSmokeResult:
+    """Verify the baseline direct UDP path with the same bidirectional packet count."""
+    server_target, server_target_addr = _udp_endpoint_for_smoke()
+    client_target, client_target_addr = _udp_endpoint_for_smoke()
+    sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sender.setblocking(False)
+    received_bytes = 0
+    try:
+        for index in range(count):
+            packet = f"{payload}-udp-{index}".encode()
+            sender.sendto(packet, server_target_addr)
+            received, _source = server_target.recvfrom(65535)
+            if received != packet:
+                raise RuntimeError(f"udp carrier comparison mismatch: expected={packet!r} received={received!r}")
+            received_bytes += len(received)
+            reply = f"{payload}-udp-reply-{index}".encode()
+            sender.sendto(reply, client_target_addr)
+            returned, _source = client_target.recvfrom(65535)
+            if returned != reply:
+                raise RuntimeError(f"udp carrier comparison reply mismatch: expected={reply!r} received={returned!r}")
+            received_bytes += len(returned)
+    finally:
+        sender.close()
+        server_target.close()
+        client_target.close()
+    return StandardCarrierSmokeResult(
+        carrier="udp",
+        packets=count * 2,
+        bytes=received_bytes,
+        client_udp=_socket_addr_text(client_target_addr),
+        server_udp=_socket_addr_text(server_target_addr),
+        carrier_endpoint=_socket_addr_text(server_target_addr),
     )
 
 
@@ -789,9 +966,14 @@ class _LabControlState:
     service_disables: dict[int, str]
     path_capacity: dict[str, dict[str, int | str | None]]
     path_mtu: dict[str, dict[str, int | str | None]]
+    path_pressure: dict[str, dict[str, int | str | None]]
+    path_latency_tracker: PathLatencyTracker
+    data_traffic_latency_tracker: DataTrafficLatencyTracker
+    pending_data_transmit_samples: list[tuple[int, int, int, int]] = field(default_factory=list)
     remote_status: _remote_status.RemoteStatusState = field(default_factory=_remote_status.RemoteStatusState)
     applied_disabled_services: set[str] = field(default_factory=set)
     next_mtu_check_at: float = 0.0
+    next_data_sample_control_at: float = 0.0
 
 
 def _lab_runtime_config(config: LabScenarioConfig, *, role: str):
@@ -800,6 +982,7 @@ def _lab_runtime_config(config: LabScenarioConfig, *, role: str):
         GatherlinkConfig,
         PathConfig,
         PathSchedulerConfig,
+        SchedulerConfig,
         SecurityConfig,
         ServiceConfig,
     )
@@ -823,6 +1006,8 @@ def _lab_runtime_config(config: LabScenarioConfig, *, role: str):
                     tx_capacity_bps=default_capacity,
                     rx_capacity_bps=default_capacity,
                     mtu=lab_path.shape.mtu or 1200,
+                    latency_us=_lab_path_latency_us(lab_path),
+                    reorder_hold_us=_lab_path_reorder_hold_us(config, lab_path),
                 ),
             )
         )
@@ -848,9 +1033,53 @@ def _lab_runtime_config(config: LabScenarioConfig, *, role: str):
         role="client" if role == "client" else "server",
         peer=f"{config.name}-server" if role == "client" else f"{config.name}-client",
         security=_lab_runtime_security(config, role=role, security_cls=SecurityConfig),
+        scheduler=SchedulerConfig(mode=config.scheduler_mode),
         paths=paths,
         services=[service],
     )
+
+
+def _lab_path_latency_us(path: LabPathConfig) -> int | None:
+    """Return the lab path's configured one-way delay hint, when known."""
+    return _duration_to_microseconds(path.shape.delay) if path.shape.delay else None
+
+
+def _lab_path_reorder_hold_us(config: LabScenarioConfig, path: LabPathConfig) -> int:
+    """
+    Compile a path reorder hold from lab delay/jitter, capped by node-pair policy.
+
+    `reorder_policies[].max_hold` is a ceiling, not the actual hold time. Clean
+    synthetic paths keep the normal ordered-policy minimum so capacity tests do
+    not accidentally measure a huge receive buffer.
+    """
+    if not path.shape.delay and not path.shape.jitter:
+        return 0
+    delay_us = _duration_to_microseconds(path.shape.delay) if path.shape.delay else 0
+    jitter_us = _duration_to_microseconds(path.shape.jitter) if path.shape.jitter else 0
+    requested_us = max(2_000, (delay_us + jitter_us) * 5 // 4)
+    max_hold_us = _lab_reorder_max_hold_us(config)
+    return min(max_hold_us, requested_us) if max_hold_us else requested_us
+
+
+def _lab_reorder_max_hold_us(config: LabScenarioConfig) -> int:
+    """Return the configured lab node-pair reorder ceiling in microseconds."""
+    if not config.reorder_policies:
+        return 0
+    return _duration_to_microseconds(config.reorder_policies[0].max_hold)
+
+
+def _duration_to_microseconds(value: str) -> int:
+    """Parse the small duration vocabulary used by lab configs."""
+    text = value.strip().lower()
+    units = {
+        "us": 1,
+        "ms": 1_000,
+        "s": 1_000_000,
+    }
+    for suffix, multiplier in units.items():
+        if text.endswith(suffix):
+            return max(0, int(float(text[: -len(suffix)]) * multiplier))
+    return max(0, int(float(text) * 1_000_000))
 
 
 def _lab_runtime_security(config: LabScenarioConfig, *, role: str, security_cls):
@@ -889,6 +1118,7 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
     from gatherlink.config.expansion import expand_config
     from gatherlink.dataplane.rust_backend import bind_core_dataplane
     from gatherlink.runtime.reload import hot_reapply_scheduler_from_status
+    from gatherlink.scheduling.coordinator import SchedulerPolicyCoordinator
 
     ensure_service_not_root()
     base_runtime_config = _lab_runtime_config(config, role=role)
@@ -921,6 +1151,11 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
             runtime_config,
             logger=lambda message: print(f"lab service: {message}", flush=True),
         ),
+        path_pressure={},
+        path_latency_tracker=PathLatencyTracker(path_names),
+        data_traffic_latency_tracker=DataTrafficLatencyTracker(
+            {path.scheduler.path_id: path.name for path in runtime_config.paths}
+        ),
     )
     if role == "client" and os.environ.get(_LAB_REMOTE_STATUS_ENV) == "1":
         control_state.remote_status.request(ttl_seconds=_remote_status.REMOTE_STATUS_REQUEST_TTL_SECONDS)
@@ -929,6 +1164,9 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
     qdisc_baseline = _lab_qdisc_stats(config, side=qdisc_side)
     control_cadence = ControlCadenceState()
     next_control_metadata_at = 0.0
+    next_scheduler_reapply_at = 0.0
+    scheduler_policy_coordinator = SchedulerPolicyCoordinator()
+    last_scheduler_path_stats: dict[str, dict[str, int]] = {}
     ntp_sample = _read_sink_ntp_sample() if role == "server" else None
     next_ntp_status_at = time.monotonic() + _NTP_STATUS_REFRESH_INTERVAL_SECONDS
     reported_disabled_services: set[str] = set()
@@ -947,6 +1185,38 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
             control_cadence=control_cadence,
             control_state=control_state,
         )
+
+    def current_path_stats() -> dict[str, dict[str, int]]:
+        """Return current Rust path counters merged with lab qdisc drop counters."""
+        qdisc_stats = _qdisc_delta(_lab_qdisc_stats(config, side=qdisc_side), qdisc_baseline)
+        return _path_stats_with_qdisc(_named_rust_path_stats(dataplane.status_snapshot(), runtime_config), qdisc_stats)
+
+    def reapply_scheduler_from_local_status(path_stats: dict[str, dict[str, int]]) -> None:
+        """
+        Recompile local scheduler primitives from local status without sending control traffic.
+
+        Control metadata cadence decides how often peers receive facts. Scheduler
+        reapply is local Python policy and can run faster so short lab pressure
+        tests still exercise drop/queue feedback. Counter-like pressure facts are
+        converted to interval deltas before compiling policy; otherwise one early
+        burst of qdisc drops would keep suppressing a path for the rest of the
+        run even after the active pressure has changed.
+        """
+        nonlocal last_scheduler_path_stats, runtime_config
+        scheduler_path_stats = _scheduler_interval_path_stats(path_stats, last_scheduler_path_stats)
+        last_scheduler_path_stats = {path_name: dict(stats) for path_name, stats in path_stats.items()}
+        runtime_config = hot_reapply_scheduler_from_status(
+            dataplane,
+            base_runtime_config,
+            runtime_config,
+            {
+                "control_metadata": control_state.control_metadata,
+                "path_stats": scheduler_path_stats,
+            },
+            scheduler_coordinator=scheduler_policy_coordinator,
+        )
+        dataplane.set_service_scheduler(1, 0)
+        dataplane.set_service_scheduler(_SERVICE_ID_REMOTE_STATUS, 1)
 
     def send_reverse_traffic(request: dict[str, object]) -> dict[str, object]:
         if role != "server":
@@ -995,11 +1265,16 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
             if role == "server" and time.monotonic() >= next_ntp_status_at:
                 ntp_sample = _read_sink_ntp_sample()
                 next_ntp_status_at = time.monotonic() + _NTP_STATUS_REFRESH_INTERVAL_SECONDS
+            if time.monotonic() >= next_scheduler_reapply_at:
+                path_stats = current_path_stats()
+                reapply_scheduler_from_local_status(path_stats)
+                next_scheduler_reapply_at = time.monotonic() + _LAB_SCHEDULER_REAPPLY_INTERVAL_SECONDS
             if time.monotonic() >= next_control_metadata_at:
                 qdisc_stats = _qdisc_delta(_lab_qdisc_stats(config, side=qdisc_side), qdisc_baseline)
                 path_stats = _path_stats_with_qdisc(
                     _named_rust_path_stats(dataplane.status_snapshot(), runtime_config), qdisc_stats
                 )
+                control_state.path_pressure = _path_pressure_from_path_stats(path_stats)
                 capacity_changes = capacity_detector.observe(path_stats, qdisc_stats)
                 if capacity_changes:
                     _save_path_capacity_cache(config, capacity_detector.snapshot())
@@ -1017,20 +1292,23 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
                     ntp_sample=ntp_sample,
                     control_state=control_state,
                 )
-                runtime_config = hot_reapply_scheduler_from_status(
-                    dataplane,
-                    base_runtime_config,
-                    runtime_config,
-                    {
-                        "control_metadata": control_state.control_metadata,
-                        "path_stats": path_stats,
-                    },
-                )
-                dataplane.set_service_scheduler(1, 0)
-                dataplane.set_service_scheduler(_SERVICE_ID_REMOTE_STATUS, 1)
+                reapply_scheduler_from_local_status(path_stats)
                 traffic_total = _rust_lab_traffic_total(dataplane)
                 next_control_metadata_at = time.monotonic() + control_cadence.next_interval(traffic_total)
             did_work = _step_rust_lab_dataplane(dataplane)
+            if did_work:
+                _drain_lab_data_timing_samples(dataplane, control_state)
+            if (
+                control_state.pending_data_transmit_samples
+                and time.monotonic() >= control_state.next_data_sample_control_at
+            ):
+                _announce_lab_control_metadata(
+                    dataplane,
+                    runtime_config,
+                    role=role,
+                    ntp_sample=ntp_sample,
+                    control_state=control_state,
+                )
             did_work = (
                 _drain_reserved_service_events(
                     dataplane,
@@ -1059,6 +1337,22 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
 
 def _step_rust_lab_dataplane(dataplane) -> bool:
     """Run one nonblocking Rust dataplane step for the lab supervisor."""
+    if os.environ.get(_LAB_PACKET_LOG_ENV) != "1":
+        summary = getattr(dataplane, "run_available_summary", None)
+        if callable(summary):
+            try:
+                forwarded_packets, _forwarded_bytes, delivered_packets, _delivered_bytes = summary(
+                    ["udp-main"],
+                    _LAB_DATAPLANE_BATCH_SIZE,
+                    _lab_dataplane_burst_cycles(),
+                )
+            except Exception as exc:
+                if "disabled" not in str(exc):
+                    raise
+                print(f"lab service: SERVICE TRAFFIC STOPPED during dataplane summary step: {exc}", flush=True)
+                return False
+            return bool(forwarded_packets or delivered_packets)
+
     try:
         forwarded = dataplane.forward_available_for_service_nonblocking("udp-main", 32)
     except Exception as exc:
@@ -1090,6 +1384,25 @@ def _step_rust_lab_dataplane(dataplane) -> bool:
     return bool(forwarded or delivered)
 
 
+def _lab_dataplane_burst_cycles() -> int:
+    """
+    Return the bounded aggregate-drain cycle count for lab services.
+
+    The default is intentionally conservative for shaped low-speed paths. The
+    environment override exists for benchmark experiments so we can separate
+    scheduler behavior from lab-supervisor burst pressure without editing Rust
+    or changing production service behavior.
+    """
+    raw = os.environ.get(_LAB_DATAPLANE_BURST_CYCLES_ENV)
+    if raw is None:
+        return _LAB_DATAPLANE_BURST_CYCLES
+    try:
+        value = int(raw)
+    except ValueError:
+        return _LAB_DATAPLANE_BURST_CYCLES
+    return max(1, min(value, _LAB_DATAPLANE_BURST_CYCLES))
+
+
 def _drain_reserved_service_events(
     dataplane,
     runtime_config,
@@ -1106,6 +1419,8 @@ def _drain_reserved_service_events(
         control_state.control_metadata,
         path_names_by_id=path_names_by_id,
         local_targets_by_service_id=local_targets_by_service_id,
+        path_latency_tracker=control_state.path_latency_tracker,
+        data_traffic_latency_tracker=control_state.data_traffic_latency_tracker,
         extra_handlers={
             _SERVICE_ID_REMOTE_STATUS: lambda event: _handle_lab_remote_status_event(
                 dataplane,
@@ -1119,6 +1434,63 @@ def _drain_reserved_service_events(
     )
     _apply_lab_control_policy(dataplane, runtime_config, control_state, role=role)
     return handled > 0
+
+
+def _drain_lab_data_timing_samples(dataplane, control_state: _LabControlState) -> None:
+    """Promote Rust timing facts into the same production control metadata used by services."""
+    drain = getattr(dataplane, "drain_data_timing_samples", None)
+    if not callable(drain):
+        return
+    samples = drain()
+    if not isinstance(samples, dict):
+        return
+    control_state.pending_data_transmit_samples.extend(
+        control_state.data_traffic_latency_tracker.observe_local_samples(
+            samples,
+            local_clock_offset_us=_current_lab_clock_offset_us(control_state.control_metadata),
+        )
+    )
+    changed = control_state.data_traffic_latency_tracker.promote_pending_peer_transmit_samples(
+        local_clock_offset_us=_current_lab_clock_offset_us(control_state.control_metadata),
+        latency_tracker=control_state.path_latency_tracker,
+        rtt_us=_current_lab_clock_rtt_us(control_state.control_metadata),
+        clock_error_us=_current_lab_clock_error_us(control_state.control_metadata),
+    )
+    if changed:
+        _control_metadata.merge_control_path_latency(control_state.control_metadata, changed)
+
+
+def _current_lab_clock_offset_us(control_metadata: dict[str, object]) -> int | None:
+    """Return the current local-to-sink clock offset known to the lab control plane."""
+    internal_clock = control_metadata.get("internal_clock")
+    if not isinstance(internal_clock, dict):
+        return None
+    return _optional_lab_int(internal_clock.get("mean_offset_us") or internal_clock.get("offset_us"))
+
+
+def _current_lab_clock_rtt_us(control_metadata: dict[str, object]) -> int | None:
+    """Return the current RTT sanity value known to the lab control plane."""
+    internal_clock = control_metadata.get("internal_clock")
+    if not isinstance(internal_clock, dict):
+        return None
+    return _optional_lab_int(internal_clock.get("mean_rtt_us") or internal_clock.get("rtt_us"))
+
+
+def _current_lab_clock_error_us(control_metadata: dict[str, object]) -> int | None:
+    """Return the current clock error budget known to the lab control plane."""
+    internal_clock = control_metadata.get("internal_clock")
+    if not isinstance(internal_clock, dict):
+        return None
+    return _optional_lab_int(internal_clock.get("error_budget_us"))
+
+
+def _optional_lab_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _tick_remote_status_request(dataplane, control_state: _LabControlState, *, role: str) -> bool:
@@ -1210,6 +1582,7 @@ def _apply_lab_control_policy(dataplane, runtime_config, control_state: _LabCont
     apply_control_policy_to_dataplane(
         dataplane,
         control_state.control_metadata,
+        runtime_config=runtime_config,
         applied_disabled_services=control_state.applied_disabled_services,
         logger=lambda message: print(f"lab {role} service: {message}", flush=True),
     )
@@ -1244,23 +1617,42 @@ def _announce_lab_control_metadata(
     metadata = (
         control_state.control_metadata if control_state is not None else _control_metadata.empty_control_metadata()
     )
+    path_latency = control_state.path_latency_tracker.dirty_snapshot() if control_state is not None else {}
+    data_transmit_samples = (
+        take_data_transmit_sample_batch(control_state.pending_data_transmit_samples)
+        if control_state is not None
+        else []
+    )
     announcement = announce_control_metadata(
         dataplane,
         runtime_config,
         metadata,
         path_capacity=control_state.path_capacity if control_state is not None else {},
+        path_latency=path_latency,
         path_mtu=control_state.path_mtu if control_state is not None else {},
+        path_pressure=control_state.path_pressure if control_state is not None else {},
+        scheduler_status=(runtime_config.scheduler.mode, runtime_config.scheduler.mode, runtime_config.scheduler.mode),
+        data_transmit_samples=data_transmit_samples,
         service_disables=control_state.service_disables if control_state is not None else {},
         ntp_sample=ntp_sample,
         include_sink_time=role == "server",
     )
+    if control_state is not None:
+        if path_latency:
+            control_state.path_latency_tracker.mark_sent()
+        if data_transmit_samples:
+            control_state.next_data_sample_control_at = (
+                time.monotonic() + _LAB_DATA_TIMING_SAMPLE_CONTROL_INTERVAL_SECONDS
+            )
     print(
         f"lab {role} service: rust control sent paths={announcement.sent_paths} "
         f"metadata={announcement.path_count} services={announcement.service_count} "
         f"endpoint_assertions={announcement.endpoint_assertion_count} "
         f"scheduler_policies={announcement.scheduler_policy_count} "
         f"service_disables={announcement.service_disable_count} capacity={announcement.capacity_count} "
-        f"mtu={announcement.mtu_count} sink_time={announcement.sink_time_count} "
+        f"latency={announcement.latency_count} mtu={announcement.mtu_count} pressure={announcement.pressure_count} "
+        f"data_samples={announcement.data_transmit_sample_count} "
+        f"sink_time={announcement.sink_time_count} "
         f"bytes={announcement.payload_bytes}",
         flush=True,
     )
@@ -1372,11 +1764,12 @@ def _drain_app_sink_socket(sock: socket.socket, state: _LabAppSinkState) -> bool
         state.last_payload = payload.decode("utf-8", errors="replace")
         state.last_payload_bytes = len(payload)
         state.last_source = repr(source)
-        print(
-            f"lab sink app: received packet={state.packets} bytes={len(payload)} source={source} "
-            f"payload={state.last_payload}",
-            flush=True,
-        )
+        if os.environ.get(_LAB_PACKET_LOG_ENV) == "1":
+            print(
+                f"lab sink app: received packet={state.packets} bytes={len(payload)} source={source} "
+                f"payload={state.last_payload}",
+                flush=True,
+            )
 
 
 def _send_reverse_through_rust_service(dataplane, request: dict[str, object]) -> dict[str, object]:
@@ -1976,6 +2369,53 @@ def _path_stats_with_qdisc(
         row["qdisc_sent_bytes"] = qdisc_row.get("sent_bytes", 0)
         merged[path_name] = row
     return merged
+
+
+_SCHEDULER_INTERVAL_COUNTER_KEYS = {
+    "packets",
+    "bytes",
+    "tx_packets",
+    "tx_bytes",
+    "rx_packets",
+    "rx_bytes",
+    "missed_packets",
+    "qdisc_dropped_packets",
+    "qdisc_sent_packets",
+    "qdisc_sent_bytes",
+    "security_drop_packets",
+    "send_failed_packets",
+    "send_failed_bytes",
+    "fanout_send_failed_packets",
+    "fanout_send_failed_bytes",
+    "packets_needing_reorder",
+    "reordered_packets",
+    "duplicate_packets",
+    "expected_duplicate_packets",
+    "unexpected_duplicate_packets",
+}
+
+
+def _scheduler_interval_path_stats(
+    path_stats: dict[str, dict[str, int]],
+    previous_path_stats: dict[str, dict[str, int]],
+) -> dict[str, dict[str, int]]:
+    """
+    Return path stats shaped for scheduler pressure decisions.
+
+    Monitor rows need cumulative counters. Scheduler feedback needs current
+    pressure. For monotonic counters, use interval deltas. For queue depth and
+    age, keep the current absolute value because a stable non-empty queue is
+    itself a live pressure signal.
+    """
+    interval_stats: dict[str, dict[str, int]] = {}
+    for path_name, stats in path_stats.items():
+        previous = previous_path_stats.get(path_name, {})
+        row = dict(stats)
+        for key in _SCHEDULER_INTERVAL_COUNTER_KEYS:
+            if key in row:
+                row[key] = max(0, int(row.get(key, 0)) - int(previous.get(key, 0)))
+        interval_stats[path_name] = row
+    return interval_stats
 
 
 def _path_stats_with_rx(

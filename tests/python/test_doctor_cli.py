@@ -38,19 +38,89 @@ def test_doctor_validates_config_and_diagnostics_jsonl(monkeypatch, tmp_path) ->
 
     payload = json.loads(result.output)
     assert result.exit_code == 0, result.output
+    assert payload["schema_version"] == 1
+    assert payload["tool"] == "gatherlink doctor"
     assert payload["ok"] is True
+    assert payload["check_count"] == len(payload["checks"])
     assert {check["name"] for check in payload["checks"]} >= {
         "python.runtime",
         "rust.dataplane_binding",
+        "package.versions",
         "state.layout",
         "service.registry",
+        "release.hygiene",
+        "operator.optional_tools",
         "config.validate",
         "diagnostics.jsonl",
     }
     config_check = next(check for check in payload["checks"] if check["name"] == "config.validate")
     assert config_check["details"]["security_mode"] == "none"
+    assert config_check["details"]["operator_facts"]["default_gatherlink_udp_port"] == 53820
     diagnostics_check = next(check for check in payload["checks"] if check["name"] == "diagnostics.jsonl")
     assert diagnostics_check["details"]["events"] == 1
+
+
+def test_doctor_reports_optional_tools_without_failing(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_check_rust_binding",
+        lambda: doctor_cli.DoctorCheck("rust.dataplane_binding", True, "stub binding ready"),
+    )
+    monkeypatch.setattr(doctor_cli.shutil, "which", lambda name: "/usr/bin/wg" if name == "wg" else None)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "doctor",
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--service-registry",
+            str(tmp_path / "services"),
+            "--json",
+        ],
+    )
+
+    payload = json.loads(result.output)
+    assert result.exit_code == 0, result.output
+    tool_check = next(check for check in payload["checks"] if check["name"] == "operator.optional_tools")
+    assert tool_check["ok"] is True
+    assert tool_check["details"]["tools"]["wg"]["path"] == "/usr/bin/wg"
+    assert set(tool_check["details"]["missing"]) == {"traefik", "wg-quick"}
+
+
+def test_doctor_reports_package_version_mismatches(tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    (repo_root / "crates" / "protocol").mkdir(parents=True)
+    (repo_root / "pyproject.toml").write_text('[project]\nversion = "0.9.2"\n', encoding="utf-8")
+    (repo_root / "crates" / "protocol" / "Cargo.toml").write_text(
+        '[package]\nversion = "0.9.1"\n',
+        encoding="utf-8",
+    )
+
+    check = doctor_cli._check_package_versions(repo_root)
+
+    assert check.ok is False
+    assert "manifest versions differ" in check.details["problems"][0]
+
+
+def test_doctor_release_hygiene_checks_tracked_files(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_tracked_repo_files",
+        lambda _repo_root: [
+            ".gatherlink/private-state.json",
+            "tools/private-key.json",
+            "docs/reports/hyperv-acceptance/run.jsonl",
+            "docs/security.md",
+        ],
+    )
+
+    check = doctor_cli._check_release_hygiene(tmp_path)
+
+    assert check.ok is False
+    assert any("tracked local state path" in problem for problem in check.details["problems"])
+    assert any("secret-like tracked path" in problem for problem in check.details["problems"])
+    assert any("generated report appears tracked" in problem for problem in check.details["problems"])
 
 
 def test_doctor_fails_on_invalid_diagnostics_jsonl(monkeypatch, tmp_path) -> None:
@@ -175,6 +245,149 @@ def test_doctor_reports_multi_session_return_warning(monkeypatch, tmp_path) -> N
     config_check = next(check for check in payload["checks"] if check["name"] == "config.validate")
     assert config_check["ok"] is True
     assert any("multiple authenticated sessions" in warning for warning in config_check["details"]["warnings"])
+
+
+def test_doctor_reports_duplicate_and_wireguard_port_warnings(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_check_rust_binding",
+        lambda: doctor_cli.DoctorCheck("rust.dataplane_binding", True, "stub binding ready"),
+    )
+    config_path = tmp_path / "port-warning.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "node": "port-warning",
+                "role": "client",
+                "peer": "peer",
+                "paths": [
+                    {"name": "path-a", "interface": "lo", "transport_bind": "127.0.0.1:51820"},
+                    {"name": "path-b", "interface": "lo", "transport_bind": "127.0.0.1:51820"},
+                ],
+                "services": [{"name": "udp-main", "target": "127.0.0.1:51821", "listen": "127.0.0.1:55180"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "doctor",
+            "--config",
+            str(config_path),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--service-registry",
+            str(tmp_path / "services"),
+            "--json",
+        ],
+    )
+
+    payload = json.loads(result.output)
+    assert result.exit_code == 0, result.output
+    config_check = next(check for check in payload["checks"] if check["name"] == "config.validate")
+    warnings = config_check["details"]["warnings"]
+    assert any("duplicate local endpoint" in warning for warning in warnings)
+    assert any("commonly belongs to WireGuard" in warning for warning in warnings)
+
+
+def test_doctor_reports_standard_carrier_supervision_facts(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_check_rust_binding",
+        lambda: doctor_cli.DoctorCheck("rust.dataplane_binding", True, "stub binding ready"),
+    )
+    config_path = tmp_path / "quic-carrier.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "node": "carrier-node",
+                "role": "client",
+                "peer": "peer",
+                "paths": [
+                    {
+                        "name": "quic-a",
+                        "interface": "lo",
+                        "carrier": "quic-datagram",
+                        "transport_bind": "127.0.0.1:53820",
+                        "transport_remote": "127.0.0.1:53821",
+                        "carrier_max_datagram_size": 1180,
+                        "scheduler": {"mtu": 1200},
+                    }
+                ],
+                "services": [{"name": "udp-main", "target": "127.0.0.1:51820"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "doctor",
+            "--config",
+            str(config_path),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--service-registry",
+            str(tmp_path / "services"),
+            "--json",
+        ],
+    )
+
+    payload = json.loads(result.output)
+    assert result.exit_code == 0, result.output
+    config_check = next(check for check in payload["checks"] if check["name"] == "config.validate")
+    path_fact = config_check["details"]["operator_facts"]["path_binds"][0]
+    assert path_fact["requires_python_carrier_supervision"] is True
+    assert path_fact["effective_datagram_mtu"] == 1180
+    assert any("Python carrier supervision" in warning for warning in config_check["details"]["warnings"])
+
+
+def test_doctor_reports_invalid_standard_carrier_config(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        doctor_cli,
+        "_check_rust_binding",
+        lambda: doctor_cli.DoctorCheck("rust.dataplane_binding", True, "stub binding ready"),
+    )
+    config_path = tmp_path / "broken-carrier.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "node": "carrier-node",
+                "role": "client",
+                "peer": "peer",
+                "paths": [{"name": "h3-a", "interface": "lo", "carrier": "http3-datagram"}],
+                "services": [{"name": "udp-main", "target": "127.0.0.1:51820"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "doctor",
+            "--config",
+            str(config_path),
+            "--state-dir",
+            str(tmp_path / "state"),
+            "--service-registry",
+            str(tmp_path / "services"),
+            "--json",
+        ],
+    )
+
+    payload = json.loads(result.output)
+    assert result.exit_code == 0, result.output
+    config_check = next(check for check in payload["checks"] if check["name"] == "config.validate")
+    warnings = config_check["details"]["warnings"]
+    assert any("has no transport_bind" in warning for warning in warnings)
+    assert any("need transport_remote" in warning for warning in warnings)
 
 
 def test_doctor_validates_release_artifact_directory(monkeypatch, tmp_path) -> None:

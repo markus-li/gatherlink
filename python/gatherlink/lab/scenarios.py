@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from gatherlink.config.models import SecurityConfig
+from gatherlink.config.models import SchedulerPolicy, SecurityConfig
 from gatherlink.shared.models import GatherlinkBaseModel
 
 LabScenarioKind = Literal[
@@ -98,6 +98,7 @@ class LabScenarioConfig(GatherlinkBaseModel):
     scenario: LabScenarioKind
     description: str | None = None
     security: SecurityConfig = Field(default_factory=SecurityConfig)
+    scheduler_mode: SchedulerPolicy = "round_robin"
     runtime_dir: str = ".lab"
     nodes: list[LabNodeConfig] = Field(default_factory=list)
     paths: list[LabPathConfig] = Field(default_factory=list)

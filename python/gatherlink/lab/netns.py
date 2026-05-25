@@ -13,6 +13,7 @@ import ipaddress
 import json
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from gatherlink.lab.scenarios import (
@@ -22,6 +23,11 @@ from gatherlink.lab.scenarios import (
     LabShapeConfig,
     LabShapeProfileConfig,
     LabShapeSide,
+)
+from gatherlink.paths.capacity import (
+    PATH_CAPACITY_CACHE_FILE,
+    PATH_CAPACITY_CACHE_SCHEMA_VERSION,
+    merge_capacity_snapshots,
 )
 from gatherlink.platform.debian import CommandRunner, SubprocessCommandRunner, default_debian_backend
 
@@ -151,7 +157,63 @@ def apply_lab_network_mode_config(
             results.append(clear_lab_shape(config, target.path, side=target.side, runner=runner))
         else:
             results.append(apply_lab_shape(config, target.path, target.shape, side=target.side, runner=runner))
+    _save_network_mode_capacity_hints(config, mode)
     return results
+
+
+def _save_network_mode_capacity_hints(config: LabScenarioConfig, mode: LabNetworkModeConfig) -> None:
+    """
+    Persist lab profile rates as detector startup hints for the next run.
+
+    These are deliberately non-authoritative. They give WAN-profile labs a
+    sensible first scheduler guess, then the normal Python capacity detector can
+    raise or lower the value when sustained traffic proves the link differs.
+    """
+    hints: dict[str, dict[str, int | str | None]] = {}
+    for target in mode.targets:
+        if target.clear or not target.shape.rate:
+            continue
+        bps = int(bandwidth_to_bps(target.shape.rate))
+        if target.side == "both":
+            hints[target.path] = {"tx_bps": bps, "rx_bps": bps, "source": "lab-network-mode"}
+        elif target.side == "local":
+            hints[target.path] = {"tx_bps": bps, "source": "lab-network-mode"}
+        elif target.side == "remote":
+            hints[target.path] = {"rx_bps": bps, "source": "lab-network-mode"}
+    if not hints:
+        return
+    cache_file = Path(config.runtime_dir) / PATH_CAPACITY_CACHE_FILE
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    existing = _load_network_mode_capacity_cache(cache_file)
+    merged = merge_capacity_snapshots(existing, hints)
+    now = datetime.now(UTC).isoformat()
+    for capacity in merged.values():
+        if capacity.get("source") == "lab-network-mode":
+            capacity["updated_at"] = now
+    cache_file.write_text(
+        json.dumps(
+            {"schema_version": PATH_CAPACITY_CACHE_SCHEMA_VERSION, "updated_at": now, "paths": merged},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _load_network_mode_capacity_cache(cache_file: Path) -> dict[str, dict[str, int | str | None]]:
+    if not cache_file.exists():
+        return {}
+    try:
+        raw = json.loads(cache_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if raw.get("schema_version") != PATH_CAPACITY_CACHE_SCHEMA_VERSION:
+        return {}
+    paths = raw.get("paths")
+    if not isinstance(paths, dict):
+        return {}
+    return {str(path_name): path_data for path_name, path_data in paths.items() if isinstance(path_data, dict)}
 
 
 def apply_lab_sink_view_rates(

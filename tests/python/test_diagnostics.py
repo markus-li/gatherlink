@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
-from gatherlink.diagnostics.bus import drain_diagnostics_until_cancelled
+from gatherlink.diagnostics.bus import drain_diagnostics_in_background, drain_diagnostics_until_cancelled
 from gatherlink.diagnostics.sinks import JsonlDiagnosticSink
 
 
@@ -92,6 +93,22 @@ def test_rekey_event_factory_exports_stable_runtime_fact() -> None:
     assert event.details["next_receiver_index"] == 11
 
 
+def test_scheduler_decision_factory_exports_stable_scheduler_fact() -> None:
+    event = DiagnosticEvent.scheduler_decision(
+        node="node-a",
+        details={
+            "mode": "adaptive",
+            "selected_path": "path-a",
+            "paths": [{"path": "path-a", "health": "alive", "score": 100, "reasons": ["healthy"]}],
+        },
+    )
+
+    assert event.stable_code
+    assert event.code == "scheduler.decision"
+    assert event.kind == "scheduler"
+    assert event.details["selected_path"] == "path-a"
+
+
 def test_diagnostics_bus_drops_oldest_without_blocking() -> None:
     sink = MemorySink()
     bus = DiagnosticsBus(max_queue_size=2, sinks=[sink])
@@ -129,6 +146,19 @@ def test_async_diagnostics_drainer_flushes_until_cancelled() -> None:
         assert [event.message for event in sink.events] == ["async helper event"]
 
     asyncio.run(scenario())
+
+
+def test_sync_diagnostics_drainer_flushes_for_blocking_helpers() -> None:
+    sink = MemorySink()
+    bus = DiagnosticsBus(sinks=[sink])
+
+    with drain_diagnostics_in_background(bus, interval_seconds=0.01, drain_limit=1):
+        bus.publish(DiagnosticEvent.warning("blocking helper event"))
+        deadline = time.monotonic() + 1.0
+        while not sink.events and time.monotonic() < deadline:
+            time.sleep(0.01)
+
+    assert [event.message for event in sink.events] == ["blocking helper event"]
 
 
 def test_jsonl_sink_writes_one_event_per_line(tmp_path) -> None:

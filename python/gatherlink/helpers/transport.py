@@ -37,7 +37,7 @@ class HelperStreamTransport:
 
 
 class UnconfiguredGatherlinkStreamTransport(HelperStreamTransport):
-    """Production placeholder that refuses direct TCP until a Gatherlink service adapter is supplied."""
+    """Fail-closed helper transport used until a Gatherlink service adapter is supplied."""
 
     async def open_stream(self, target: HelperStreamTarget, *, timeout_seconds: float) -> HelperStream:
         """Fail loudly instead of silently bypassing Gatherlink transport."""

@@ -1,5 +1,5 @@
 """
-Operational readiness checks for Gatherlink v0.9.
+Operational readiness checks for Gatherlink.
 
 The doctor command is intentionally a Python control-plane tool. It validates
 operator-facing facts such as config readability, diagnostics JSONL shape,
@@ -11,7 +11,10 @@ policy decisions.
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,14 @@ from gatherlink.diagnostics.events import DiagnosticEvent
 from gatherlink.persistence.store import GatherlinkStatePaths, PersistentStateStore, redact_secrets
 from gatherlink.runtime.plan import runtime_warnings
 from gatherlink.runtime.services import ServiceRegistry
+
+DEFAULT_GATHERLINK_LISTEN_PORT = 53820
+COMMON_WIREGUARD_PORT = 51820
+OPTIONAL_OPERATOR_TOOLS = {
+    "wg": "WireGuard helper inspection",
+    "wg-quick": "WireGuard helper lifecycle",
+    "traefik": "QUIC/H3 carrier proxy labs",
+}
 
 
 @dataclass
@@ -77,19 +88,28 @@ def doctor(
     ),
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable doctor results."),
 ) -> None:
-    """Run local Gatherlink v0.9 readiness checks."""
+    """Run local Gatherlink readiness checks."""
     checks: list[DoctorCheck] = [
         _check_python_runtime(),
         _check_rust_binding(),
+        _check_package_versions(Path.cwd()),
         _check_state_layout(state_dir),
         _check_service_registry(service_registry),
+        _check_release_hygiene(Path.cwd()),
+        _check_optional_tools(),
     ]
     checks.extend(_check_config(path) for path in config_paths or [])
     checks.extend(_check_diagnostics_jsonl(path) for path in diagnostics_jsonl or [])
     if release_artifacts is not None:
         checks.append(_check_release_artifacts(release_artifacts))
 
-    payload = {"ok": all(check.ok for check in checks), "checks": [check.export_dict() for check in checks]}
+    payload = {
+        "schema_version": 1,
+        "tool": "gatherlink doctor",
+        "ok": all(check.ok for check in checks),
+        "check_count": len(checks),
+        "checks": [check.export_dict() for check in checks],
+    }
     if json_output:
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
     else:
@@ -130,6 +150,57 @@ def _check_rust_binding() -> DoctorCheck:
         message="Rust dataplane binding is importable" if not missing else "Rust binding is missing expected symbols",
         details={"module": "gatherlink_pybindings", "missing_symbols": missing},
     )
+
+
+def _check_package_versions(repo_root: Path) -> DoctorCheck:
+    """Check that Python and Rust package manifests advertise one release version."""
+    manifest_paths = [repo_root / "pyproject.toml"]
+    manifest_paths.extend(sorted((repo_root / "crates").glob("*/Cargo.toml")))
+    versions: dict[str, str] = {}
+    problems: list[str] = []
+
+    for manifest in manifest_paths:
+        try:
+            data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        except OSError as exc:
+            problems.append(f"cannot read {manifest}: {type(exc).__name__}")
+            continue
+        except tomllib.TOMLDecodeError as exc:
+            problems.append(f"cannot parse {manifest}: {exc}")
+            continue
+
+        label = str(manifest.relative_to(repo_root))
+        version = _manifest_version(data)
+        if version is None:
+            problems.append(f"missing package version: {label}")
+        else:
+            versions[label] = version
+
+    unique_versions = sorted(set(versions.values()))
+    if len(unique_versions) > 1:
+        problems.append(f"manifest versions differ: {', '.join(unique_versions)}")
+
+    return DoctorCheck(
+        name="package.versions",
+        ok=not problems,
+        message=(
+            f"package manifests agree on {unique_versions[0]}"
+            if not problems and unique_versions
+            else "package manifest versions need attention"
+        ),
+        details={"repo_root": str(repo_root), "versions": versions, "problems": problems},
+    )
+
+
+def _manifest_version(data: dict[str, Any]) -> str | None:
+    """Extract a version from Python or Rust manifest TOML data."""
+    project = data.get("project")
+    if isinstance(project, dict) and isinstance(project.get("version"), str):
+        return project["version"]
+    package = data.get("package")
+    if isinstance(package, dict) and isinstance(package.get("version"), str):
+        return package["version"]
+    return None
 
 
 def _check_state_layout(state_dir: Path | None) -> DoctorCheck:
@@ -210,6 +281,74 @@ def _check_service_registry(service_registry: Path | None) -> DoctorCheck:
     )
 
 
+def _check_release_hygiene(repo_root: Path) -> DoctorCheck:
+    """
+    Check tracked repository files for release-blocking private/local artifacts.
+
+    Local `.gatherlink` state is expected during labs, so this check only looks
+    at tracked files. That keeps doctor useful on active developer machines
+    without hiding accidental commits of inventories, secrets, or generated
+    reports.
+    """
+    tracked_files = _tracked_repo_files(repo_root)
+    problems: list[str] = []
+    for tracked in tracked_files:
+        lower = tracked.lower()
+        parts = Path(tracked).parts
+        if parts and parts[0] == ".gatherlink":
+            problems.append(f"tracked local state path: {tracked}")
+        if any(part in {".ssh", ".gnupg"} for part in parts):
+            problems.append(f"tracked private directory path: {tracked}")
+        if _looks_like_secret_artifact(tracked):
+            allowed_docs_or_tests = tracked.startswith(("docs/", "tests/")) or tracked.endswith(".example.env")
+            if not allowed_docs_or_tests:
+                problems.append(f"secret-like tracked path needs review: {tracked}")
+        if tracked.startswith("docs/reports/") and (
+            lower.endswith(".jsonl") or "/hyperv-" in lower or "acceptance/" in lower
+        ):
+            problems.append(f"generated report appears tracked: {tracked}")
+
+    return DoctorCheck(
+        name="release.hygiene",
+        ok=not problems,
+        message="tracked release hygiene looks clean" if not problems else "tracked release hygiene needs attention",
+        details={
+            "repo_root": str(repo_root),
+            "tracked_files_checked": len(tracked_files),
+            "problems": problems,
+        },
+    )
+
+
+def _tracked_repo_files(repo_root: Path) -> list[str]:
+    """Return Git-tracked files when available, otherwise an empty list."""
+    if not (repo_root / ".git").exists():
+        return []
+    try:
+        result = subprocess.run(
+            ["git", "ls-files"],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _looks_like_secret_artifact(tracked: str) -> bool:
+    """Return whether a tracked path looks like private material, not code about secrets."""
+    path = Path(tracked)
+    lower_name = path.name.lower()
+    lower = tracked.lower()
+    secret_suffixes = (".pem", ".key", ".p12", ".pfx", ".age", ".gpg")
+    if lower_name.endswith(secret_suffixes):
+        return True
+    return any(marker in lower for marker in ("private-key", "identity-key", "authorized_keys", "known_hosts"))
+
+
 def _check_config(path: Path) -> DoctorCheck:
     """Validate one config and expand it into runtime state."""
     try:
@@ -227,6 +366,7 @@ def _check_config(path: Path) -> DoctorCheck:
             },
         )
     warnings = runtime_warnings(runtime_config)
+    warnings.extend(_config_operator_warnings(runtime_config))
     return DoctorCheck(
         name="config.validate",
         ok=True,
@@ -239,9 +379,123 @@ def _check_config(path: Path) -> DoctorCheck:
             "security_source_mode": runtime_config.security.source_mode,
             "services": len(runtime_config.services),
             "paths": len(runtime_config.paths),
+            "operator_facts": _config_operator_facts(runtime_config),
             "warnings": warnings,
         },
     )
+
+
+def _check_optional_tools() -> DoctorCheck:
+    """
+    Report optional host tools without failing readiness.
+
+    These tools are not core Gatherlink dependencies. Doctor still reports them
+    because missing `wg`, `wg-quick`, or Traefik explains why a helper or carrier
+    lab cannot run on a given host.
+    """
+    tools = {
+        name: {"purpose": purpose, "path": shutil.which(name)}
+        for name, purpose in sorted(OPTIONAL_OPERATOR_TOOLS.items())
+    }
+    missing = [name for name, facts in tools.items() if facts["path"] is None]
+    message = "optional operator tools available" if not missing else f"optional tools missing: {', '.join(missing)}"
+    return DoctorCheck(
+        name="operator.optional_tools",
+        ok=True,
+        message=message,
+        details={"tools": tools, "missing": missing},
+    )
+
+
+def _config_operator_facts(runtime_config: Any) -> dict[str, Any]:
+    """Return listener and carrier facts useful for operator review."""
+    path_binds = [
+        {
+            "path": path.name,
+            "carrier": path.carrier,
+            "transport_bind": path.transport_bind,
+            "transport_remote": path.transport_remote,
+            "carrier_max_datagram_size": path.carrier_max_datagram_size,
+            "effective_datagram_mtu": _path_effective_datagram_mtu(path, runtime_config.security.packet_overhead),
+            "requires_python_carrier_supervision": path.carrier != "udp",
+        }
+        for path in runtime_config.paths
+    ]
+    service_listens = [
+        {
+            "service": service.name,
+            "listen": service.listen,
+            "target": service.target,
+            "return_mode": service.return_mode,
+        }
+        for service in runtime_config.services
+    ]
+    return {
+        "default_gatherlink_udp_port": DEFAULT_GATHERLINK_LISTEN_PORT,
+        "wireguard_common_udp_port": COMMON_WIREGUARD_PORT,
+        "path_binds": path_binds,
+        "service_listens": service_listens,
+    }
+
+
+def _path_effective_datagram_mtu(path: Any, packet_overhead: int) -> int:
+    """Return the operator-visible payload ceiling after local carrier/security overhead."""
+    carrier_ceiling = path.carrier_max_datagram_size or path.scheduler.mtu
+    return max(0, min(path.scheduler.mtu, carrier_ceiling) - packet_overhead)
+
+
+def _config_operator_warnings(runtime_config: Any) -> list[str]:
+    """
+    Return non-fatal operator warnings for common local port mistakes.
+
+    This is intentionally a check, not policy. Gatherlink endpoints are
+    configurable and doctor must not mutate the host or reject deliberate labs.
+    """
+    warnings: list[str] = []
+    endpoints: list[tuple[str, str]] = []
+    for path in runtime_config.paths:
+        if path.transport_bind:
+            endpoints.append((f"path:{path.name}", path.transport_bind))
+        if path.carrier != "udp":
+            warnings.extend(_carrier_config_warnings(path, role=runtime_config.role))
+    for service in runtime_config.services:
+        if service.listen:
+            endpoints.append((f"service:{service.name}", service.listen))
+
+    seen: dict[str, str] = {}
+    for owner, endpoint in endpoints:
+        previous = seen.get(endpoint)
+        if previous is not None:
+            warnings.append(f"duplicate local endpoint {endpoint} used by {previous} and {owner}")
+        else:
+            seen[endpoint] = owner
+        port = _endpoint_port(endpoint)
+        if port == COMMON_WIREGUARD_PORT and owner.startswith("path:"):
+            warnings.append(
+                f"{owner} binds UDP {COMMON_WIREGUARD_PORT}, which commonly belongs to WireGuard; "
+                f"Gatherlink carrier listeners usually use UDP {DEFAULT_GATHERLINK_LISTEN_PORT} or explicit lab ports"
+            )
+    return warnings
+
+
+def _carrier_config_warnings(path: Any, *, role: str) -> list[str]:
+    """Return doctor warnings for standard carriers that need Python supervision."""
+    warnings = [
+        f"path:{path.name} uses {path.carrier}; Python carrier supervision must start before Rust receives a local UDP endpoint"
+    ]
+    if not path.transport_bind:
+        warnings.append(f"path:{path.name} uses {path.carrier} but has no transport_bind for the carrier listener")
+    if role == "client" and not path.transport_remote:
+        warnings.append(f"path:{path.name} uses {path.carrier} but client configs need transport_remote to connect")
+    return warnings
+
+
+def _endpoint_port(endpoint: str) -> int | None:
+    """Parse the final numeric port from IPv4, hostname, or bracketed IPv6 endpoints."""
+    try:
+        return int(endpoint.rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        return None
 
 
 def _check_diagnostics_jsonl(path: Path) -> DoctorCheck:
@@ -274,7 +528,7 @@ def _check_diagnostics_jsonl(path: Path) -> DoctorCheck:
 
 
 def _check_release_artifacts(path: Path) -> DoctorCheck:
-    """Validate that a prepared release artifact directory has the expected v0.9.1 shape."""
+    """Validate that a prepared release artifact directory has the expected release shape."""
     expected_dirs = {
         "python-wheel": path / "python-wheel",
         "rust-binaries": path / "rust-binaries",

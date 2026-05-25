@@ -28,7 +28,7 @@
       "client_address": "10.81.1.1",
       "server_address": "10.81.1.2",
       "subnet": "10.81.1.0/30",
-      "default_max_speed": "50mbit",
+      "default_max_speed": "300mbit",
       "shape": {
         "rate": "50mbit"
       }
@@ -39,7 +39,7 @@
       "client_address": "10.81.2.1",
       "server_address": "10.81.2.2",
       "subnet": "10.81.2.0/30",
-      "default_max_speed": "50mbit",
+      "default_max_speed": "500mbit",
       "shape": {
         "rate": "50mbit"
       }
@@ -50,7 +50,7 @@
       "client_address": "10.81.3.1",
       "server_address": "10.81.3.2",
       "subnet": "10.81.3.0/30",
-      "default_max_speed": "50mbit",
+      "default_max_speed": "700mbit",
       "shape": {
         "rate": "50mbit"
       }
@@ -115,6 +115,177 @@
           "side": "both",
           "shape": {
             "rate": "50mbit"
+          }
+        }
+      ]
+    },
+    "acceptance-300-500-700": {
+      "description": "Hard three-path acceptance profile: 300/500/700mbit with pressure intended around 1.55gbit.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "300mbit",
+            "limit": 131072
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "500mbit",
+            "limit": 131072
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "700mbit",
+            "limit": 131072
+          }
+        }
+      ]
+    },
+    "acceptance-uneven-high": {
+      "description": "Higher uneven local-lab profile for scheduler scaling: 600/900/1300mbit with pressure intended around 2.9gbit.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "600mbit",
+            "limit": 4096
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "900mbit",
+            "limit": 4096
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "1300mbit",
+            "limit": 4096
+          }
+        }
+      ]
+    },
+    "realworld-fiber-plus-5g": {
+      "description": "1gbit home fiber facsimile where useful throughput is closer to 800mbit plus two 5G-style links; useful delivery pressure intended around 950mbit.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "800mbit",
+            "delay": "12ms",
+            "jitter": "3ms",
+            "limit": 4096
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "160mbit",
+            "delay": "45ms",
+            "jitter": "15ms",
+            "loss": "0.2%",
+            "limit": 2048
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "85mbit",
+            "delay": "70ms",
+            "jitter": "25ms",
+            "loss": "0.5%",
+            "limit": 2048
+          }
+        }
+      ]
+    },
+    "realworld-starlink-plus-5g": {
+      "description": "Starlink plus one active 5G router and one weak standby link; useful delivery pressure intended around 250mbit.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "180mbit",
+            "delay": "45ms",
+            "jitter": "25ms",
+            "loss": "0.3%",
+            "limit": 2048
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "120mbit",
+            "delay": "55ms",
+            "jitter": "20ms",
+            "loss": "0.6%",
+            "limit": 2048
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "15mbit",
+            "delay": "95ms",
+            "jitter": "35ms",
+            "loss": "1%",
+            "limit": 512
+          }
+        }
+      ]
+    },
+    "realworld-starlink-plus-2x5g": {
+      "description": "Starlink plus two 5G routers with different latency and jitter; useful delivery pressure intended around 350mbit.",
+      "targets": [
+        {
+          "path": "path-a",
+          "side": "both",
+          "shape": {
+            "rate": "180mbit",
+            "delay": "45ms",
+            "jitter": "25ms",
+            "loss": "0.3%",
+            "limit": 2048
+          }
+        },
+        {
+          "path": "path-b",
+          "side": "both",
+          "shape": {
+            "rate": "140mbit",
+            "delay": "55ms",
+            "jitter": "20ms",
+            "loss": "0.6%",
+            "limit": 2048
+          }
+        },
+        {
+          "path": "path-c",
+          "side": "both",
+          "shape": {
+            "rate": "90mbit",
+            "delay": "80ms",
+            "jitter": "30ms",
+            "loss": "0.8%",
+            "limit": 2048
           }
         }
       ]

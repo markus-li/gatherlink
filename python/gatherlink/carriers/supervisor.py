@@ -9,6 +9,8 @@ from threading import Event, Thread
 
 from gatherlink.carriers.quic_datagram import CarrierAdapterConfig, CarrierMode, QuicDatagramCarrierAdapter
 from gatherlink.config.runtime import RuntimeConfig, RuntimePathConfig
+from gatherlink.diagnostics.bus import DiagnosticsBus
+from gatherlink.diagnostics.events import DiagnosticEvent
 
 
 @dataclass(frozen=True)
@@ -31,8 +33,9 @@ class CarrierSupervisor:
     local UDP endpoints before the Rust DTO bridge sees it.
     """
 
-    def __init__(self, runtime_config: RuntimeConfig) -> None:
+    def __init__(self, runtime_config: RuntimeConfig, diagnostics: DiagnosticsBus | None = None) -> None:
         self._runtime_config = runtime_config
+        self._diagnostics = diagnostics
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: Thread | None = None
         self._ready = Event()
@@ -84,7 +87,11 @@ class CarrierSupervisor:
                 if path.carrier == "udp":
                     paths.append(path)
                     continue
-                adapter, updated_path, binding = await self._start_path_adapter(path)
+                try:
+                    adapter, updated_path, binding = await self._start_path_adapter(path)
+                except Exception as exc:
+                    self._publish_carrier_start_failed(path, exc)
+                    raise
                 self._adapters.append(adapter)
                 self.bindings.append(binding)
                 paths.append(updated_path)
@@ -111,6 +118,8 @@ class CarrierSupervisor:
             quic_remote=None if is_listener else _parse_socket_addr(_require_remote(path)),
             quic_local_port=0 if is_listener else original_bind[1],
             max_datagram_frame_size=path.carrier_max_datagram_size or 1350,
+            path_name=path.name,
+            diagnostic_callback=self._diagnostics.publish if self._diagnostics is not None else None,
         )
         adapter = QuicDatagramCarrierAdapter(adapter_config)
         await adapter.start()
@@ -139,6 +148,28 @@ class CarrierSupervisor:
         while self._adapters:
             adapter = self._adapters.pop()
             await adapter.stop()
+
+    def _publish_carrier_start_failed(self, path: RuntimePathConfig, exc: Exception) -> None:
+        """Publish fail-closed carrier startup diagnostics before re-raising."""
+        if self._diagnostics is None:
+            return
+        self._diagnostics.publish(
+            DiagnosticEvent.carrier_event(
+                code="carrier.connect_failed",
+                message=f"{path.carrier} carrier failed to start",
+                path=path.name,
+                severity="error",
+                details={
+                    "carrier": path.carrier,
+                    "transport_bind": path.transport_bind,
+                    "transport_remote": path.transport_remote,
+                    "error": str(exc),
+                    # Keep this explanatory so operators know this is a
+                    # configuration/lifecycle failure, not Rust dataplane policy.
+                    "source": "carrier_supervisor",
+                },
+            )
+        )
 
 
 def _require_remote(path: RuntimePathConfig) -> str:

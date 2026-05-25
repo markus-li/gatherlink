@@ -52,8 +52,10 @@ class DnsResolverPolicy:
     serve_stale_seconds: int = 300
 
     def ordered_upstreams(self) -> list[DnsUpstream]:
-        """Return upstreams in the order this local resolver should try them."""
-        # TODO(dns-policy): Add actual racing and path-aware scoring here. The
-        # current deterministic order keeps behavior easy to test while
-        # preserving the policy surface for direct/tunnel/DoH choices.
+        """Return upstreams in deterministic fallback order."""
         return list(self.upstreams)
+
+    @property
+    def races_upstreams(self) -> bool:
+        """Return whether this policy should query candidates concurrently."""
+        return self.strategy == "race_first_valid" and len(self.upstreams) > 1

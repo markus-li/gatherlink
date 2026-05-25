@@ -7,6 +7,7 @@ from pathlib import Path
 from gatherlink.cli.main import app
 from gatherlink.config.expansion import expand_config
 from gatherlink.config.validation import validate_config_file
+from gatherlink.helpers.traffic_split import TrafficSplitPlan, execute_traffic_split_commands, render_commands
 from gatherlink.helpers.wireguard import (
     derive_public_key,
     render_peer_endpoint_snippet,
@@ -100,3 +101,88 @@ def test_wireguard_plan_cli_emits_structured_diagnostics(tmp_path) -> None:
     assert event["service"] == "wireguard-main"
     assert event["details"]["plan"]["wireguard_local_listen"] == "127.0.0.1:51820"
     assert "peer-public-key" not in json.dumps(event)
+
+
+def test_wireguard_dual_profile_expands_to_two_transport_plans() -> None:
+    runtime = expand_config(validate_config_file(EXAMPLES / "wireguard-dual-profile-client.json"))
+
+    plans = wireguard_transport_plans(runtime)
+
+    assert [plan.service for plan in plans] == ["wireguard-stable", "wireguard-fast"]
+    assert [plan.traffic_class for plan in plans] == ["stable", "fast"]
+    assert plans[0].profile == "dual_profile"
+    assert plans[0].scheduler_guidance.startswith("flowlet_adaptive")
+    assert plans[1].scheduler_guidance.startswith("capacity_aware")
+
+
+def test_wireguard_plan_cli_renders_dual_profile_guidance() -> None:
+    result = CliRunner().invoke(
+        app, ["helpers", "wireguard-plan", str(EXAMPLES / "wireguard-dual-profile-client.json")]
+    )
+
+    assert result.exit_code == 0
+    assert "service: wireguard-stable" in result.output
+    assert "profile: dual_profile traffic_class: stable" in result.output
+    assert "service: wireguard-fast" in result.output
+    assert "profile: dual_profile traffic_class: fast" in result.output
+    assert "Endpoint = 127.0.0.1:55180 # stable profile" in result.output
+    assert "Endpoint = 127.0.0.1:55181 # fast profile" in result.output
+
+
+def test_traffic_split_plan_is_reviewable_and_reversible() -> None:
+    plan = TrafficSplitPlan(stable_interface="wg-stable", fast_interface="wg-fast")
+
+    apply_text = render_commands(plan.apply_commands())
+    revert_text = render_commands(plan.revert_commands())
+    apply_commands = plan.apply_commands()
+
+    assert "nft add table inet gatherlink_split" in apply_text
+    assert "meta l4proto udp meta mark set 0x5182" in apply_text
+    assert apply_commands[3][-10:-2] == ["meta", "l4proto", "!=", "udp", "meta", "mark", "set", "0x5181"]
+    assert "gatherlink dual-wireguard split: udp-fast" in apply_text
+    assert "gatherlink dual-wireguard split: stable-default" in apply_text
+    assert "ip route replace default dev wg-stable table 51881" in apply_text
+    assert "nft delete table inet gatherlink_split" in revert_text
+
+
+def test_traffic_split_cli_defaults_to_dry_run() -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "helpers",
+            "traffic-split",
+            "--stable-interface",
+            "wg-stable",
+            "--fast-interface",
+            "wg-fast",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "sudo nft add table inet gatherlink_split" in result.output
+    assert "traffic split commands executed" not in result.output
+
+
+def test_traffic_split_execute_uses_debian_backend_runner() -> None:
+    class FakeRunner:
+        def __init__(self) -> None:
+            self.commands: list[list[str]] = []
+
+        def run(self, command, *, check=True):
+            self.commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    class FakeBackend:
+        def __init__(self) -> None:
+            self.runner = FakeRunner()
+
+        def command_runner(self):
+            return self.runner
+
+    backend = FakeBackend()
+    commands = [["sudo", "true"]]
+
+    results = execute_traffic_split_commands(commands, backend=backend)
+
+    assert results[0].returncode == 0
+    assert backend.runner.commands == commands

@@ -11,8 +11,10 @@ control behavior must keep moving.
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from typing import Protocol
 
 from gatherlink.diagnostics.events import DiagnosticEvent
@@ -121,3 +123,39 @@ async def drain_diagnostics_until_cancelled(
     except asyncio.CancelledError:
         bus.drain()
         raise
+
+
+@contextmanager
+def drain_diagnostics_in_background(
+    bus: DiagnosticsBus | None,
+    *,
+    interval_seconds: float = 0.25,
+    drain_limit: int = 256,
+) -> Iterator[None]:
+    """
+    Periodically flush diagnostics for synchronous foreground services.
+
+    Some helper libraries expose a blocking ``run`` method rather than an async
+    service loop. This context keeps those helpers on the same non-blocking
+    diagnostics model as async services: producers enqueue structured facts,
+    and a tiny control-plane thread performs best-effort sink delivery away
+    from stream handling.
+    """
+    if bus is None:
+        yield
+        return
+
+    stop_event = threading.Event()
+
+    def drain_loop() -> None:
+        while not stop_event.wait(interval_seconds):
+            bus.drain(limit=drain_limit)
+
+    thread = threading.Thread(target=drain_loop, name="gatherlink-diagnostics-drain", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        thread.join(timeout=max(interval_seconds * 2, 0.5))
+        bus.drain()

@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "node": "client",
+  "peer": "relay",
+  "scheduler": {
+    "mode": "coordinated_adaptive"
+  },
+  "paths": [
+    {
+      "name": "wan1",
+      "interface": "eth1",
+      "scheduler": {
+        "tx_capacity_bps": 500000000,
+        "rx_capacity_bps": 500000000
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "wireguard-stable",
+      "listen": "127.0.0.1:55180",
+      "target": "127.0.0.1:51820",
+      "priority": "high",
+      "scheduler_poll_batch_packets": 128,
+      "scheduler_flowlet_idle_us": 50000,
+      "scheduler_flowlet_max_hold_us": 60000000
+    },
+    {
+      "name": "wireguard-fast",
+      "listen": "127.0.0.1:55181",
+      "target": "127.0.0.1:51821",
+      "priority": "bulk"
+    }
+  ],
+  "helpers": {
+    "wireguard": {
+      "enabled": true,
+      "mode": "dual_profile",
+      "stable_service": "wireguard-stable",
+      "fast_service": "wireguard-fast"
+    }
+  },
+  "security": {
+    "mode": "none"
+  }
+}

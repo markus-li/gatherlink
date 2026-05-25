@@ -10,6 +10,7 @@ from pathlib import Path
 import typer
 
 from gatherlink.lab.bundles import (
+    execute_lab_bundle_cleanup,
     generate_lab_bundle,
     is_lab_bundle_manifest,
     plan_lab_bundle_cleanup,
@@ -32,6 +33,7 @@ from gatherlink.lab.runtime import (
     request_lab_service_disable,
     run_rust_transport_smoke,
     run_shared_sink_transport_smoke,
+    run_standard_carrier_comparison,
     run_standard_carrier_proxy_smoke,
     run_standard_carrier_smoke,
     run_udp_forwarder,
@@ -410,6 +412,36 @@ def carrier_proxy_smoke(
     )
 
 
+@app.command("carrier-compare")
+def carrier_compare(
+    count: int = typer.Option(3, help="Number of packets to send in each direction per row."),
+    payload: str = typer.Option("gatherlink-carrier-compare", help="Opaque payload prefix to preserve."),
+    include_proxy: bool = typer.Option(False, help="Include Traefik UDP proxy rows when Traefik is available."),
+    traefik_bin: str | None = typer.Option(None, help="Path to the traefik binary when it is not on PATH."),
+    json_output: bool = typer.Option(False, "--json", help="Print the comparison report as JSON."),
+) -> None:
+    """Compare UDP, QUIC DATAGRAM, and HTTP/3 DATAGRAM carrier byte-preservation paths."""
+    report = run_standard_carrier_comparison(
+        count=count,
+        payload=payload,
+        include_proxy=include_proxy,
+        traefik_bin=traefik_bin,
+    )
+    if json_output:
+        typer.echo(json.dumps(report.export_dict(), indent=2, sort_keys=True))
+    else:
+        status = "ok" if report.ok else "failed"
+        typer.echo(f"lab carrier compare: {status} rows={len(report.rows)} count={report.count}")
+        for row in report.rows:
+            row_status = "ok" if row.ok else "failed"
+            typer.echo(
+                f"carrier={row.carrier} path={row.path} status={row_status} "
+                f"packets={row.packets} bytes={row.bytes} {row.detail}"
+            )
+    if not report.ok:
+        raise typer.Exit(1)
+
+
 @app.command("down")
 def down(path: Path) -> None:
     """Stop the background lab service."""
@@ -430,8 +462,20 @@ def cleanup(
         for command in cleanup_plan.commands:
             typer.echo(f"lab cleanup: command {command}")
         if execute:
-            typer.echo("lab cleanup: execute mode is intentionally not implemented for bundle manifests yet", err=True)
-            raise typer.Exit(1)
+            try:
+                results = execute_lab_bundle_cleanup(path)
+            except ValueError as exc:
+                typer.echo(f"lab cleanup: blocked {exc}", err=True)
+                raise typer.Exit(1) from exc
+            failed = False
+            for result in results:
+                status = "ok" if result.returncode == 0 else "failed"
+                typer.echo(f"lab cleanup: executed status={status} command {result.command}")
+                if result.stderr:
+                    typer.echo(result.stderr.strip(), err=True)
+                failed = failed or result.returncode != 0
+            if failed:
+                raise typer.Exit(1)
         return
 
     scenario = load_lab_scenario_file(path)

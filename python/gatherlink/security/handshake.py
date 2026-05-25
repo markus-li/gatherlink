@@ -24,6 +24,13 @@ from gatherlink.security.sessions import (
     generate_receiver_index,
 )
 
+HANDSHAKE_INIT_PACKET_TYPE = 0x10
+HANDSHAKE_RESPONSE_PACKET_TYPE = 0x11
+HANDSHAKE_COOKIE_REPLY_PACKET_TYPE = 0x12
+HANDSHAKE_MAC_LEN = 16
+HANDSHAKE_COOKIE_NONCE_LEN = 24
+HANDSHAKE_COOKIE_CIPHERTEXT_LEN = 32
+HANDSHAKE_COOKIE_REPLY_LEN = 1 + HANDSHAKE_MAC_LEN + HANDSHAKE_COOKIE_NONCE_LEN + HANDSHAKE_COOKIE_CIPHERTEXT_LEN
 HANDSHAKE_INIT_DOMAIN = "GATHERLINK_HANDSHAKE_INIT_V1"
 HANDSHAKE_RESPONSE_DOMAIN = "GATHERLINK_HANDSHAKE_RESPONSE_V1"
 HANDSHAKE_SECRET_DOMAIN = b"GATHERLINK_AUTH_HANDSHAKE_SECRET_V1"
@@ -75,6 +82,76 @@ class AcceptedHandshake:
 
     response: SignedDocument
     session: AuthenticatedSessionPlan
+
+
+@dataclass(frozen=True)
+class HandshakePacket:
+    """Version-stable handshake packet shape before full cookie enforcement."""
+
+    packet_type: int
+    noise_message: bytes
+    mac1: bytes
+    mac2: bytes
+
+
+@dataclass(frozen=True)
+class CookieReplyPacket:
+    """Fixed cookie-reply packet shape reserved for anti-DoS retry tokens."""
+
+    request_mac1: bytes
+    nonce: bytes
+    encrypted_cookie: bytes
+
+
+def encode_handshake_packet(packet_type: int, noise_message: bytes, *, mac1: bytes, mac2: bytes | None = None) -> bytes:
+    """
+    Encode a v0.9.2-compatible handshake packet with a fixed MAC trailer.
+
+    Full cookie enforcement remains future work, but the wire shape is fixed now
+    so a future anti-DoS rollout does not need a migration of the handshake
+    packet envelope.
+    """
+    if packet_type not in {HANDSHAKE_INIT_PACKET_TYPE, HANDSHAKE_RESPONSE_PACKET_TYPE}:
+        raise ValueError("handshake packet_type must be 0x10 or 0x11")
+    _validate_fixed_bytes("mac1", mac1, HANDSHAKE_MAC_LEN)
+    mac2 = mac2 if mac2 is not None else bytes(HANDSHAKE_MAC_LEN)
+    _validate_fixed_bytes("mac2", mac2, HANDSHAKE_MAC_LEN)
+    return bytes([packet_type]) + noise_message + mac1 + mac2
+
+
+def decode_handshake_packet(packet: bytes) -> HandshakePacket:
+    """Decode a v0.9.2-compatible initiation or response packet shape."""
+    if len(packet) < 1 + (HANDSHAKE_MAC_LEN * 2):
+        raise ValueError("handshake packet is too short")
+    packet_type = packet[0]
+    if packet_type not in {HANDSHAKE_INIT_PACKET_TYPE, HANDSHAKE_RESPONSE_PACKET_TYPE}:
+        raise ValueError("unsupported handshake packet_type")
+    noise_end = len(packet) - (HANDSHAKE_MAC_LEN * 2)
+    return HandshakePacket(
+        packet_type=packet_type,
+        noise_message=packet[1:noise_end],
+        mac1=packet[noise_end : noise_end + HANDSHAKE_MAC_LEN],
+        mac2=packet[noise_end + HANDSHAKE_MAC_LEN :],
+    )
+
+
+def encode_cookie_reply_packet(request_mac1: bytes, nonce: bytes, encrypted_cookie: bytes) -> bytes:
+    """Encode the reserved fixed cookie-reply packet shape."""
+    _validate_fixed_bytes("request_mac1", request_mac1, HANDSHAKE_MAC_LEN)
+    _validate_fixed_bytes("nonce", nonce, HANDSHAKE_COOKIE_NONCE_LEN)
+    _validate_fixed_bytes("encrypted_cookie", encrypted_cookie, HANDSHAKE_COOKIE_CIPHERTEXT_LEN)
+    return bytes([HANDSHAKE_COOKIE_REPLY_PACKET_TYPE]) + request_mac1 + nonce + encrypted_cookie
+
+
+def decode_cookie_reply_packet(packet: bytes) -> CookieReplyPacket:
+    """Decode the reserved fixed cookie-reply packet shape."""
+    if len(packet) != HANDSHAKE_COOKIE_REPLY_LEN or packet[:1] != bytes([HANDSHAKE_COOKIE_REPLY_PACKET_TYPE]):
+        raise ValueError("invalid cookie reply packet")
+    return CookieReplyPacket(
+        request_mac1=packet[1 : 1 + HANDSHAKE_MAC_LEN],
+        nonce=packet[1 + HANDSHAKE_MAC_LEN : 1 + HANDSHAKE_MAC_LEN + HANDSHAKE_COOKIE_NONCE_LEN],
+        encrypted_cookie=packet[-HANDSHAKE_COOKIE_CIPHERTEXT_LEN:],
+    )
 
 
 def create_handshake_initiation(
@@ -379,6 +456,11 @@ def _validate_handshake_lifetime(lifetime_seconds: int) -> None:
 def _validate_receiver_index(receiver_index: int) -> None:
     if receiver_index < 0 or receiver_index >= 2**32:
         raise ValueError("receiver_index must fit u32")
+
+
+def _validate_fixed_bytes(name: str, value: bytes, expected_len: int) -> None:
+    if len(value) != expected_len:
+        raise ValueError(f"{name} must be exactly {expected_len} bytes")
 
 
 def _handshake_transcript_hash(*, initiation_body: dict, response_body: dict) -> bytes:

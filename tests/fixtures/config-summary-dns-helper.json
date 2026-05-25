@@ -1,0 +1,42 @@
+{
+  "counts": {
+    "helpers": 1,
+    "paths": 0,
+    "security_sessions": 0,
+    "services": 0
+  },
+  "helpers": [
+    {
+      "enabled": true,
+      "kind": "dns",
+      "listen": "127.0.0.1:5353",
+      "service": null
+    }
+  ],
+  "node": "local",
+  "paths": [],
+  "peer": null,
+  "role": "client",
+  "runtime_model": "RuntimeConfig",
+  "scheduler": {
+    "active_paths": 0,
+    "disabled_paths": 0,
+    "draining_paths": 0,
+    "mode": "round_robin",
+    "path_count": 0
+  },
+  "schema_version": 1,
+  "security": {
+    "mode": "none",
+    "packet_overhead": 0,
+    "receiver_indexes": [
+      1
+    ],
+    "remote_receiver_indexes": [
+      1
+    ],
+    "session_count": 0,
+    "source_mode": "none"
+  },
+  "services": []
+}

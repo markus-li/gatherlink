@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -101,50 +102,124 @@ class DnsHelperResolver:
                 ),
             )
 
-        for upstream in self.policy.ordered_upstreams():
-            try:
-                response = self._query_upstream(query, upstream)
-            except (OSError, dns.exception.DNSException, NotImplementedError) as exc:
-                logger.debug("DNS helper upstream failed", extra={"upstream": upstream.authority(), "error": str(exc)})
-                self._publish_event(
-                    code="dns.upstream_failed",
-                    severity="warning",
-                    message="DNS helper upstream failed",
-                    qname=qname,
-                    qtype=dns.rdatatype.to_text(question.rdtype),
-                    upstream=upstream.authority(),
-                    error=str(exc),
-                )
-                continue
-
-            dnssec = evaluate_dnssec(response, self.policy.dnssec_mode)
-            if not dnssec.accepted:
-                self._publish_event(
-                    code="dns.dnssec_bogus",
-                    severity="warning",
-                    message="DNS helper rejected upstream response by DNSSEC policy",
-                    qname=qname,
-                    qtype=dns.rdatatype.to_text(question.rdtype),
-                    upstream=upstream.authority(),
-                    dnssec_status=dnssec.status,
-                    reason=dnssec.message,
-                )
-                return self._error_response(query, dns.rcode.SERVFAIL, dnssec.message, qname=qname, dnssec=dnssec)
-            response.id = query.id
-            if self.cache is not None:
-                self.cache.put(key, response, upstream=upstream.authority(), validation_status=dnssec.status)
-            return DnsResolutionResult(
-                response_wire=response.to_wire(),
-                diagnostic=DnsResolutionDiagnostic(
-                    cache="miss",
-                    upstream=upstream.authority(),
-                    qname=qname,
-                    qtype=dns.rdatatype.to_text(question.rdtype),
-                    dnssec=dnssec,
-                ),
-            )
-
+        if self.policy.races_upstreams:
+            result = self._resolve_by_race(query, qname, dns.rdatatype.to_text(question.rdtype), key)
+        else:
+            result = self._resolve_in_order(query, qname, dns.rdatatype.to_text(question.rdtype), key)
+        if result is not None:
+            return result
         return self._error_response(query, dns.rcode.SERVFAIL, "all configured DNS upstreams failed", qname=qname)
+
+    def _resolve_in_order(
+        self,
+        query: dns.message.Message,
+        qname: str,
+        qtype: str,
+        key: DnsCacheKey,
+    ) -> DnsResolutionResult | None:
+        """Try configured DNS upstreams deterministically until one response is accepted."""
+        for upstream in self.policy.ordered_upstreams():
+            result = self._query_and_accept(query, upstream, qname, qtype, key)
+            if result is not None:
+                return result
+        return None
+
+    def _resolve_by_race(
+        self,
+        query: dns.message.Message,
+        qname: str,
+        qtype: str,
+        key: DnsCacheKey,
+    ) -> DnsResolutionResult | None:
+        """
+        Query upstreams concurrently and return the first policy-valid response.
+
+        This is intentionally bounded by the configured upstream count and each
+        upstream's own timeout. Python owns this helper policy; Rust sees only
+        normal UDP service traffic when tunnel upstreams are used.
+        """
+        upstreams = self.policy.ordered_upstreams()
+        with ThreadPoolExecutor(max_workers=len(upstreams), thread_name_prefix="gatherlink-dns") as executor:
+            futures = {executor.submit(self._query_upstream, query, upstream): upstream for upstream in upstreams}
+            for future in as_completed(futures):
+                upstream = futures[future]
+                try:
+                    response = future.result()
+                except (OSError, dns.exception.DNSException, NotImplementedError) as exc:
+                    self._record_upstream_failure(upstream, qname, qtype, exc)
+                    continue
+                result = self._accept_response(query, response, upstream, qname, qtype, key)
+                if result is not None:
+                    return result
+        return None
+
+    def _query_and_accept(
+        self,
+        query: dns.message.Message,
+        upstream: DnsUpstream,
+        qname: str,
+        qtype: str,
+        key: DnsCacheKey,
+    ) -> DnsResolutionResult | None:
+        """Query one upstream and return a result only when policy accepts it."""
+        try:
+            response = self._query_upstream(query, upstream)
+        except (OSError, dns.exception.DNSException, NotImplementedError) as exc:
+            self._record_upstream_failure(upstream, qname, qtype, exc)
+            return None
+        return self._accept_response(query, response, upstream, qname, qtype, key)
+
+    def _accept_response(
+        self,
+        query: dns.message.Message,
+        response: dns.message.Message,
+        upstream: DnsUpstream,
+        qname: str,
+        qtype: str,
+        key: DnsCacheKey,
+    ) -> DnsResolutionResult | None:
+        """Apply DNSSEC policy and cache an accepted upstream response."""
+        dnssec = evaluate_dnssec(response, self.policy.dnssec_mode)
+        if not dnssec.accepted:
+            self._publish_event(
+                code="dns.dnssec_bogus",
+                severity="warning",
+                message="DNS helper rejected upstream response by DNSSEC policy",
+                qname=qname,
+                qtype=qtype,
+                upstream=upstream.authority(),
+                dnssec_status=dnssec.status,
+                reason=dnssec.message,
+            )
+            if self.policy.races_upstreams:
+                return None
+            return self._error_response(query, dns.rcode.SERVFAIL, dnssec.message, qname=qname, dnssec=dnssec)
+        response.id = query.id
+        if self.cache is not None:
+            self.cache.put(key, response, upstream=upstream.authority(), validation_status=dnssec.status)
+        return DnsResolutionResult(
+            response_wire=response.to_wire(),
+            diagnostic=DnsResolutionDiagnostic(
+                cache="miss",
+                upstream=upstream.authority(),
+                qname=qname,
+                qtype=qtype,
+                dnssec=dnssec,
+            ),
+        )
+
+    def _record_upstream_failure(self, upstream: DnsUpstream, qname: str, qtype: str, exc: Exception) -> None:
+        """Publish a structured upstream failure without stopping other candidates."""
+        logger.debug("DNS helper upstream failed", extra={"upstream": upstream.authority(), "error": str(exc)})
+        self._publish_event(
+            code="dns.upstream_failed",
+            severity="warning",
+            message="DNS helper upstream failed",
+            qname=qname,
+            qtype=qtype,
+            upstream=upstream.authority(),
+            error=str(exc),
+        )
 
     def _publish_event(self, *, code: str, message: str, severity: str = "info", **details: object) -> None:
         """Publish structured DNS helper facts without blocking resolution."""

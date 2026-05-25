@@ -27,6 +27,8 @@ DiagnosticEventKind = Literal[
     "drop",
     "helper",
     "runtime",
+    "carrier",
+    "scheduler",
 ]
 
 STABLE_EVENT_CODES: frozenset[str] = frozenset(
@@ -75,6 +77,7 @@ STABLE_EVENT_CODES: frozenset[str] = frozenset(
         "relay.unauthorized_next_hop",
         "runtime.start_failed",
         "runtime.shutdown",
+        "scheduler.decision",
         "service.bound",
         "socks.exit_denied",
         "socks.exit_unreachable",
@@ -281,6 +284,26 @@ class DiagnosticEvent(GatherlinkBaseModel):
         )
 
     @classmethod
+    def carrier_event(
+        cls,
+        *,
+        code: str,
+        message: str,
+        path: str | None = None,
+        severity: DiagnosticSeverity = "info",
+        details: dict[str, Any] | None = None,
+    ) -> DiagnosticEvent:
+        """Build a structured carrier lifecycle or datagram diagnostic."""
+        return cls(
+            code=code,
+            kind="carrier",
+            severity=severity,
+            message=message,
+            path=path,
+            details=details or {},
+        )
+
+    @classmethod
     def drop_event(
         cls,
         *,
@@ -322,6 +345,26 @@ class DiagnosticEvent(GatherlinkBaseModel):
             severity=severity,
             message=message,
             peer=peer,
+            details=details or {},
+        )
+
+    @classmethod
+    def scheduler_decision(
+        cls,
+        *,
+        node: str | None = None,
+        service: str | None = None,
+        message: str = "scheduler decision updated",
+        details: dict[str, Any] | None = None,
+    ) -> DiagnosticEvent:
+        """Build a Python-owned scheduler scoring/reapply diagnostic."""
+        return cls(
+            code="scheduler.decision",
+            kind="scheduler",
+            severity="debug",
+            message=message,
+            node=node,
+            service=service,
             details=details or {},
         )
 

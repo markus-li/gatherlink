@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "node": "relay",
+  "role": "server",
+  "services": [
+    {
+      "name": "wireguard-stable",
+      "target": "127.0.0.1:51820",
+      "return_mode": "peer-scoped-source",
+      "priority": "high",
+      "scheduler_poll_batch_packets": 128,
+      "scheduler_flowlet_idle_us": 50000,
+      "scheduler_flowlet_max_hold_us": 60000000
+    },
+    {
+      "name": "wireguard-fast",
+      "target": "127.0.0.1:51821",
+      "return_mode": "peer-scoped-source",
+      "priority": "bulk"
+    }
+  ],
+  "security": {
+    "mode": "none"
+  }
+}

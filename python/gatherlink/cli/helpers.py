@@ -10,7 +10,7 @@ import typer
 
 from gatherlink.config.expansion import expand_config
 from gatherlink.config.validation import validate_config_file
-from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
+from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus, drain_diagnostics_in_background
 from gatherlink.diagnostics.sinks import JsonlDiagnosticSink
 from gatherlink.helpers.dns import DnsHelperResolver, DnsResolverPolicy, DnsUdpServer, DnsUpstream
 from gatherlink.helpers.dns.policies import DnssecMode, DnsUpstreamKind
@@ -18,6 +18,7 @@ from gatherlink.helpers.relay_fabric import discover_relays_from_file
 from gatherlink.helpers.socks5 import GatherlinkServiceExitConnector, run_lab_direct_socks5_server, run_socks5_server
 from gatherlink.helpers.status_http import StatusHttpConfig, run_status_http_server
 from gatherlink.helpers.tcp_forward import TcpForwardConfig, run_lab_direct_tcp_forwarder, run_tcp_forwarder
+from gatherlink.helpers.traffic_split import TrafficSplitPlan, execute_traffic_split_commands, render_commands
 from gatherlink.helpers.udp_stream import GatherlinkUdpStreamTransport, run_gatherlink_udp_stream_exit
 from gatherlink.helpers.wireguard import render_peer_endpoint_snippet, wireguard_tool_status, wireguard_transport_plans
 
@@ -131,14 +132,15 @@ def socks5_serve(
     diagnostics_bus = DiagnosticsBus(sinks=[sink]) if sink is not None else None
     if lab_direct:
         try:
-            run_lab_direct_socks5_server(
-                listen_host=listen_host,
-                listen_port=listen_port,
-                allowed_hosts=allow_host,
-                allowed_ports=allow_port,
-                auth=(username, password) if username is not None and password is not None else None,
-                diagnostics_bus=diagnostics_bus,
-            )
+            with drain_diagnostics_in_background(diagnostics_bus):
+                run_lab_direct_socks5_server(
+                    listen_host=listen_host,
+                    listen_port=listen_port,
+                    allowed_hosts=allow_host,
+                    allowed_ports=allow_port,
+                    auth=(username, password) if username is not None and password is not None else None,
+                    diagnostics_bus=diagnostics_bus,
+                )
         finally:
             if diagnostics_bus is not None:
                 diagnostics_bus.drain()
@@ -148,15 +150,16 @@ def socks5_serve(
     service_host, service_port = _parse_host_port(gatherlink_service)
     exit_connector = GatherlinkServiceExitConnector(GatherlinkUdpStreamTransport(service_host, service_port))
     try:
-        run_socks5_server(
-            listen_host=listen_host,
-            listen_port=listen_port,
-            allowed_hosts=allow_host,
-            allowed_ports=allow_port,
-            auth=(username, password) if username is not None and password is not None else None,
-            exit_connector=exit_connector,
-            diagnostics_bus=diagnostics_bus,
-        )
+        with drain_diagnostics_in_background(diagnostics_bus):
+            run_socks5_server(
+                listen_host=listen_host,
+                listen_port=listen_port,
+                allowed_hosts=allow_host,
+                allowed_ports=allow_port,
+                auth=(username, password) if username is not None and password is not None else None,
+                exit_connector=exit_connector,
+                diagnostics_bus=diagnostics_bus,
+            )
     finally:
         if diagnostics_bus is not None:
             diagnostics_bus.drain()
@@ -186,8 +189,10 @@ def wireguard_plan(
     for plan in plans:
         diagnostics = plan.diagnostics()
         typer.echo(f"service: {diagnostics['service']}")
+        typer.echo(f"profile: {diagnostics['profile']} traffic_class: {diagnostics['traffic_class']}")
         typer.echo(f"wireguard local listen: {diagnostics['wireguard_local_listen']}")
         typer.echo(f"wireguard peer endpoint: {diagnostics['wireguard_peer_endpoint']}")
+        typer.echo(f"scheduler guidance: {diagnostics['scheduler_guidance']}")
         typer.echo(f"wg tool: {tools['wg'] or 'not found'}")
         typer.echo(f"wg-quick tool: {tools['wg_quick'] or 'not found'}")
         typer.echo(render_peer_endpoint_snippet(plan, peer_public_key=peer_public_key))
@@ -205,6 +210,51 @@ def wireguard_plan(
         diagnostics_bus.drain()
     if sink is not None:
         sink.close()
+
+
+@app.command("traffic-split")
+def traffic_split(
+    stable_interface: str = typer.Option(..., "--stable-interface", help="WireGuard interface for TCP/default flows."),
+    fast_interface: str = typer.Option(
+        ..., "--fast-interface", help="WireGuard interface for UDP/high-throughput flows."
+    ),
+    stable_table: int = typer.Option(51881, "--stable-table", help="Policy routing table for stable/default flows."),
+    fast_table: int = typer.Option(51882, "--fast-table", help="Policy routing table for UDP/high-throughput flows."),
+    stable_mark: int = typer.Option(0x5181, "--stable-mark", help="Firewall mark for stable/default flows."),
+    fast_mark: int = typer.Option(0x5182, "--fast-mark", help="Firewall mark for UDP/high-throughput flows."),
+    apply: bool = typer.Option(False, "--apply", help="Apply the generated Debian nft/ip policy-routing rules."),
+    revert: bool = typer.Option(False, "--revert", help="Remove the generated Debian nft/ip policy-routing rules."),
+) -> None:
+    """
+    Plan or apply the advanced dual-WireGuard traffic split.
+
+    This is intentionally explicit and noisy: it changes local firewall/routing
+    policy and should be reviewed before production use.
+    """
+    if apply and revert:
+        raise typer.BadParameter("--apply and --revert are mutually exclusive")
+    plan = TrafficSplitPlan(
+        stable_interface=stable_interface,
+        fast_interface=fast_interface,
+        stable_table=stable_table,
+        fast_table=fast_table,
+        stable_mark=stable_mark,
+        fast_mark=fast_mark,
+    )
+    typer.echo("ADVANCED: review these local firewall/routing rules before use.", err=True)
+    typer.echo("Prefer owning the final split policy in your normal firewall tooling.", err=True)
+    commands = plan.revert_commands() if revert else plan.apply_commands()
+    if apply or revert:
+        if apply:
+            # TODO(traffic-split-platforms): Debian/nft has no portable object
+            # label for policy routing rules, so Gatherlink owns one named nft
+            # table plus deterministic marks/tables. Apply starts by removing
+            # those exact objects to keep repeated lab runs clean.
+            execute_traffic_split_commands(plan.revert_commands(), check=False)
+        execute_traffic_split_commands(commands, check=False)
+        typer.echo("traffic split commands executed")
+        return
+    typer.echo(render_commands(commands))
 
 
 @app.command("tcp-forward")
