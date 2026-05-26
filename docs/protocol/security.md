@@ -59,8 +59,8 @@ Current posture:
    authenticated traffic and explicit policy.
 8. Minimal cryptographic choices: aligned. Keep one preferred modern suite and
    avoid user-selectable cipher-suite sprawl.
-9. Key rotation before limits: active v0.9.3 work. Rekey before counter
-   exhaustion, age expiry, or volume thresholds.
+9. Key rotation before limits: implemented for v0.9.3 single-initiator live
+   rekey. Rekey before counter exhaustion, age expiry, or volume thresholds.
 10. Replay windows per session/key: aligned. Replay state is scoped to
     traffic keys and receiver indexes and resets on replacement session facts.
 11. No compression before encryption by default: aligned as a policy. Future

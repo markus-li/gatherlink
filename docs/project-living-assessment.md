@@ -20,8 +20,8 @@ Rules:
   an explicit deferral
 - do not keep counts, inventories, old milestone checklists, or implementation TODO
   copies here
-- if a finding changes release readiness, say whether it is a v0.9.3 roadmap
-  item, release blocker, or future pipeline work
+- if a finding changes release readiness, say whether it is release blocker,
+  active-roadmap work, or future pipeline work
 
 Reference docs:
 
@@ -45,18 +45,16 @@ Reference docs:
 
 ## Current Judgement
 
-Gatherlink v0.9, v0.9.1, and v0.9.2 are closed release baselines. The current
-`dev` branch is open for v0.9.3 adaptive performance and real-world operation
-work.
+Gatherlink v0.9, v0.9.1, v0.9.2, and v0.9.3 are closed release baselines. The
+current tagged release is `v0.9.3`.
 
-V0.9.2 is not a feature-expansion release. It improves stability, cleanliness,
-observability, and operator confidence around the already-existing v0.9/v0.9.1
-system. The release note is [`docs/releases/v0.9.2.md`](releases/v0.9.2.md); detailed evidence is in
-[`docs/reports/v0.9.2-roadmap.md`](reports/v0.9.2-roadmap.md). Active v0.9.3 work is tracked in
-[`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md), with living release notes in
-[`docs/releases/v0.9.3.md`](releases/v0.9.3.md). Config compatibility, breaking changes, and
-operator-impact notes should be recorded in the v0.9.3 release notes as each
-slice lands.
+V0.9.3 is the adaptive-performance and real-world operation release after the
+v0.9.2 stability baseline. Its release note is
+[`docs/releases/v0.9.3.md`](releases/v0.9.3.md), and detailed evidence is in
+[`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md). Future release
+work should promote items from
+[`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md)
+into the next active roadmap before implementation.
 
 Use canonical docs for details:
 
@@ -65,31 +63,32 @@ Use canonical docs for details:
   [`docs/protocol/security.md`](protocol/security.md)
 - runtime/session model: [`docs/protocol/runtime-session-model.md`](protocol/runtime-session-model.md)
 - helper scope: [`docs/helpers/helper-priorities.md`](helpers/helper-priorities.md)
-- current draft release notes: [`docs/releases/v0.9.3.md`](releases/v0.9.3.md)
-- latest closed release evidence: [`docs/releases/v0.9.2.md`](releases/v0.9.2.md) and
-  [`docs/reports/v0.9.2-roadmap.md`](reports/v0.9.2-roadmap.md)
-- active roadmap: [`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md)
+- latest release notes: [`docs/releases/v0.9.3.md`](releases/v0.9.3.md)
+- latest closed release evidence: [`docs/releases/v0.9.3.md`](releases/v0.9.3.md) and
+  [`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md)
+- future roadmap pipeline: [`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md)
 - release evidence: [`docs/releases/v0.9.0.md`](releases/v0.9.0.md), [`docs/releases/v0.9.1.md`](releases/v0.9.1.md),
   [`docs/releases/v0.9.2.md`](releases/v0.9.2.md), and [`docs/operations/v0.9-release-checklist.md`](operations/v0.9-release-checklist.md)
 
 ## Release Scope
 
-V0.9, v0.9.1, and v0.9.2 are for Debian personal/lab users and small sites.
-V0.9.3 keeps that product boundary and focuses on adaptive behavior, profiling,
-and real-world operation.
+V0.9 through v0.9.3 are for Debian personal/lab users and small sites. V0.9.3
+keeps that product boundary and focuses on adaptive behavior, profiling, and
+real-world operation.
 
 Supported shape and non-goals are defined in
 [`docs/architecture/architecture-contract.md`](architecture/architecture-contract.md). Release-specific user posture is
 covered by [`docs/operations/v0.9-operator-runbook.md`](operations/v0.9-operator-runbook.md) and
 [`docs/user/README.md`](user/README.md).
 
-Deferred beyond the v0.9 line unless the active v0.9.3 roadmap promotes them:
-see [`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md).
+Deferred beyond the current release unless the next roadmap promotes them: see
+[`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md).
 
 ## Release Gates And Feature State
 
-V0.9, v0.9.1, and v0.9.2 evidence is recorded in the release notes, benchmark
-docs, and release checklist. V0.9.3 gates are defined in
+V0.9 through v0.9.3 evidence is recorded in the release notes, benchmark docs,
+roadmaps, and release checklist. V0.9.3 gates are closed in
+[`docs/releases/v0.9.3.md`](releases/v0.9.3.md) and
 [`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md).
 
 Do not duplicate feature inventories here. Current implementation boundaries
@@ -100,7 +99,7 @@ docs. Historical release contents belong in `docs/releases/`.
 
 The strongest part of the project remains the responsibility boundary defined
 in [`docs/architecture/architecture-contract.md`](architecture/architecture-contract.md). Protect that boundary during
-every v0.9.3 and future change.
+every future change.
 
 Current watch points:
 
@@ -123,25 +122,23 @@ unaudited software for personal/lab and small-site use.
 
 ## Near-Term Priority
 
-1. Use [`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md) as the active roadmap.
-2. Keep v0.9.2 release notes and roadmap as historical evidence, not active
+1. Open the next active roadmap before starting release-scope implementation.
+2. Keep v0.9.3 release notes and roadmap as historical evidence, not active
    planning.
-3. Promote future-pipeline items into v0.9.3 only when they have a narrow
-   owner boundary, tests, diagnostics, and realistic lab or VM acceptance.
-4. Keep performance changes benchmark-led and compared against v0.9.2,
+3. Promote future-pipeline items into the next release only when they have a
+   narrow owner boundary, tests, diagnostics, and realistic lab or VM
+   acceptance.
+4. Keep performance changes benchmark-led and compared against v0.9.3,
    WireGuard, userspace WireGuard, and raw Gatherlink baselines where relevant.
 5. Continue protecting the Python/Rust/helper/lab boundaries before and after
    each implementation pass.
 
 ## Final Assessment
 
-Gatherlink v0.9.2 is tagged for the selected stability, observability,
-scheduler-honesty, helper-proof, and operator-polish scope. Full source checks,
-local labs, VM acceptance, helper acceptance, direct carrier VM smokes,
-shared-sink proof, relay/WireGuard proof, release-artifact validation, and the
-15-minute and 30-minute soaks passed on the release branch. The 60-minute soak
-was waived for that release.
-
-Gatherlink v0.9.3 is now the active development target. Its job is to make the
-automatic multipath behavior smarter under real-world network pressure while
-keeping the v0.9.2 product boundary intact.
+Gatherlink v0.9.3 is tagged for the selected adaptive-performance,
+autonomous-rekey, helper-proof, benchmark-discipline, and operator-doc scope.
+Full source checks, local labs, VM acceptance, helper acceptance, live rekey
+proof, competing-traffic proof, profile export proof, and release hygiene checks
+passed on the release branch. Prior clean and lossy soak evidence remains
+recorded in the benchmark and release evidence docs; no additional blocking soak
+was required for the final docs/tooling-only release slice.

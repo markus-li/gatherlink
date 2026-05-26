@@ -303,8 +303,9 @@ knob to bypass.
 
 ## Feedback-Driven UDP Scheduling
 
-The active v0.9.3 direction is to make path selection increasingly
-feedback-driven while preserving UDP semantics and the Python/Rust boundary.
+V0.9.3 made path selection more feedback-driven while preserving UDP semantics
+and the Python/Rust boundary. Future work should keep improving that model
+without adding hidden reliability for ordinary UDP payloads.
 
 External scheduler references point to the same shape. MPTCP separates
 connection-level ordering from per-subflow delivery, keeps receiver feedback

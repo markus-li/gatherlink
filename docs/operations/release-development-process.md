@@ -91,6 +91,23 @@ release note. Summarize the outcome and point to the canonical evidence docs.
 Do not tag a release while the matching release note is missing, stale, or more
 optimistic than the code and test evidence.
 
+## Documentation Freshness Gate
+
+Before any release tag is created, perform a full documentation freshness pass.
+This is part of the release gate, not optional cleanup.
+
+The pass must:
+
+- update [`docs/project-living-assessment.md`](../project-living-assessment.md)
+  for the release being tagged
+- check navigation docs, user guides, operation docs, benchmark docs, release
+  notes, roadmaps, and report indexes for stale wording
+- remove or rephrase `active`, `draft`, `release candidate`, `planned`,
+  `pending`, and old-version wording when it no longer describes reality
+- keep historical docs historically accurate while ensuring index and living
+  docs point to the current release and future pipeline
+- run markdown link checks and release-hygiene checks after the wording pass
+
 ## Boundary Review Questions
 
 Use these questions in code review and release readiness passes:

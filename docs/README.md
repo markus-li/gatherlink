@@ -151,10 +151,10 @@ User documentation is for people running Gatherlink, not developing it.
   roadmap after VM acceptance and soak
 - [`docs/reports/v0.9.2-roadmap.md`](reports/v0.9.2-roadmap.md): v0.9.2 stability, cleanliness, polish,
   and final gate evidence trail
-- [`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md): active v0.9.3 adaptive performance and
-  real-world operation roadmap
-- [`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md): shaped future ideas that are not
-  assigned to the active release
+- [`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md): closed v0.9.3 adaptive performance and
+  real-world operation evidence trail
+- [`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md): shaped future ideas waiting for
+  promotion into the next release roadmap
 - [`docs/project-living-assessment.md`](project-living-assessment.md): current release-health assessment,
   release gates, risks, and near-term priority order
 - [`docs/operations/appliance-update-strategy.md`](operations/appliance-update-strategy.md): appliance update and rollback posture
