@@ -1,12 +1,12 @@
-name: Performance / lab report
-description: Share speed results, regressions, lab evidence, or VM acceptance results.
+name: Performance report
+description: Share speed results, regressions, scheduler comparisons, or lab reports.
 title: "[Performance]: "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Use this for benchmark results, performance regressions, scheduler comparisons, and lab or VM acceptance evidence.
+        Use this for benchmark results, performance regressions, scheduler comparisons, and lab or VM acceptance reports.
 
         Please redact secrets, private keys, private hostnames, and private IPs you do not want to share.
   - type: textarea
@@ -56,7 +56,7 @@ body:
   - type: textarea
     id: results
     attributes:
-      label: Results and evidence
+      label: Results
       description: Include throughput, delivery %, drops, retransmits, CPU, diagnostics JSONL snippets, monitor output, or report paths.
       render: text
     validations:
