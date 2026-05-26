@@ -51,7 +51,7 @@ returning to Python; terminal views can expand those structured facts later.
 
 Kernel/XDP remains future-only unless a release roadmap promotes it. If ever
 needed, it should be an optional acceleration backend behind the same dataplane
-boundary defined in `docs/architecture/architecture-contract.md`.
+boundary defined in [`docs/architecture/architecture-contract.md`](architecture-contract.md).
 
 ## High-throughput host tuning
 
@@ -83,8 +83,8 @@ Gatherlink carrier datagram, while jumbo links can coalesce several payloads
 into one authenticated carrier packet. If jumbo improves throughput
 dramatically, the bottleneck is packet rate rather than the byte path.
 
-Measured performance evidence lives in `docs/benchmarks/README.md` and
-`docs/benchmarks/hyperv-performance-log.md`. Keep exact result tables there so
+Measured performance evidence lives in [`docs/benchmarks/README.md`](../benchmarks/README.md) and
+[`docs/benchmarks/hyperv-performance-log.md`](../benchmarks/hyperv-performance-log.md). Keep exact result tables there so
 architecture docs do not become a second benchmark ledger.
 
 Current high-level reading:
@@ -108,10 +108,10 @@ paths rather than more.
 
 ## Research Backlog And Guardrails
 
-Detailed active scheduler behavior lives in `docs/runtime/scheduler.md`.
+Detailed active scheduler behavior lives in [`docs/runtime/scheduler.md`](../runtime/scheduler.md).
 Benchmark method and measured results live in `docs/benchmarks/`. Future
 optimization ideas that are not assigned to the active release belong in
-`docs/reports/future-roadmap-pipeline.md`.
+[`docs/reports/future-roadmap-pipeline.md`](../reports/future-roadmap-pipeline.md).
 
 Performance work may study MPTCP ECF/BLEST, Linux MPTCP path management,
 Multipath QUIC feedback, WireGuard batching/locality, UDP GSO/GRO-like effects,

@@ -126,6 +126,61 @@ The intended Python planner shape is two-stage:
 
 Rust receives only the reconciled primitive values.
 
+The service-path allocator also tracks same-pass bulk reservations. If several
+bulk services are active, the first bulk plan claims part of the currently
+available path capacity before the next bulk service is planned. This keeps two
+UDP-fast services from both assuming the same spare path is empty while still
+compiling only ordinary allowed-path and weight primitives for Rust.
+
+The coordinator also classifies each path into a weak responsiveness class for
+diagnostics and future policy tuning:
+
+- `wired_stable`
+- `cellular_like`
+- `starlink_like`
+- `volatile_wireless`
+- `unknown`
+
+These classes are hints from Python-visible latency, jitter, loss, queue, and
+capacity facts. They are not Rust policy, not device detection, and not a
+replacement for explicit operator config. Fixed config remains the startup
+truth; responsiveness classes help explain why `coordinated_adaptive` held a
+safe policy, tested a more aggressive policy, or rejected a switch.
+
+The live coordinator keeps a bounded per-path history of these classes and
+exports `path_profiles` in `scheduler.decision` diagnostics with the current
+class, stable class, confidence ppm, and number of windows. This history is a
+Python-only guardrail: it helps avoid reacting to one noisy sample, but it does
+not give Rust access-type policy and it does not override explicit operator
+capacity or scheduler settings by itself.
+
+## Congestion Fairness
+
+`scheduler.congestion_policy` lets Python compile self-limiting behavior from
+path pressure without adding Rust policy:
+
+- `off`: do not infer pacing; useful for benchmarks that need a raw primitive
+  baseline
+- `conservative`: reduce sender budget earlier on shared links
+- `adaptive`: normal default; back off only when queue/loss/send-failure
+  pressure is visible
+- `volatile`: stronger backoff for wireless or bufferbloaty links
+
+The compiled primitive is currently `pacing_budget_bps`. If the value is zero,
+Rust bypasses pacing entirely. If config already set a per-path
+`pacing_budget_bps`, that explicit operator value wins over inferred fairness.
+The policy reads normalized path pressure such as loss ppm, oldest queue age,
+queue depth, send failures, and local drops. It does not add reliability,
+retransmission, or payload semantics.
+
+Live reapply uses a Python-owned congestion fairness controller to avoid
+flapping. New pressure can apply quickly, but recovery requires repeated cleaner
+windows before Python removes an inferred pacing budget. This keeps a shared or
+bufferbloaty path from oscillating between unrestricted and restricted sender
+budgets because of one lucky sample. Rust is not aware of the hysteresis model;
+it still receives either `pacing_budget_bps = 0` for bypass or a compiled byte
+rate primitive.
+
 ## Service Outcome Feedback
 
 Service-level QoS now has an optional Python-only outcome signal. Helpers,
@@ -211,7 +266,10 @@ capacity, and path-delivery telemetry. Ordered credits use the narrower known
 TX/RX capacity so a sender does not build work faster than the receiver says
 the path can absorb. Receiver pressure is both absolute and ratio-based:
 lifetime counters matter, but a small recent sample with a high gap/drop ratio
-still tightens the compiled credit.
+still tightens the compiled credit. Ordered policy also treats receiver
+reorder-buffer depth and oldest buffered age as pressure, and uses p95 latency
+when available so the virtual arrival timeline is not built from an optimistic
+mean alone.
 
 Rust only maintains the tiny virtual path timeline and applies the compiled
 limits while choosing a path. If one eligible path is already over its
@@ -245,8 +303,8 @@ knob to bypass.
 
 ## Feedback-Driven UDP Scheduling
 
-The v0.9.2 direction is to make path selection feedback-driven while preserving
-UDP semantics and the Python/Rust boundary.
+The active v0.9.3 direction is to make path selection increasingly
+feedback-driven while preserving UDP semantics and the Python/Rust boundary.
 
 External scheduler references point to the same shape. MPTCP separates
 connection-level ordering from per-subflow delivery, keeps receiver feedback
@@ -409,7 +467,7 @@ creating a lab-only vocabulary:
 
 - local TX/RX packet and byte counters per path
 - summarized Rust-edge TX/RX timing facts suitable for scheduler use, without
-  per-packet Python callbacks; the current v0.9.2 shape exposes last TX/RX
+  per-packet Python callbacks; the current runtime shape exposes last TX/RX
   timestamps and last TX/RX inter-packet gaps as aggregate service/path status
   facts
 - queue depth in packets and bytes
@@ -426,6 +484,10 @@ creating a lab-only vocabulary:
 Python should treat telemetry as suspect until it has confidence. Missing,
 stale, negative, impossible, or flapping metrics must fall back to deterministic
 safe behavior and emit diagnostics instead of destabilizing the dataplane.
+Control metadata is also bounded by the smallest active path MTU. When a busy
+service produces more real-data timing samples than fit, Python advertises a
+small fitted batch and omits the rest rather than asking Rust to emit an
+oversized control frame.
 
 ### Clock-Safe One-Way Latency
 
@@ -562,13 +624,14 @@ back gradually. Diagnostics should show when a path used fast decrease,
 queue-pressure pacing, or recovery ramp so operators can tell the difference
 between real Starlink/mobile volatility and a bad benchmark shape.
 
-Post-v0.9.2, Python may infer a per-path network profile to select the
-responsiveness policy. This inference must be confidence-scored and slow enough
-to avoid chasing short-lived noise. Fixed operator config wins; lab profile
-metadata comes next; helper-provided hints such as Starlink stats, modem/router
-state, radio technology, or signal quality can strengthen the inference; longer
-window traffic behavior can classify unknown paths; weak network identity hints
-such as ASN or reverse DNS are advisory only.
+Future v0.9.3 and post-v0.9.3 work may let Python infer a per-path network
+profile to select the responsiveness policy. This inference must be
+confidence-scored and slow enough to avoid chasing short-lived noise. Fixed
+operator config wins; lab profile metadata comes next; helper-provided hints
+such as Starlink stats, modem/router state, radio technology, or signal quality
+can strengthen the inference; longer window traffic behavior can classify
+unknown paths; weak network identity hints such as ASN or reverse DNS are
+advisory only.
 
 The inference result should be names like `wired_stable`, `cellular_like`,
 `starlink_like`, `satellite_like`, `volatile_wireless`, or `unknown`. It should
@@ -631,6 +694,11 @@ resulting packet and byte drain caps. The v0.9.2 Hyper-V probe for
 TCP-over-WireGuard-over-Gatherlink uses Linux TCP retransmit counters as
 benchmark-side evidence and sends only the compact service outcome payload to
 the runner.
+
+The runner status now exposes a `service_budget` block for operator visibility.
+It includes whether the budget is active, the reason, packet/byte overrides,
+and compact service rate samples. This status is an explanation surface for
+Python policy; it is not another Rust control surface.
 
 ## Future Work
 

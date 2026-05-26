@@ -52,7 +52,7 @@ client -> relay-a -> relay-b -> exit-node -> target
 The transit node must not need to understand LAN policy or endpoint payload. For
 secure transport it forwards only after relay-hop authentication, replay checks,
 generation checks, and authorization against configured next-hop/session state.
-See `docs/protocol/relay-session-lifecycle.md`.
+See [`docs/protocol/relay-session-lifecycle.md`](../protocol/relay-session-lifecycle.md).
 
 ## Reserved future concepts
 
@@ -130,8 +130,8 @@ Hop redirects can exist later, but should be constrained:
 ## Boundary
 
 Overlay routing must follow the project boundaries in
-`docs/architecture/architecture-contract.md` and the relay/session model in
-`docs/protocol/relay-session-lifecycle.md`. This note only describes future
+[`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md) and the relay/session model in
+[`docs/protocol/relay-session-lifecycle.md`](../protocol/relay-session-lifecycle.md). This note only describes future
 overlay planning ideas; it is not a replacement for those canonical boundaries.
 
 ## Diagnostics

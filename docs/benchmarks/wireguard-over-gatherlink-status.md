@@ -392,8 +392,8 @@ carries authenticated UDP service payloads; WireGuard remains WireGuard.
 
 ## Related Docs
 
-- `docs/user/wireguard.md`: short user workflow
-- `docs/helpers/wireguard-helper.md`: helper boundary and implementation scope
-- `docs/runtime/scheduler.md`: scheduler semantics
-- `docs/benchmarks/hyperv-performance-log.md`: measured VM benchmark rows
-- `docs/architecture/performance-philosophy.md`: performance guardrails
+- [`docs/user/wireguard.md`](../user/wireguard.md): short user workflow
+- [`docs/helpers/wireguard-helper.md`](../helpers/wireguard-helper.md): helper boundary and implementation scope
+- [`docs/runtime/scheduler.md`](../runtime/scheduler.md): scheduler semantics
+- [`docs/benchmarks/hyperv-performance-log.md`](hyperv-performance-log.md): measured VM benchmark rows
+- [`docs/architecture/performance-philosophy.md`](../architecture/performance-philosophy.md): performance guardrails

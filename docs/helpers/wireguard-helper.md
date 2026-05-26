@@ -15,6 +15,10 @@ First scope:
 
 Implemented first slice:
 
+- `gatherlink helpers wireguard-setup` runs an installer-style setup wizard and
+  can also render non-interactive setup files for tests/automation. It writes
+  Gatherlink client/server configs, WireGuard config skeletons, an optional
+  dual-profile traffic split plan, and a local README.
 - `gatherlink helpers wireguard-plan configs/examples/wireguard-client.json`
   shows the Gatherlink service mapping that WireGuard should use
 - `gatherlink helpers wireguard-plan
@@ -57,7 +61,7 @@ Implemented first slice:
 Performance posture:
 
 - Current WireGuard-over-Gatherlink performance status and known struggles live
-  in `docs/benchmarks/wireguard-over-gatherlink-status.md`. Keep exact
+  in [`docs/benchmarks/wireguard-over-gatherlink-status.md`](../benchmarks/wireguard-over-gatherlink-status.md). Keep exact
   benchmark rows in the benchmark docs, not in this helper contract.
 - The advanced dual-WireGuard profile is intended for mixed traffic where one
   opaque WireGuard peer flow is not enough information for the scheduler:
@@ -83,7 +87,7 @@ Library posture:
 - do not add a Python WireGuard protocol library for v0.9
 - Gatherlink should generate/coordinate config, not reimplement WireGuard
 
-Post-v0.9.2 userspace WireGuard comparison:
+Userspace WireGuard comparison:
 
 - evaluate Mullvad's GotaTun as an optional Rust userspace WireGuard backend
   for labs and advanced helpers

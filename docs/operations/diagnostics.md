@@ -10,7 +10,7 @@ The current operator path has three diagnostic surfaces:
   diagnostics, state layout, service registry health, and the Rust binding
 - JSONL diagnostics from the diagnostics event bus
 
-Stable event codes live in `docs/operations/diagnostics-events.md`. Producers
+Stable event codes live in [`docs/operations/diagnostics-events.md`](diagnostics-events.md). Producers
 should publish `DiagnosticEvent` records through the bounded diagnostics bus
 instead of writing one-off JSON or parsing terminal text. The bus must never
 block dataplane or control loops; if a sink is slow, diagnostics are dropped and
@@ -48,7 +48,7 @@ material.
 When adding diagnostics:
 
 - choose an existing stable event code or add one in
-  `docs/operations/diagnostics-events.md`
+  [`docs/operations/diagnostics-events.md`](diagnostics-events.md)
 - keep payloads structured in `details`
 - redact secrets, keys, tokens, and private endpoint material
 - prefer counters and facts over prose-only messages

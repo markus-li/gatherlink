@@ -7,9 +7,9 @@ deferred. Helpers are Python/control-plane features unless a document explicitly
 says otherwise. They must not move policy, privileged behavior, or protocol
 parsing into the Rust dataplane without a later design decision.
 
-The canonical helper boundary is `docs/architecture/architecture-contract.md`.
+The canonical helper boundary is [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md).
 This file records helper priority and local helper scope only; detailed helper
-contracts live in the specific helper docs linked from `docs/helpers/README.md`.
+contracts live in the specific helper docs linked from [`docs/helpers/README.md`](README.md).
 
 When committing helper documentation, only stage the docs touched for that
 helper decision. Other chats may be editing code or unrelated docs.
@@ -125,10 +125,10 @@ Not-yet scope:
 
 The TCP forwarding helper provides simple 1:1 port forwarding over Gatherlink,
 including response traffic. Example: local TCP port to a web server reachable on
-the remote side through a Gatherlink service. The post-v0.9.2 TCP-aware proxy
+the remote side through a Gatherlink service. The v0.9.3/future TCP-aware proxy
 and transparent TPROXY shape is documented in
-`docs/helpers/tcp-forwarding-helper.md` and
-`docs/reports/future-roadmap-pipeline.md`; it is not part of the current
+[`docs/helpers/tcp-forwarding-helper.md`](tcp-forwarding-helper.md) and
+[`docs/reports/future-roadmap-pipeline.md`](../reports/future-roadmap-pipeline.md); it is not part of the current
 active helper slice.
 
 First scope:
@@ -147,14 +147,14 @@ Not-yet scope:
 - L7 routing
 - shared SOCKS5 multiplexing unless later design folds them together
 - TCP semantics inside the Rust dataplane
-- transparent TCP interception until the post-v0.9.2 TCP-aware proxy slice is
+- transparent TCP interception until the v0.9.3/future TCP-aware proxy slice is
   promoted
 
 ### 6. Relay Fabric Helper
 
 The relay fabric helper should start with discovery and health. It describes
 candidate relays and their capabilities. Secure relay-session forwarding is
-defined separately in `docs/protocol/relay-session-lifecycle.md`; the helper feeds
+defined separately in [`docs/protocol/relay-session-lifecycle.md`](../protocol/relay-session-lifecycle.md); the helper feeds
 candidates and health into signed topology/control logic.
 
 First scope:
@@ -236,7 +236,7 @@ Deferred means:
 
 ## Cross-Cutting Rules
 
-- Follow `docs/architecture/architecture-contract.md` for global helper
+- Follow [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md) for global helper
   boundaries.
 - Helpers fail independently and emit diagnostics.
 - Privileged helpers must be narrow, explicit, and opt-in.
@@ -245,7 +245,7 @@ Deferred means:
 
 ## Library Selection
 
-Project-wide dependency rules live in `docs/operations/library-selection.md`.
+Project-wide dependency rules live in [`docs/operations/library-selection.md`](../operations/library-selection.md).
 
 Active helper docs may record helper-specific dependency decisions, but those
 decisions must follow the project-wide library selection policy. Deferred

@@ -80,6 +80,9 @@ Implemented first slice:
   open proxy
 - policy denials, unreachable exits, stream opens, and stream closes are emitted
   as structured helper diagnostics when `--diagnostics-jsonl` is provided
+- helper stream opens carry bounded `traffic_class` and `flowlet_key` hints so
+  Python scheduler policy can understand explicit SOCKS5/TCP streams without
+  parsing payloads in Rust
 - `LabDirectTcpExitConnector` is available for local smoke tests; the connector
   interface remains the boundary between SOCKS5 policy and Gatherlink stream
   transport

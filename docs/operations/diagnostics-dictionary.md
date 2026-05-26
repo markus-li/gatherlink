@@ -57,9 +57,22 @@ packets must not be forwarded.
 | `config.reapplied` | Python reapplied runtime config | generation and changed fields |
 | `counter.snapshot` | structured counter sample | trends, not one-off messages |
 | `diagnostics.queue_dropped` | diagnostics could not keep up | sink speed and event volume |
+| `scheduler.decision` | Python explained scheduler policy and compiled primitives | path health, service allocation, congestion fairness |
 
 Diagnostics must not block packet forwarding. Dropped diagnostics are a local
 observability issue, not a packet-path failure by themselves.
+
+`scheduler.decision.details.congestion_fairness` explains self-limiting path
+decisions. A non-zero `pacing_budget_bps` means Python saw enough path pressure
+to ask Rust to pace that path. `pressure_level=1` is moderate pressure;
+`pressure_level=2` is high pressure; `pressure_level=explicit` means an
+operator-configured path pacing budget is in force.
+
+`scheduler.decision.details.coordinator.path_profiles` is a bounded,
+confidence-scored view of path responsiveness classes such as `wired_stable`,
+`cellular_like`, `starlink_like`, and `volatile_wireless`. It is Python
+diagnostic/policy context only; Rust still receives compiled primitive path
+state.
 
 ## Helper Events
 
@@ -69,6 +82,8 @@ observability issue, not a packet-path failure by themselves.
 | `helper.lifecycle.start_failed` | helper process could not start | command, bind address, permissions |
 | `helper.stream.opened` | helper stream opened | expected client activity |
 | `helper.stream.closed` | helper stream closed | normal close or timeout |
+| `helper.stream.credit` | stream credit facts changed | helper flow-control hints and backlog |
+| `helper.stream.reset` | stream reset was observed | client abort, helper failure, or policy reset |
 | `helper.stream.denied` | stream policy denied request | allow host/port policy |
 | `helper.stream.unreachable` | helper could not reach target | exit connectivity and target service |
 | `helper.stream.invalid_frame` | helper stream framing failed | version mismatch or corrupt stream |

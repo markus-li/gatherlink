@@ -16,10 +16,10 @@ WireGuard and helper traffic, but those tools keep owning their own domains.
 
 ## Status
 
-The project is at v0.9.2 release-candidate state for Debian personal/lab users
-and small sites. The v0.9 and v0.9.1 baselines are closed; current release
-evidence, remaining limits, and tag posture are tracked in the living
-assessment.
+The v0.9.0, v0.9.1, and v0.9.2 baselines are closed for Debian personal/lab
+users and small sites. Active development is now v0.9.3 on `dev`; current
+release notes, evidence, remaining limits, and tag posture are tracked in the
+living assessment and v0.9.3 roadmap.
 
 Real-world testing is still limited. So far, Gatherlink has mainly been tested
 by the developer as a practical tool for aggregating a fiber connection and a
@@ -58,14 +58,19 @@ release checklist and current living assessment.
 - WireGuard planning/helper workflow
 
 The exact current proof state is tracked in
-`docs/project-living-assessment.md`.
+[`docs/project-living-assessment.md`](docs/project-living-assessment.md).
 
 ## Quick Start
 
 Install in a development checkout:
 
 ```bash
-pip install -e .
+python3 --version  # must be 3.12 or newer
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements.txt
+python -m pip install -e .
+maturin develop --manifest-path crates/pybindings/Cargo.toml --release
 ```
 
 Validate a config:
@@ -100,24 +105,25 @@ blindly.
 
 Start here:
 
-- `docs/README.md`: documentation map
-- `docs/project-story.md`: how the project was shaped and why the architecture
+- [`docs/README.md`](docs/README.md): documentation map
+- [`docs/user/quickstart.md`](docs/user/quickstart.md): minimum Debian setup and first smoke checks
+- [`docs/project-story.md`](docs/project-story.md): how the project was shaped and why the architecture
   looks the way it does
-- `docs/user/README.md`: short user guide
-- `docs/user/config-cookbook.md`: common config shapes
-- `docs/operations/v0.9-operator-runbook.md`: day-to-day v0.9 operation
-- `docs/operations/v0.9-troubleshooting-guide.md`: scenario troubleshooting
-- `docs/operations/v0.9-release-checklist.md`: release gates
-- `docs/project-living-assessment.md`: current state and remaining work
+- [`docs/user/README.md`](docs/user/README.md): short user guide
+- [`docs/user/config-cookbook.md`](docs/user/config-cookbook.md): common config shapes
+- [`docs/operations/v0.9-operator-runbook.md`](docs/operations/v0.9-operator-runbook.md): day-to-day v0.9 operation
+- [`docs/operations/v0.9-troubleshooting-guide.md`](docs/operations/v0.9-troubleshooting-guide.md): scenario troubleshooting
+- [`docs/operations/v0.9-release-checklist.md`](docs/operations/v0.9-release-checklist.md): release gates
+- [`docs/project-living-assessment.md`](docs/project-living-assessment.md): current state and remaining work
 
 For design and implementation:
 
-- `docs/architecture/architecture-contract.md`
-- `docs/architecture/source-map.md`
-- `docs/protocol/protocol.md`
-- `docs/protocol/security.md`
-- `docs/protocol/runtime-session-model.md`
-- `docs/helpers/helper-priorities.md`
+- [`docs/architecture/architecture-contract.md`](docs/architecture/architecture-contract.md)
+- [`docs/architecture/source-map.md`](docs/architecture/source-map.md)
+- [`docs/protocol/protocol.md`](docs/protocol/protocol.md)
+- [`docs/protocol/security.md`](docs/protocol/security.md)
+- [`docs/protocol/runtime-session-model.md`](docs/protocol/runtime-session-model.md)
+- [`docs/helpers/helper-priorities.md`](docs/helpers/helper-priorities.md)
 
 ## Development
 

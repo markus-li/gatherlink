@@ -8,6 +8,15 @@ routes, firewall rules, and `wg` or `wg-quick` lifecycle.
 
 ## Plan The Mapping
 
+For a guided multipath setup, start with
+[`docs/user/wireguard-multipath.md`](wireguard-multipath.md) and run:
+
+```bash
+gatherlink helpers wireguard-setup
+```
+
+For an existing config:
+
 1. Create or edit a Gatherlink config with a WireGuard helper section.
 2. Ask Gatherlink what WireGuard should point at:
 
@@ -70,4 +79,4 @@ throughput tuning knob. Keep it only where the normal WireGuard deployment would
 need it.
 
 For current performance status, known struggles, and benchmark interpretation,
-see `docs/benchmarks/wireguard-over-gatherlink-status.md`.
+see [`docs/benchmarks/wireguard-over-gatherlink-status.md`](../benchmarks/wireguard-over-gatherlink-status.md).

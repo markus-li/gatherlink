@@ -59,8 +59,8 @@ Current posture:
    authenticated traffic and explicit policy.
 8. Minimal cryptographic choices: aligned. Keep one preferred modern suite and
    avoid user-selectable cipher-suite sprawl.
-9. Key rotation before limits: v0.9.2 work. Rekey before counter exhaustion,
-   age expiry, or volume thresholds.
+9. Key rotation before limits: active v0.9.3 work. Rekey before counter
+   exhaustion, age expiry, or volume thresholds.
 10. Replay windows per session/key: aligned. Replay state is scoped to
     traffic keys and receiver indexes and resets on replacement session facts.
 11. No compression before encryption by default: aligned as a policy. Future
@@ -71,7 +71,7 @@ Current posture:
     the core.
 
 Unfinished items from this checklist belong in
-`docs/reports/future-roadmap-pipeline.md` unless a release roadmap promotes a
+[`docs/reports/future-roadmap-pipeline.md`](../reports/future-roadmap-pipeline.md) unless a release roadmap promotes a
 narrow slice.
 
 ## Current Implementation Stage
@@ -199,6 +199,16 @@ as `authenticated` and compiles the executor mode to Rust's static AEAD
 primitive. Malformed, expired, tampered, wrong-peer, wrong-generation, or
 revoked inputs fail closed locally and must not produce unauthenticated network
 errors.
+
+V0.9.3 authenticated security outputs also include keyless session metadata:
+local node id, peer node id, topology generation, initiator/responder role,
+session creation/expiry time, and rekey thresholds. Python uses that metadata
+to reconstruct authenticated-session policy for live rekey orchestration. Rust
+does not receive or interpret those identity/topology fields; it still receives
+only receiver indexes, AEAD keys, replay state, counters, and compiled packet
+execution primitives. Older authenticated blocks without that metadata remain
+valid packet-execution inputs, but runtime planning warns that autonomous live
+rekey cannot originate from them.
 
 The older signed ephemeral document bridge remains as a compatibility/manual
 tool while Noise IK becomes the normal v0.9 path:
@@ -774,6 +784,38 @@ traffic-key facts to Rust. Python now owns the first rotation decision helper:
 it starts replacement before expiry or configured volume limits, rejects peers
 that report a different topology generation or identity, and reports whether
 traffic must fail closed. Rust still only receives compiled AEAD/replay facts.
+
+V0.9.3 adds the first in-band rekey control payload for the reserved
+auth/crypto service. It wraps Noise IK initiation/response messages with the
+current receiver index, topology generation, sender, peer, and validity window
+so the receiver can reject stale or misaddressed rekeys before doing expensive
+handshake work. The payload intentionally carries no traffic keys. Successful
+messages become useful when Python compiles replacement AEAD facts and
+hot-applies them to Rust after identity, topology, freshness, and replacement
+receiver-index validation.
+
+The foreground runner now routes reserved auth/crypto service payloads to a
+Python handler. Invalid payloads produce local `rekey.rejected` diagnostics and
+no network response. Valid rekey control messages are decoded as Python facts;
+the runner stores an operator-safe bounded history in its IPC/status snapshot
+without exposing Noise payload bytes, and the service monitor renders a compact
+`auth/rekey control` table from those facts. The handler also exposes a
+structured result while preserving the generic reserved-service boolean dispatch
+contract.
+`LiveRekeyCoordinator` is the Python-owned negotiation state machine: it
+suppresses duplicate outbound starts while a request is pending, accepts valid
+peer initiations, compiles bounded reject payloads for invalid initiations,
+completes peer responses, and hot-applies replacement sessions through the
+runtime helper. Runtime config can now reconstruct the current authenticated
+session from Noise-generated keyless metadata; older authenticated blocks
+without that metadata remain valid for packet execution but cannot originate
+autonomous live rekey. The foreground runner can now opt into autonomous rekey
+with explicit local identity, peer identity, signed topology, and trust-root
+paths. When enabled, Python periodically evaluates rekey policy, sends
+reserved auth/crypto payloads through Rust unchanged, handles peer
+initiation/response/reject messages, and hot-reapplies the validated
+replacement runtime security DTO to Rust. Rust still does not decode Noise,
+choose rekey timing, or interpret topology.
 
 ## Implementation Boundary
 

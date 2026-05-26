@@ -5,7 +5,7 @@ representative rows for each active benchmark question, with explicit test
 dates when rows come from different runs.
 
 Historical experiment details, rejected tuning attempts, and older long-form
-evidence live in `docs/benchmarks/hyperv-performance-history.md`.
+evidence live in [`docs/benchmarks/hyperv-performance-history.md`](hyperv-performance-history.md).
 
 ## Log Schema Contract
 
@@ -81,6 +81,23 @@ WireGuard tunnel.
 | Optional GotaTun direct WireGuard backend | 2026-05-25 | The optional `gotatun` backend starts and passes the same one-hop VM harness. On this host it is a useful userspace WireGuard comparison point, but not a better TCP baseline than `wireguard-go`: with current GotaTun `v0.7.0`, three simultaneous clean 500 Mbit/s UDP paths were lossless at cap, while simultaneous TCP measured 941.71, 991.30, and 982.21 Mbit/s per path. The earlier `v0.5.1` smoke measured 1037.94, 1069.73, and 1076.12 Mbit/s per path, so updating alone did not close the gap. The matching `wireguard-go` control measured 2216.13, 2195.65, and 2424.41 Mbit/s per path. Keep GotaTun rows separate from Gatherlink rows and from the primary userspace-WireGuard target. | `.gatherlink/hyperv-performance/20260525T115615Z-gotatun-v070-threepath-smoke/`, `.gatherlink/hyperv-performance/20260525T111636Z-gotatun-threepath-smoke/`, `.gatherlink/hyperv-performance/20260525T111937Z-wireguardgo-threepath-control/` |
 | Optional BoringTun direct WireGuard backend | 2026-05-25 | The optional `boringtun-cli` backend installs, starts, and passes the same one-hop VM harness. On this host it is not a better TCP baseline than `wireguard-go` or GotaTun: three simultaneous clean 500 Mbit/s UDP paths were lossless at cap, while simultaneous TCP measured 950.55, 869.61, and 904.32 Mbit/s per path. The matching `wireguard-go` control measured 2216.13, 2195.65, and 2424.41 Mbit/s per path; the matching GotaTun smoke measured 1037.94, 1069.73, and 1076.12 Mbit/s per path. Keep BoringTun rows separate from Gatherlink rows and from the primary userspace-WireGuard target. | `.gatherlink/hyperv-performance/20260525T114159Z-boringtun-threepath-smoke/`, `.gatherlink/hyperv-performance/20260525T111937Z-wireguardgo-threepath-control/`, `.gatherlink/hyperv-performance/20260525T111636Z-gotatun-threepath-smoke/` |
 
+## Current v0.9.3 Proof Rows
+
+These rows are roadmap proof points rather than broad tuning claims. They show
+that the v0.9.3 tooling can export real observed profiles, run true competing
+traffic beside Gatherlink, and compare TCP/WireGuard helper choices against
+direct WireGuard baselines.
+
+| Date | Proof | Shape | Path caps | MTU | Offered / baseline | Result | Reading | Evidence |
+| --- | --- | --- | --- | ---: | --- | --- | --- | --- |
+| 2026-05-26 | Real-observation profile export | `observed-vm-acceptance-300-500-700` from VM status | exported as 40.0/66.67/93.33 Mbit/s conservative path drafts | 1200 | 200 Mbit/s pressure, payload 1100 | profile JSON written | Converts a real `status-b.json` snapshot into a repeatable profile draft while keeping the observed counters and path facts auditable. | `.gatherlink/profile-export-proof/current/profile.json`, source `.gatherlink/hyperv-performance/20260526T142452Z-v093-coordinated-acceptance/status-b.json` |
+| 2026-05-26 | True competing-traffic VM proof | `acceptance-300-500-700` | 300/500/700 Mbit/s | 1200 | 180 Mbit/s Gatherlink plus three direct 80 Mbit/s path competitors | GL sink 180.03 Mbit/s, GL delta 0; each competitor sent and received 80.00 Mbit/s with delta 0 | Confirms the VM harness can run direct path pressure beside Gatherlink instead of only deterministic simulated congestion reports. | `.gatherlink/hyperv-performance/20260526T104703Z-v093-competing-traffic-proof/` |
+| 2026-05-26 | Final raw Gatherlink VM smoke | `acceptance-300-500-700` | 300/500/700 Mbit/s | 1472 path MTU, payload 1100 | 180 Mbit/s Gatherlink | generator 180.00 Mbit/s; sink 180.00 Mbit/s; packet delta 0 | Final v0.9.3 raw dataplane smoke after TCP-helper benchmark tooling changes. | `.gatherlink/hyperv-performance/20260526T-v093-final-raw-vm-smoke/` |
+| 2026-05-26 | Direct WireGuard and raw Gatherlink comparison | clean VM one-hop, paths a/b/c | unshaped for WG rows; raw GL ran 300 Mbit/s | n/a for WG; GL payload 1200 | kernel WG, userspace WG, raw GL | kernel WG simultaneous TCP 2540.37/2966.98/2736.46 Mbit/s; userspace WG simultaneous TCP 2559.71/2718.20/3415.16 Mbit/s; raw GL sink 300.05 Mbit/s | Gives the same-run direct WireGuard and raw Gatherlink baselines used to interpret the TCP-aware/WG helper rows. | `.gatherlink/hyperv-performance/20260526T104815Z-v093-tcp-wg-comparison/` |
+| 2026-05-26 | WireGuard-over-Gatherlink comparison | `acceptance-300-500-700` | 300/500/700 Mbit/s | WG MTU 1380 | coordinated adaptive, UDP target 300 Mbit/s | TCP 555.79 Mbit/s, retrans 567; UDP 299.82 Mbit/s, 0.00% loss | Current WG-over-GL acceptance-shape comparison point; useful, but not a claim of direct WireGuard path-set parity. | `.gatherlink/hyperv-performance/20260526T105329Z-v093-wg-over-gl-comparison/` |
+| 2026-05-26 | Explicit SOCKS5-over-Gatherlink correctness | local two-service helper proof | local lab | n/a | one HTTP fetch through SOCKS5 helper and stream exit | passed with helper open/credit/close diagnostics | Proves explicit TCP helper correctness and lifecycle; throughput comparison remains separate from this correctness proof. | `.gatherlink/socks5-gatherlink-acceptance/v093-roadmap-proof/` |
+| 2026-05-26 | Explicit TCP-forward-over-Gatherlink throughput | VM A to VM B helper stream | VM helper acceptance config | n/a | 300 Mbit/s capped TCP stream for 8s | sender 299.99 Mbit/s; active sink 300.14 Mbit/s; byte delta 0 | Proves the explicit TCP-forward helper can carry a capped TCP stream through Gatherlink losslessly in the VM helper topology. This is a helper-path proof, not a universal performance ceiling. | `.gatherlink/hyperv-socks5-acceptance/20260526T-v093-tcp-helper-throughput-300m-active/` |
+
 ## Current Raw Guardrails
 
 These rows are used as guardrails while tuning WireGuard-over-Gatherlink. If a
@@ -93,6 +110,9 @@ underlay/loss envelope that WireGuard-over-Gatherlink must live inside.
 
 | Date | Shape | Scheduler | Offered | Path MTU | Payload | Delivered | Packet delta | Evidence |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 2026-05-26 | `acceptance-300-500-700`, three paths | `coordinated_adaptive`, scheduler reapply 1s | 200 Mbit/s | 1200 | 1100 | 200.03 Mbit/s | 0 | `.gatherlink/hyperv-performance/20260526T142452Z-v093-coordinated-acceptance/` |
+| 2026-05-26 | `realworld-starlink-plus-5g`, three paths | `coordinated_adaptive`, scheduler reapply 1s | 200 Mbit/s | 1200 | 1100 | 196.79 Mbit/s | 793 | `.gatherlink/hyperv-performance/20260526T142614Z-v093-coordinated-starlink/` |
+| 2026-05-26 | `realworld-starlink-plus-5g`, three paths | `ordered_multipath`, reorder hold 150ms | 200 Mbit/s | 1200 | 1100 | 140.67 Mbit/s | 50209 | `.gatherlink/hyperv-performance/20260526T142533Z-v093-ordered-starlink/` |
 | 2026-05-24 | clean, three paths, post-clock-sync guard | `coordinated_adaptive`, `traffic_bias=udp`, no service flowlet | 1000 Mbit/s | 1472 | 1300 | 999.35 Mbit/s | 0 | `.gatherlink/hyperv-performance/20260524-post-clocksync-raw-clean-1g-12s/` |
 | 2026-05-24 | clean, three paths, post-ordered-TCP-tuning guard | `coordinated_adaptive`, `traffic_bias=udp`, no service flowlet | 1000 Mbit/s | 1472 | 1300 | 999.05 Mbit/s | 0 | `.gatherlink/hyperv-performance/20260524T-raw-gl-guardrail-after-ordered-tcp-tuning/` |
 | 2026-05-25 | clean, three paths, post-TCP-over-WG sweep guard | `coordinated_adaptive`, `traffic_bias=udp`, no service flowlet | 1000 Mbit/s | 1472 | 1300 | 999.59 Mbit/s | 0 | `.gatherlink/hyperv-performance/20260525-raw-gl-guardrail-after-tcpwg-sweep/` |
@@ -139,6 +159,10 @@ fix.
 
 | Date | Gate | Shape | Duration | Interval | Min delivery | Actual delivery | Result | Evidence |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| 2026-05-26 | VM managed acceptance | asymmetric | 6s | 0.010s | 90.0% | 100.00% | pass | `.gatherlink/hyperv-vm-acceptance/20260526T072949Z/` |
+| 2026-05-26 | VM live rekey acceptance | clean | 80 trigger packets | n/a | exact post-rekey 5/5 | 100.00% | pass | `.gatherlink/hyperv-rekey-acceptance/20260526T080242Z/` |
+| 2026-05-26 | VM WireGuard helper acceptance | clean | 3 payloads | n/a | exact 3/3 | 100.00% | pass | `.gatherlink/hyperv-wireguard-acceptance/20260526T073318Z/` |
+| 2026-05-26 | VM SOCKS5/TCP-forward helper acceptance | clean | one HTTP fetch per helper | n/a | both fetches succeeded | 100.00% | pass | `.gatherlink/hyperv-socks5-acceptance/20260526T073135Z/` |
 | 2026-05-24 | VM managed acceptance | clean | 20s | 0.010s | 90.0% | 100.00% | pass | `.gatherlink/hyperv-vm-acceptance/20260524T-clean-v092-gate/` |
 | 2026-05-24 | VM managed acceptance | lossy | 45s | 0.010s | 85.0% | 98.96% | pass | `.gatherlink/hyperv-vm-acceptance/20260524T-lossy-v092-gate/` |
 | 2026-05-24 | VM soak | clean | 15m | 0.002s | 90.0% | 100.00% | pass | `.gatherlink/hyperv-vm-soak/20260524T-clean-15m-v092-gate/` |

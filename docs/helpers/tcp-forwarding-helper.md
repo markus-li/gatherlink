@@ -31,8 +31,8 @@ local 127.0.0.1:8080
   denial
 - optional JSONL diagnostics sink for stream lifecycle and failure events
 
-Post-v0.9.2 TCP-aware proxy scope must include both explicit and transparent
-modes from the beginning:
+When promoted from the v0.9.3/future pipeline, TCP-aware proxy scope must
+include both explicit and transparent modes from the beginning:
 
 - explicit mode: applications connect to a configured local listen endpoint,
   and the helper forwards to a configured target or named remote exit service
@@ -48,13 +48,13 @@ modes from the beginning:
   only scheduler metadata such as stream id, traffic class, pressure, and path
   preference
 
-Initial post-v0.9.2 tests may prove explicit mode first, but transparent mode
-is part of the helper contract and must be designed so it can work rather than
+Initial promoted tests may prove explicit mode first, but transparent mode is
+part of the helper contract and must be designed so it can work rather than
 bolted on as a separate product later.
 
-## Post-V0.9.2 Hybrid TCP Proxy Plus WireGuard Profile
+## Future Hybrid TCP Proxy Plus WireGuard Profile
 
-A useful post-v0.9.2 deployment profile is:
+A useful v0.9.3/future deployment profile is:
 
 ```text
 TCP traffic
@@ -82,8 +82,8 @@ Boundary:
 - Gatherlink core still carries encrypted service payloads and does not inspect
   application protocols, raw TCP sequence numbers, or WireGuard payloads
 
-This is not part of the v0.9.2 release scope. When promoted later, it should be
-tested first without transparent interception by using explicit TCP proxy
+This is not part of the closed v0.9.2 release scope. When promoted, it should
+be tested first without transparent interception by using explicit TCP proxy
 listeners and ordinary WireGuard-over-Gatherlink for the remaining traffic.
 Transparent interception can then be proven separately with the same TCP stream
 service.
@@ -158,6 +158,19 @@ path_preference
 send_backlog
 latency_sensitivity
 ```
+
+The shared Gatherlink UDP stream adapter places bounded `traffic_class` and
+`flowlet_key` hints on the helper open frame and emits them in stream-open
+diagnostics. These are Python/helper facts for scheduler policy and operator
+diagnostics. They are not Rust TCP semantics and they do not require inspecting
+encrypted WireGuard or application payloads.
+
+The adapter also emits bounded stream outcome facts from the companion exit:
+`helper.stream.credit` reports advertised helper credit and current peak write
+backlog, `helper.stream.closed` reports byte/frame counts and peak backlog, and
+`helper.stream.reset` reports explicit reset reasons. These facts are meant for
+Python diagnostics and future scheduler inputs. They are not reliability
+signals for ordinary UDP payloads and they are not interpreted by Rust.
 
 Default scheduling posture:
 

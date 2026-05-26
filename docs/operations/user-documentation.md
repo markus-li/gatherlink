@@ -8,7 +8,7 @@ Wiki may publish a copy of those docs for easier browsing, but the Wiki must not
 become the source of truth.
 
 General documentation maintenance rules live in
-`docs/operations/documentation-maintenance.md`. This file only adds the
+[`docs/operations/documentation-maintenance.md`](documentation-maintenance.md). This file only adds the
 user-documentation-specific release and Wiki workflow.
 
 ## Shape
@@ -37,11 +37,11 @@ Avoid:
 
 The main user pages are:
 
-- `docs/user/core-service.md`
-- `docs/user/config-cookbook.md`
-- `docs/user/socks5.md`
-- `docs/user/wireguard.md`
-- `docs/user/troubleshooting.md`
+- [`docs/user/core-service.md`](../user/core-service.md)
+- [`docs/user/config-cookbook.md`](../user/config-cookbook.md)
+- [`docs/user/socks5.md`](../user/socks5.md)
+- [`docs/user/wireguard.md`](../user/wireguard.md)
+- [`docs/user/troubleshooting.md`](../user/troubleshooting.md)
 
 Add new user pages only when there is a real operator workflow. Do not mirror
 every design doc into user docs.

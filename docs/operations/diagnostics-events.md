@@ -99,6 +99,7 @@ Suggested initial codes include:
 - `rekey.succeeded`
 - `rekey.rejected`
 - `rekey.expired`
+- `scheduler.decision`
 
 Helper warnings use the same event bus as dataplane warnings. This keeps
 operator views, JSONL logs, and future metrics consistent.
@@ -112,6 +113,13 @@ Operator-facing "why" text should be generated from structured facts, not
 handwritten one-off log strings. For example, a denied SOCKS request should
 carry the helper, service, peer, policy rule, and decision reason as fields, and
 the terminal view may render those fields as a sentence.
+
+Scheduler decisions follow the same rule. `scheduler.decision` should carry the
+configured mode, effective mode, path health, service allocation, and congestion
+fairness facts. When Python compiles a self-limiting pacing budget because a
+path is queued, lossy, or dropping locally, the event should include the policy,
+pressure level, reason, capacity, and resulting `pacing_budget_bps` rather than
+a hand-written warning line.
 
 ## Initial Terminal View
 

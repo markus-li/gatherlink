@@ -33,7 +33,7 @@ Suggested default development verification:
 
 Durable docs should not record volatile test totals. The canonical maintenance
 rules for volatile facts and TODOs live in
-`docs/operations/documentation-maintenance.md`.
+[`docs/operations/documentation-maintenance.md`](documentation-maintenance.md).
 
 ## Lab Contract
 
@@ -98,7 +98,7 @@ failure, replay, expired session, stale generation, unauthorized next hop, and
 rate-limit failure.
 
 The first runnable integration target is the local dual-path lab documented in
-`docs/labs/local-dual-path-lab.md`. Lab setup and shaping tools may use root, but the
+[`docs/labs/local-dual-path-lab.md`](../labs/local-dual-path-lab.md). Lab setup and shaping tools may use root, but the
 two Gatherlink instances must run unprivileged.
 
 ## Netem scenarios
@@ -119,7 +119,7 @@ failure does not kill service, and diagnostics explain decisions.
 
 Local demos may still use explicit plaintext mode when they are testing lab
 plumbing rather than security behavior, as documented in
-`docs/protocol/plaintext-security-mode.md`. That mode must warn loudly in Python
+[`docs/protocol/plaintext-security-mode.md`](../protocol/plaintext-security-mode.md). That mode must warn loudly in Python
 terminal output and logs. Secure demos should use authenticated Noise-generated
 config material or the explicit encrypted lab/manual configs.
 

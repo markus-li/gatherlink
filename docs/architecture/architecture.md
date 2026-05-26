@@ -31,4 +31,4 @@ but Python decides what those primitives mean and when they should change.
 Helpers are also Python-owned unless a future performance profile proves that a
 small helper-specific primitive belongs in Rust.
 
-For the full contract, read `docs/architecture/architecture-contract.md`.
+For the full contract, read [`docs/architecture/architecture-contract.md`](architecture-contract.md).

@@ -95,7 +95,7 @@ should move through `python/gatherlink/platform`.
 | `docs/reports` | living status, roadmaps, audit follow-ups |
 | `docs/future` | shaped ideas not yet release-authorized |
 
-When docs disagree, follow `docs/README.md` and promote current decisions into
+When docs disagree, follow [`docs/README.md`](../README.md) and promote current decisions into
 the canonical doc rather than implementing from stale reports.
 
 ## Boundary Smells

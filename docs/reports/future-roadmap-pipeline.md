@@ -3,7 +3,7 @@
 This is not the v0.9.2 roadmap.
 
 It is a holding area for well-shaped work outside the active release roadmap.
-Anything promoted into v0.9.2 belongs in `docs/reports/v0.9.2-roadmap.md`,
+Anything promoted into v0.9.2 belongs in [`docs/reports/v0.9.2-roadmap.md`](v0.9.2-roadmap.md),
 not here. Nothing here is implementation authorization by itself.
 
 ## Promotion Rules
@@ -18,7 +18,7 @@ A pipeline item can be promoted into a real release roadmap only when it has:
 - no conflict with the project laws
 
 Project laws still apply. The canonical policy home is
-`docs/architecture/architecture-contract.md`; this pipeline should not duplicate
+[`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md); this pipeline should not duplicate
 permanent boundaries except where an item needs a local release-promotion note.
 
 ## Source TODO Parking Map
@@ -41,15 +41,16 @@ roadmap home. Current parking:
 - `config-schema-migration`: future config compatibility work once persisted
   appliance configs exist.
 - `dns-helper` and `dns-policy`: honest current DNS policy behavior belongs in
-  v0.9.2; richer DNS advanced modes remain future-only.
-- `dns-doh`: current explicit DoH upstream behavior belongs in v0.9.2; richer
-  DoH policy, bootstrap, and validation combinations remain future-only.
-- `helper-diagnostics` and `logging-diagnostics`: the narrow doctor/operator
-  polish slice belongs in v0.9.2; broader metrics/event integrations remain
+  the released baseline; richer DNS advanced modes remain future-only.
+- `dns-doh`: current explicit DoH upstream behavior belongs in the released
+  baseline; richer DoH policy, bootstrap, and validation combinations remain
   future-only.
+- `helper-diagnostics` and `logging-diagnostics`: the narrow doctor/operator
+  polish slice belongs in the released baseline; broader metrics/event
+  integrations remain future-only.
 - `perf`: narrow socket, pacing, queue, and scheduler execution hints may be
-  v0.9.2 work only when backed by benchmarks; broader kernel, batching, or
-  hot-path relocation decisions remain future performance work.
+  active release work only when backed by benchmarks; broader kernel, batching,
+  or hot-path relocation decisions remain future performance work.
 - `time-quality`: future time quality and authenticated time sources.
 - `status-http-helper` and `status-http-write-api`: future local REST API
   hardening after the guarded local status endpoint has more use.
@@ -59,9 +60,65 @@ roadmap home. Current parking:
 - `cleanup-scope`: v0.9.2 should decide whether lab bundle cleanup remains
   plan-only or gains guarded execution; broader recovery tooling remains
   future-only.
-- `listen-port-policy`: promoted to `docs/reports/v0.9.2-roadmap.md`.
+- `listen-port-policy`: promoted to [`docs/reports/v0.9.2-roadmap.md`](v0.9.2-roadmap.md).
 - `handshake-abuse-protection`, `listen-allow-deny`, and `stealth-scan-tests`:
   future security and DoS-resistance hardening.
+
+## Public Distribution And Website Pipeline
+
+These items are public-release infrastructure. They should be promoted into a
+release roadmap only when the release needs them, with the same evidence rules
+as runtime features.
+
+### Debian Package Build And Publishing
+
+Status: future pipeline; moved out of active v0.9.3 scope.
+
+Why it is interesting:
+
+- Gatherlink is Debian-first, and a package is the cleanest user installation
+  story once the CLI and service lifecycle are stable.
+- A package gives repeatable install, upgrade, rollback, and file ownership
+  behavior for the Python control plane and Rust dataplane binding.
+
+Boundary:
+
+- packaging scripts may install files, examples, completions, and docs
+- packaging scripts must not auto-enable privileged helpers, rewrite network
+  state, or start tunnels without explicit operator action
+- Debian remains the compatibility backend; this is not broad platform support
+
+Promotion requirements:
+
+- reproducible package build command
+- clean Debian install smoke
+- package content audit for private/generated files
+- documented upgrade, rollback, and uninstall behavior
+- publishing decision: local `.deb`, apt repository, or both
+
+### Cloudflare-Hosted Public Website
+
+Status: future pipeline; moved out of active v0.9.3 scope.
+
+Why it is interesting:
+
+- The public repository needs a clear landing point once releases are public.
+- A small static site can explain Gatherlink, link docs/releases, and set
+  expectations without building a hosted product.
+
+Boundary:
+
+- static website only unless a later roadmap explicitly says otherwise
+- no hosted accounts, remote management, telemetry, or control-plane behavior
+- no private lab hostnames, private repository names, keys, or generated local
+  benchmark artifacts
+
+Promotion requirements:
+
+- documented site scope and source ownership
+- checked links to docs and GitHub releases
+- security and benchmark caveats visible without marketing overreach
+- Cloudflare deployment documented separately from core runtime behavior
 
 ## UDP Multipath Pipeline After V0.9.2
 
@@ -309,7 +366,8 @@ Boundary:
 - helper hints are inputs, not authority; Python decides how much to trust them
 - Rust receives only compiled scheduler primitives, not device or access-type
   meaning
-- this is post-v0.9.2 discovery work and must not become an active v0.9.2 gate
+- this is discovery work and must not become an active release gate until a
+  release roadmap explicitly promotes it
 
 Promotion requirements:
 
@@ -355,7 +413,7 @@ Boundary:
 
 Why it is interesting:
 
-- `docs/protocol/security.md` defines the canonical WireGuard-inspired security
+- [`docs/protocol/security.md`](../protocol/security.md) defines the canonical WireGuard-inspired security
   posture for Gatherlink
 - several items are already aligned, but some remain future work after v0.9.2
   reserves handshake anti-DoS packet fields
@@ -379,7 +437,7 @@ Future work to complete or deepen:
 
 Boundary:
 
-- follow `docs/protocol/security.md` as the canonical security posture
+- follow [`docs/protocol/security.md`](../protocol/security.md) as the canonical security posture
 - do not change encrypted data packet headers unless a later release roadmap
   explicitly promotes a protocol revision
 - do not turn WireGuard inspiration into WireGuard compatibility claims
@@ -405,8 +463,8 @@ Why it is interesting:
 
 Boundary:
 
-- follow `docs/architecture/architecture-contract.md` and
-  `docs/protocol/security.md`
+- follow [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md) and
+  [`docs/protocol/security.md`](../protocol/security.md)
 - this is listener admission policy, not routing policy
 - defaults should remain usable for roaming peers, but hardened deployments
   should be able to opt into strict source policy
@@ -445,7 +503,7 @@ Why it is interesting:
 Recommended initial pattern:
 
 - use the reserved handshake anti-DoS fields defined in
-  `docs/protocol/security.md` for cookie-style proof-of-return-path behavior
+  [`docs/protocol/security.md`](../protocol/security.md) for cookie-style proof-of-return-path behavior
   when exposed handshake/auth setup needs protection before a session exists
 - apply short per-source handshake/auth rate limits for unknown sources
 - use IPv6 prefix-aware limiting for source addresses, similar in spirit to
@@ -484,7 +542,7 @@ Spoofing and NAT caution:
 Boundary:
 
 - invalid traffic still receives no network response
-- follow `docs/protocol/security.md` for silent-drop and authentication posture
+- follow [`docs/protocol/security.md`](../protocol/security.md) for silent-drop and authentication posture
 - this is receive-side abuse protection, not peer reputation or routing policy
 
 Config posture:
@@ -563,7 +621,7 @@ Why it is interesting:
 Boundary:
 
 - reserved service id `7` is not active in current code
-- follow `docs/protocol/security.md` for handshake, identity, and silent-drop
+- follow [`docs/protocol/security.md`](../protocol/security.md) for handshake, identity, and silent-drop
   posture
 - this item is about an in-band setup lane, not changing the authenticated
   session/runtime split
@@ -620,7 +678,7 @@ Boundary:
 
 - future optimization only; not a semantic redesign
 - follow the carrier and ownership contracts in
-  `docs/architecture/architecture-contract.md`
+  [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md)
 - compare against the existing Python-owned carrier adapter before promoting a
   Rust-native path
 
@@ -650,7 +708,7 @@ Why it is interesting:
 Boundary:
 
 - future candidate after v0.9.2 unless a later roadmap promotes it
-- follow the carrier contract in `docs/architecture/architecture-contract.md`
+- follow the carrier contract in [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md)
 - this is an additional carrier candidate, not a replacement for direct QUIC
   DATAGRAM or HTTP/3 DATAGRAM
 - ordinary HTTP reverse proxying is not enough
@@ -681,7 +739,7 @@ Trade-offs:
 Boundary:
 
 - fallback only, not the preferred carrier
-- follow the carrier contract in `docs/architecture/architecture-contract.md`
+- follow the carrier contract in [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md)
 - must preserve packet boundaries explicitly inside the stream
 - must expose diagnostics that explain latency, queueing, and fallback state
 
@@ -703,7 +761,7 @@ Boundary:
 
 - fallback only
 - no routing semantics in TLS/SNI
-- follow the carrier contract in `docs/architecture/architecture-contract.md`
+- follow the carrier contract in [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md)
 - must not become the baseline performance path
 
 Promotion requirements:
@@ -747,9 +805,9 @@ Why it is interesting:
 
 Boundary:
 
-- follow `docs/protocol/relay-session-lifecycle.md`,
-  `docs/protocol/relay-trust-model.md`, and
-  `docs/architecture/architecture-contract.md`
+- follow [`docs/protocol/relay-session-lifecycle.md`](../protocol/relay-session-lifecycle.md),
+  [`docs/protocol/relay-trust-model.md`](../protocol/relay-trust-model.md), and
+  [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md)
 - this item is about automating policy selection and diagnostics, not changing
   the relay trust model
 
@@ -770,7 +828,7 @@ Why it is interesting:
 Boundary:
 
 - service-to-peer mappings remain authenticated control/topology state
-- follow `docs/protocol/control-context.md` for what control context may change
+- follow [`docs/protocol/control-context.md`](../protocol/control-context.md) for what control context may change
 - failover should be explicit and diagnosable
 
 Promotion requirements:
@@ -790,7 +848,7 @@ Why it is interesting:
 Boundary:
 
 - signed artifacts remain canonical
-- follow `docs/protocol/security.md` and `docs/future/identity-and-topology.md`
+- follow [`docs/protocol/security.md`](../protocol/security.md) and [`docs/future/identity-and-topology.md`](../future/identity-and-topology.md)
 - this item is about assisted distribution UX, not changing trust authority
 
 Promotion requirements:
@@ -812,7 +870,7 @@ Why it is interesting:
 Boundary:
 
 - potential future work only, not an active release commitment
-- follow `docs/protocol/security.md` and `docs/future/identity-and-topology.md`
+- follow [`docs/protocol/security.md`](../protocol/security.md) and [`docs/future/identity-and-topology.md`](../future/identity-and-topology.md)
 - this item is about operator UX around trust roots, not packet/session crypto
 
 Promotion requirements:
@@ -834,8 +892,8 @@ Why it is interesting:
 Boundary:
 
 - helper detects and reports portal state
-- follow helper boundaries in `docs/architecture/architecture-contract.md` and
-  `docs/helpers/captive-portal-helper.md`
+- follow helper boundaries in [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md) and
+  [`docs/helpers/captive-portal-helper.md`](../helpers/captive-portal-helper.md)
 
 Promotion requirements:
 
@@ -853,8 +911,8 @@ Boundary:
 
 - orchestration helper only
 - platform-specific behavior behind Debian compatibility tooling
-- follow helper boundaries in `docs/architecture/architecture-contract.md` and
-  `docs/helpers/ipsec-helper.md`
+- follow helper boundaries in [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md) and
+  [`docs/helpers/ipsec-helper.md`](../helpers/ipsec-helper.md)
 
 Promotion requirements:
 
@@ -871,8 +929,8 @@ Why it is interesting:
 Boundary:
 
 - advisory only
-- follow helper boundaries in `docs/architecture/architecture-contract.md` and
-  `docs/helpers/policy-advisor.md`
+- follow helper boundaries in [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md) and
+  [`docs/helpers/policy-advisor.md`](../helpers/policy-advisor.md)
 
 Promotion requirements:
 
@@ -894,8 +952,8 @@ Why it is interesting:
 Boundary:
 
 - potential future work only, not an active release commitment
-- follow `docs/helpers/dns-helper.md` for DNS helper scope and
-  `docs/operations/library-selection.md` for dependency decisions
+- follow [`docs/helpers/dns-helper.md`](../helpers/dns-helper.md) for DNS helper scope and
+  [`docs/operations/library-selection.md`](../operations/library-selection.md) for dependency decisions
 - future work should add behavior only with clear privacy, validation, and
   diagnostics tests
 
@@ -917,7 +975,7 @@ Why it is interesting:
 Boundary:
 
 - potential future work only, not an active release commitment
-- follow `docs/helpers/socks5-helper.md` for SOCKS helper scope
+- follow [`docs/helpers/socks5-helper.md`](../helpers/socks5-helper.md) for SOCKS helper scope
 - TCP CONNECT remains the current supported scope until this is promoted
 - any multiplexing layer must stay a helper transport abstraction over
   Gatherlink UDP services
@@ -941,7 +999,7 @@ Why it is interesting:
 Boundary:
 
 - potential future work only, not an active release commitment
-- follow `docs/helpers/time-sync.md` for time-helper scope
+- follow [`docs/helpers/time-sync.md`](../helpers/time-sync.md) for time-helper scope
 - future work should improve confidence scoring without making dataplane
   correctness depend on wall-clock sync
 
@@ -981,9 +1039,9 @@ Non-goals for this future item:
 
 Boundary:
 
-- follow `docs/runtime/scheduler.md`,
-  `docs/protocol/control-context.md`, and
-  `docs/architecture/architecture-contract.md`
+- follow [`docs/runtime/scheduler.md`](../runtime/scheduler.md),
+  [`docs/protocol/control-context.md`](../protocol/control-context.md), and
+  [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md)
 - this item is about richer optimization after v0.9.2 proves the telemetry
 
 Promotion requirements:
@@ -1009,7 +1067,7 @@ Why it is interesting:
 Boundary:
 
 - potential future work only, not an active release commitment
-- follow `docs/runtime/config-runtime-state.md` for reload ownership and
+- follow [`docs/runtime/config-runtime-state.md`](../runtime/config-runtime-state.md) for reload ownership and
   rollback expectations
 - this item is broader than the current scheduler reapply path
 
@@ -1032,7 +1090,7 @@ Boundary:
 - localhost only unless separately designed
 - write access remains experimental until explicitly promoted
 - write access should expire automatically unless restarted from CLI
-- CLI behavior remains canonical; see `docs/architecture/api-surface.md`
+- CLI behavior remains canonical; see [`docs/architecture/api-surface.md`](../architecture/api-surface.md)
 
 Promotion requirements:
 
@@ -1051,8 +1109,8 @@ Boundary:
 
 - read-only by default
 - built from existing diagnostics/status APIs
-- follow `docs/operations/diagnostics.md` and
-  `docs/architecture/api-surface.md`
+- follow [`docs/operations/diagnostics.md`](../operations/diagnostics.md) and
+  [`docs/architecture/api-surface.md`](../architecture/api-surface.md)
 
 Promotion requirements:
 
@@ -1072,8 +1130,8 @@ Why it is interesting:
 Boundary:
 
 - potential future work only, not an active release commitment
-- follow `docs/operations/diagnostics.md` for diagnostics/state ownership and
-  `docs/protocol/security.md` for redaction posture
+- follow [`docs/operations/diagnostics.md`](../operations/diagnostics.md) for diagnostics/state ownership and
+  [`docs/protocol/security.md`](../protocol/security.md) for redaction posture
 - remote exposure requires a separate authentication and threat-model decision
 
 Promotion requirements:
@@ -1095,7 +1153,7 @@ Why it is interesting:
 Boundary:
 
 - potential future work only, not an active release commitment
-- follow `docs/runtime/state-persistence.md` and `docs/protocol/security.md`
+- follow [`docs/runtime/state-persistence.md`](../runtime/state-persistence.md) and [`docs/protocol/security.md`](../protocol/security.md)
 - safe mode should prioritize inspection and recovery over normal service
   operation
 
@@ -1122,9 +1180,9 @@ Boundary:
 
 - Debian remains the only compatibility layer until another platform is
   explicitly promoted
-- follow `docs/operations/appliance-update-strategy.md`,
-  `docs/runtime/state-persistence.md`, and
-  `docs/operations/user-documentation.md`
+- follow [`docs/operations/appliance-update-strategy.md`](../operations/appliance-update-strategy.md),
+  [`docs/runtime/state-persistence.md`](../runtime/state-persistence.md), and
+  [`docs/operations/user-documentation.md`](../operations/user-documentation.md)
 - v0.9.1 GitHub release packaging is the baseline, not the final update system
 - future improvements may harden the Wiki publishing automation beyond the
   v0.9.1 prepared payload
@@ -1155,8 +1213,8 @@ Boundary:
 
 - potential future work only, not an active release commitment
 - lab/tooling convenience only, not a runtime dependency
-- follow `docs/operations/testing-strategy.md` and
-  `docs/operations/diagnostics.md`
+- follow [`docs/operations/testing-strategy.md`](../operations/testing-strategy.md) and
+  [`docs/operations/diagnostics.md`](../operations/diagnostics.md)
 
 Promotion requirements:
 
@@ -1164,7 +1222,7 @@ Promotion requirements:
 - docs showing when to use it instead of external tools
 - lab proof that it covers the common smoke-test paths
 - follow the volatile-fact rules in
-  `docs/operations/documentation-maintenance.md`
+  [`docs/operations/documentation-maintenance.md`](../operations/documentation-maintenance.md)
 
 ## Platform Pipeline
 
@@ -1185,7 +1243,7 @@ Boundary:
 - helper-owned, opt-in, and Linux-specific
 - limited to explicit Gatherlink endpoint scenarios
 - follow the firewall/NAT/helper boundary in
-  `docs/architecture/architecture-contract.md`
+  [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md)
 - must use labeled nftables/iptables chains, marks, sets, comments, or other
   explicit hook points so external firewall tools can place rules before and
   after Gatherlink-owned rules
@@ -1210,7 +1268,7 @@ Boundary:
 
 - Debian remains the only currently supported layer
 - new OS behavior must enter through compatibility modules/scripts
-- follow `docs/architecture/architecture-contract.md` for compatibility-layer
+- follow [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md) for compatibility-layer
   boundaries
 
 Promotion requirements:

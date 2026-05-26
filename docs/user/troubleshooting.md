@@ -2,8 +2,8 @@
 
 Start with these checks before reading design docs.
 
-For deeper scenario diagnosis, use `docs/operations/v0.9-troubleshooting-guide.md`.
-For event and counter meanings, use `docs/operations/diagnostics-dictionary.md`.
+For deeper scenario diagnosis, use [`docs/operations/v0.9-troubleshooting-guide.md`](../operations/v0.9-troubleshooting-guide.md).
+For event and counter meanings, use [`docs/operations/diagnostics-dictionary.md`](../operations/diagnostics-dictionary.md).
 
 ## Quick Doctor Check
 

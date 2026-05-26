@@ -6,8 +6,8 @@ The relay fabric is the set of available relay/transit/exit nodes and their
 capabilities.
 
 It is active helper work, but the first scope is discovery and health only.
-Encrypted relay-session forwarding is specified in `docs/protocol/relay-session-lifecycle.md`
-and `docs/protocol/protocol.md`. The relay-fabric helper discovers and scores candidates;
+Encrypted relay-session forwarding is specified in [`docs/protocol/relay-session-lifecycle.md`](../protocol/relay-session-lifecycle.md)
+and [`docs/protocol/protocol.md`](../protocol/protocol.md). The relay-fabric helper discovers and scores candidates;
 it does not make plaintext routing decisions.
 
 ## Relay functions
@@ -102,7 +102,7 @@ source requires a maintained, narrow client library.
 
 ## Boundary
 
-Relay fabric must follow `docs/protocol/relay-session-lifecycle.md`,
-`docs/protocol/relay-trust-model.md`, and
-`docs/architecture/architecture-contract.md`. This helper doc records relay
+Relay fabric must follow [`docs/protocol/relay-session-lifecycle.md`](../protocol/relay-session-lifecycle.md),
+[`docs/protocol/relay-trust-model.md`](../protocol/relay-trust-model.md), and
+[`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md). This helper doc records relay
 discovery and health scope only.

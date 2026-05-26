@@ -59,7 +59,7 @@ Current harness:
 - `tools/vm_acceptance/inventory.example.env`
 - `tools/vm_acceptance/config-node-a.json.template`
 - `tools/vm_acceptance/config-node-b.json.template`
-- `tools/vm_acceptance/README.md`
+- [`tools/vm_acceptance/README.md`](../../tools/vm_acceptance/README.md)
 - `tools/hyperv/run_gatherlink_vm_acceptance.sh` for the prepared Windows
   Hyper-V two-Debian-VM lab
 - `tools/hyperv/run_socks5_vm_acceptance.sh` for the SOCKS5-over-Gatherlink and
@@ -249,19 +249,19 @@ The first VM pass does not need all of these to block basic packet acceptance.
 It should record which checks are proven, which are not configured, and which
 need later follow-up.
 
-Current release evidence is summarized in `docs/project-living-assessment.md`
-and `docs/releases/v0.9.2.md`. Carrier-specific VM proof should be recorded
+Current release evidence is summarized in [`docs/project-living-assessment.md`](../project-living-assessment.md)
+and [`docs/releases/v0.9.2.md`](../releases/v0.9.2.md). Carrier-specific VM proof should be recorded
 there or in a dated benchmark/release report, not duplicated here.
 
 The Traefik checks use Traefik as a UDP layer-4 forwarder only. Gatherlink
 packet semantics remain inside the carrier adapter and Rust dataplane.
 
 The QUIC-through-Traefik check is documented in
-`docs/labs/quic-traefik-proxy.md`. It proves only UDP-capable layer-4
+[`docs/labs/quic-traefik-proxy.md`](quic-traefik-proxy.md). It proves only UDP-capable layer-4
 forwarding. It must not be implemented as HTTP or HTTP/3 reverse proxying.
 
 The HTTP/3 DATAGRAM check is documented in
-`docs/labs/http3-datagram-carrier.md`. It proves explicit HTTP/3 datagram
+[`docs/labs/http3-datagram-carrier.md`](http3-datagram-carrier.md). It proves explicit HTTP/3 datagram
 support, not ordinary HTTP/3 request proxying.
 
 VM and lab acceptance must include direct no-proxy carrier cases even though the

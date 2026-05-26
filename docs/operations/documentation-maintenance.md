@@ -8,24 +8,24 @@ instead of repeating them across roadmap, user, helper, and report files.
 
 If two docs disagree, prefer the more specific canonical home:
 
-- `docs/protocol/protocol.md` owns wire layout, frame shape, service ids,
+- [`docs/protocol/protocol.md`](../protocol/protocol.md) owns wire layout, frame shape, service ids,
   aggregation, and fragmentation.
-- `docs/protocol/security.md` and
-  `docs/protocol/relay-session-lifecycle.md` own secure transport, crypto,
+- [`docs/protocol/security.md`](../protocol/security.md) and
+  [`docs/protocol/relay-session-lifecycle.md`](../protocol/relay-session-lifecycle.md) own secure transport, crypto,
   replay, stealth receive, handshake posture, and relay-hop security.
-- `docs/protocol/runtime-session-model.md` owns sessions, services, paths,
+- [`docs/protocol/runtime-session-model.md`](../protocol/runtime-session-model.md) owns sessions, services, paths,
   receiver indexes, duplicate behavior, and v1/v2 presentation boundaries.
-- `docs/runtime/config-runtime-state.md` owns human config versus compiled
+- [`docs/runtime/config-runtime-state.md`](../runtime/config-runtime-state.md) owns human config versus compiled
   runtime state, reload posture, numeric ids, and JSON introspection.
-- `docs/runtime/scheduler.md` owns scheduler modes, Python/Rust scheduler
+- [`docs/runtime/scheduler.md`](../runtime/scheduler.md) owns scheduler modes, Python/Rust scheduler
   boundaries, and packet-time scheduler behavior.
-- `docs/helpers/helper-priorities.md` owns helper scope, active/deferred
+- [`docs/helpers/helper-priorities.md`](../helpers/helper-priorities.md) owns helper scope, active/deferred
   status, and priority.
-- `docs/architecture/architecture-contract.md` owns project boundaries and
+- [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md) owns project boundaries and
   permanent ownership rules.
-- `docs/operations/v0.9-operator-runbook.md` and
-  `docs/operations/v0.9-troubleshooting-guide.md` own current operator flows.
-- `docs/benchmarks/README.md` and `docs/benchmarks/hyperv-performance-log.md`
+- [`docs/operations/v0.9-operator-runbook.md`](v0.9-operator-runbook.md) and
+  [`docs/operations/v0.9-troubleshooting-guide.md`](v0.9-troubleshooting-guide.md) own current operator flows.
+- [`docs/benchmarks/README.md`](../benchmarks/README.md) and [`docs/benchmarks/hyperv-performance-log.md`](../benchmarks/hyperv-performance-log.md)
   own benchmark method and measured performance evidence. Benchmark rows should
   keep comparison percentages in the row whenever a baseline exists; use `n/a`
   only when the missing baseline is called out.
@@ -35,14 +35,14 @@ release roadmap explicitly promotes their content.
 
 ## Navigation Rules
 
-- `docs/README.md` should help readers find the right document quickly. It
+- [`docs/README.md`](../README.md) should help readers find the right document quickly. It
   should not restate the full maintenance policy.
-- Directory `README.md` files should explain what belongs in that directory and
+- Directory [`README.md`](../../README.md) files should explain what belongs in that directory and
   list likely entry points.
 - Prefer one concise canonical doc per topic.
 - Do not create companion `-full.md` copies. Expand the canonical doc or split
   by a clearer subject name.
-- When adding a doc that is a likely entry point, update `docs/README.md` and
+- When adding a doc that is a likely entry point, update [`docs/README.md`](../README.md) and
   the directory README.
 - When a feature doc depends on a broader rule, summarize only the local
   consequence and link to the canonical rule.
@@ -95,8 +95,8 @@ User documentation must stay short, step-by-step, and scenario-based.
 
 - Write for common real uses, not every possible feature.
 - Split usage by helper or workflow, especially SOCKS5 and WireGuard.
-- Link to `docs/user/config-cookbook.md` for config patterns.
-- Link to `docs/operations/v0.9-operator-runbook.md` for day-to-day operation.
+- Link to [`docs/user/config-cookbook.md`](../user/config-cookbook.md) for config patterns.
+- Link to [`docs/operations/v0.9-operator-runbook.md`](v0.9-operator-runbook.md) for day-to-day operation.
 - Keep commands copyable and examples small.
 - Explain only what the user needs to run, check, and stop the service.
 - Put troubleshooting near the user path: status, logs, monitor, diagnostics.
@@ -106,7 +106,7 @@ User documentation must stay short, step-by-step, and scenario-based.
 
 ## Dependency Claims
 
-Library-selection policy lives in `docs/operations/library-selection.md`.
+Library-selection policy lives in [`docs/operations/library-selection.md`](library-selection.md).
 Feature docs may name a selected dependency, but they should avoid timeless
 maintenance/popularity claims unless the library-selection doc or a dated
 decision record supports them.

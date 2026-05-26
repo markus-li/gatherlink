@@ -37,6 +37,29 @@ gatherlink run start node-b.json --name core.node-b --scheduler-reapply-interval
 gatherlink run start node-a.json --name core.node-a --scheduler-reapply-interval 5
 ```
 
+## Authenticated Live Rekey
+
+Authenticated configs produced by the Noise provisioning commands can run
+without autonomous rekey inputs, but then they only execute the already
+provisioned session. To let the foreground service originate and accept live
+rekey, pass the local identity, expected peer identity, signed topology, and
+trust root together:
+
+```bash
+gatherlink run start node-a.json \
+  --name core.node-a \
+  --scheduler-reapply-interval 5 \
+  --rekey-local-identity state/node-a.identity.json \
+  --rekey-peer-identity state/node-b.public.json \
+  --rekey-topology state/topology.signed.json \
+  --rekey-trust-root state/trust-root.public.json
+```
+
+Python uses those files to validate topology, identity, receiver-index
+direction, expiry, and rekey cadence. Rust only carries the reserved
+auth/crypto payload bytes and later executes the compiled replacement AEAD
+facts after Python hot-reapplies them.
+
 ## Check It
 
 ```bash

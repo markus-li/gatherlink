@@ -2,7 +2,7 @@
 
 This is the reusable release-building guide. Roadmaps can point here instead of
 copying the same process text into every release-specific document. The standing
-implementation rules live in `docs/operations/development-discipline.md`; use
+implementation rules live in [`docs/operations/development-discipline.md`](development-discipline.md); use
 that document together with this process when building release slices.
 
 ## Three-Pass Rule

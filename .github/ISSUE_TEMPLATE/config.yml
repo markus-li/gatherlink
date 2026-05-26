@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Gatherlink documentation
+    url: https://github.com/markus-li/gatherlink/tree/main/docs
+    about: Check the user docs and troubleshooting notes before opening an issue.

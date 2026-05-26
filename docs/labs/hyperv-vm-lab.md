@@ -373,7 +373,7 @@ path reordering dominate the tail. Keep the default normal-MTU path run at the
 measured stable setting; shorter path runs improved one direction while hurting
 the other, and larger batch sizes or ordinary-batch worker spawning made the
 system burstier. Further work should start from the checklist in
-`docs/architecture/performance-philosophy.md`, not from ad hoc constant changes.
+[`docs/architecture/performance-philosophy.md`](../architecture/performance-philosophy.md), not from ad hoc constant changes.
 
 Acceptance should not require every path to carry a tiny exact-packet smoke
 burst. That check proves delivery and service lifecycle. Multipath split is

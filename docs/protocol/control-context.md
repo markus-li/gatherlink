@@ -82,6 +82,13 @@ cadence should stay low at baseline and send promptly when an important fact
 changes. Discovery is cheap enough to keep on, but it must not become a
 continuous live-status stream.
 
+Sparse real-data timing samples may ride in control metadata so Python can
+improve one-way latency estimates without per-packet callbacks. They are
+opportunistic hints, not payload acknowledgements, and the Python control-plane
+must trim them to the smallest active path's compiled MTU budget before handing
+the reserved-service payload to Rust. Non-sample discovery facts take priority
+when the budget is tight.
+
 Remote IPC/status is explicit, louder, temporary, and read-only. It uses the
 remote-status reserved service lane when an operator or local tool asks for a
 peer status snapshot or short-lived status stream. The requester refreshes the

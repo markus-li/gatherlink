@@ -61,12 +61,21 @@ The Hyper-V benchmark entrypoints are:
 - `tools/run_three_path_profile_bench.py`: local three-path WAN profile runner
   that compares schedulers, cold/warm capacity cache behavior, and pass/target
   status from `thresholds.json`
+- `tools/export_path_profile.py`: converts observed per-path capacity,
+  latency, jitter, loss, and MTU samples into a thresholds-style lab profile
+  draft. Treat generated profiles as reviewable drafts, not release evidence,
+  until a human checks the shape and a lab/VM run proves it.
 
 Every scenario should write:
 
 - `report.md` for operator-readable notes
 - `report.json` or scenario JSON files for machine comparison
 - command logs and node snapshots where possible
+
+Machine-readable benchmark summaries should include a `schema_version`,
+per-row `gate_status`, and baseline ratios such as `wg_userland_ratio` when the
+matching baseline exists. Keep adding optional fields rather than removing
+existing ones so old reports stay parseable.
 
 Local scheduler matrix runs prune bulky per-service runtime logs by default
 after `summary.json`, before/after status snapshots, and command logs have been

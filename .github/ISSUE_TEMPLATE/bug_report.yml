@@ -1,0 +1,50 @@
+name: Bug report
+description: Report something that failed or behaved incorrectly.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting this. Please remove secrets, private keys, tokens, public IPs you do not want to share, and private hostnames before submitting.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the failure and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the commands/config shape if possible.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Gatherlink version or commit
+      placeholder: v0.9.3 or git commit hash
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Debian version, kernel version, VM/WSL/bare metal
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Paste redacted logs, diagnostics JSONL snippets, monitor output, or error text.
+      render: text
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed private keys, tokens, passwords, private hostnames, and private IPs I do not want to share.
+          required: true

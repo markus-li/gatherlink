@@ -28,5 +28,5 @@ are active, deferred, or future-only.
 - Helpers use Gatherlink transport; direct behavior is only for explicit lab
   smoke modes.
 - Helper docs should not duplicate protocol, runtime, or platform ownership.
-- Follow `docs/operations/documentation-maintenance.md` for duplication,
+- Follow [`docs/operations/documentation-maintenance.md`](../operations/documentation-maintenance.md) for duplication,
   canonical-linking, and volatile-fact rules.

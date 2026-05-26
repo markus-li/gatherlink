@@ -4,7 +4,7 @@
 
 This document captures durable project principles. It should be treated as a
 guardrail for future implementation and pull requests. The canonical ownership
-and boundary contract is `docs/architecture/architecture-contract.md`; this file
+and boundary contract is [`docs/architecture/architecture-contract.md`](architecture-contract.md); this file
 is the short human-readable version.
 
 ## Primary abstraction
@@ -21,13 +21,13 @@ Everything else is either orchestration, observability, or optional helper logic
 
 Keep Gatherlink focused on virtual UDP services over a carrier-aware fabric.
 Permanent exclusions and helper carve-outs live in
-`docs/architecture/architecture-contract.md`.
+[`docs/architecture/architecture-contract.md`](architecture-contract.md).
 
 ## Keep Ownership Obvious
 
 Python owns meaning; Rust executes compact facts. Detailed module boundaries
-belong in `docs/architecture/source-map.md` and
-`docs/architecture/architecture-contract.md`.
+belong in [`docs/architecture/source-map.md`](source-map.md) and
+[`docs/architecture/architecture-contract.md`](architecture-contract.md).
 
 ## Helpers are optional
 
@@ -47,7 +47,7 @@ Linux routers, AdGuard Home, Unbound, and dnsmasq.
 ## Non-root by default
 
 Normal Gatherlink operation should stay unprivileged. The exact host capability
-boundary lives in `docs/architecture/architecture-contract.md`.
+boundary lives in [`docs/architecture/architecture-contract.md`](architecture-contract.md).
 
 ## Boring failure beats clever failure
 

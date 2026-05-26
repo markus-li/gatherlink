@@ -2,8 +2,8 @@
 
 This was the "next implementation priorities" handoff used during the MVP build.
 It is now closed historical context, not a current priority list. Current work
-belongs in `docs/reports/v0.9.1-roadmap.md` or
-`docs/reports/future-roadmap-pipeline.md`.
+belongs in [`docs/reports/v0.9.1-roadmap.md`](v0.9.1-roadmap.md) or
+[`docs/reports/future-roadmap-pipeline.md`](future-roadmap-pipeline.md).
 
 ## Priority 1: Hot scheduler reapply loop
 

@@ -4,7 +4,7 @@ Gatherlink accepts small user-facing JSON configs and normalizes them into a
 canonical Pydantic model before any runtime logic sees them.
 
 For the broader config/runtime boundary, live reload model, numeric-id guidance,
-and runtime introspection requirements, see `docs/runtime/config-runtime-state.md`.
+and runtime introspection requirements, see [`docs/runtime/config-runtime-state.md`](config-runtime-state.md).
 
 Current supported example formats are:
 
@@ -26,9 +26,16 @@ That keeps migration logic in one place before the canonical Pydantic model runs
 Development install:
 
 ```bash
+python3 --version  # must be 3.12 or newer
+python3 -m venv .venv
 . .venv/bin/activate
+python -m pip install -r requirements.txt
 python -m pip install -e .
+maturin develop --manifest-path crates/pybindings/Cargo.toml --release
 ```
+
+For the full minimum setup and first smoke checks, see
+[`docs/user/quickstart.md`](../user/quickstart.md).
 
 Useful commands after the editable install:
 

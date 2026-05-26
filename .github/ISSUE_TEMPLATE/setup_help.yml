@@ -1,0 +1,43 @@
+name: Setup help
+description: Ask for help getting Gatherlink running.
+title: "[Setup]: "
+labels: ["setup"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gatherlink is currently Debian-focused. Please redact secrets and private host details.
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to set up?
+      placeholder: Core service, WireGuard-over-Gatherlink, SOCKS5, DNS helper, TCP forwarding, VM/lab test, etc.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Debian version, kernel version, VM/WSL/bare metal
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Config shape
+      description: Describe or paste a redacted config. Do not include secrets.
+      render: text
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands and output
+      description: Include the command that failed and the redacted output.
+      render: text
+  - type: checkboxes
+    id: docs
+    attributes:
+      label: Checks
+      options:
+        - label: I checked the user docs or troubleshooting guide first.
+        - label: I redacted private keys, tokens, passwords, private hostnames, and private IPs I do not want to share.
+          required: true

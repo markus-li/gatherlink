@@ -133,7 +133,9 @@ Rust also must not grow semantic control-plane branches. The allowed Rust
 reserved-service behavior is deliberately mechanical: forward `0..255` payloads
 to Python, send Python-provided service payloads through the Python-compiled
 service/path scheduler primitives, maintain cheap counters, and execute
-Python-compiled runtime state.
+Python-compiled runtime state. For auth/crypto specifically, Rust may carry
+reserved service id `7`, but Noise, rekey, receiver-index freshness, retries,
+and operator meaning stay in Python.
 
 ## Non-root design
 
@@ -349,7 +351,7 @@ Hooks must not become part of the scheduler.
 
 Helpers are optional integrations.
 
-Current helper priority and deferral decisions live in `docs/helpers/helper-priorities.md`.
+Current helper priority and deferral decisions live in [`docs/helpers/helper-priorities.md`](../helpers/helper-priorities.md).
 Do not maintain a competing helper roadmap here.
 
 Helpers may provide metadata/intent. They must not define core architecture.

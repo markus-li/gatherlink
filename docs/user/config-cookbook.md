@@ -137,6 +137,16 @@ tagging.
 
 ## WireGuard Over Gatherlink
 
+For a guided multipath setup, prefer:
+
+```bash
+gatherlink helpers wireguard-setup
+```
+
+The wizard generates Gatherlink client/server configs, WireGuard config
+skeletons, and an optional split-profile traffic plan. See
+[`docs/user/wireguard-multipath.md`](wireguard-multipath.md).
+
 Start from:
 
 ```text

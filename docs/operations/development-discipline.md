@@ -67,7 +67,7 @@ Work in small, coherent slices:
 6. Commit the coherent slice before moving on.
 
 For major features, use the three-pass release process in
-`docs/operations/release-development-process.md`: make it useful, make it
+[`docs/operations/release-development-process.md`](release-development-process.md): make it useful, make it
 clean, then make it stay clean. Between passes, review file placement and
 responsibility boundaries.
 

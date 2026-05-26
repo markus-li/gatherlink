@@ -198,13 +198,13 @@ Service IDs are unsigned 16-bit integers. The full protocol space is
 with user/application UDP services.
 
 The reserved table names protocol lanes, not automatic implementation status.
-Current code uses reserved service id `1` for the generic control metaband
-and id `8` for production-owned remote status. Other named lanes are reserved
-for future dedicated protocols unless a specific implementation doc says
-otherwise. For example, DNS tunnel traffic uses an explicit configured user
-service today, sink time and path labels ride inside control metadata, monitor
-cadence is local IPC, config changes use restart or scheduler reapply, and
-Noise/session provisioning is out-of-band CLI/file exchange.
+Current code uses reserved service id `1` for the generic control metaband,
+id `7` for Python-owned auth/crypto rekey payloads, and id `8` for
+production-owned remote status. Other named lanes are reserved for future
+dedicated protocols unless a specific implementation doc says otherwise. For
+example, DNS tunnel traffic uses an explicit configured user service today,
+sink time and path labels ride inside control metadata, monitor cadence is
+local IPC, and config changes use restart or scheduler reapply.
 
 | Range | Owner | Notes |
 | ---: | --- | --- |
@@ -215,7 +215,7 @@ Noise/session provisioning is out-of-band CLI/file exchange.
 | `4` | path discovery / keepalive | Reserved for future dedicated peer/path liveness; current path labels use control metadata |
 | `5` | diagnostics | Reserved for future monitor detail requests and diagnostic streams |
 | `6` | config apply | Reserved for future safe reload/apply coordination |
-| `7` | auth / crypto | Reserved for future in-band handshake traffic |
+| `7` | auth / crypto | Active Python-owned in-band rekey/auth control payloads; Rust only forwards bytes |
 | `8` | remote status | V1-required lane for explicit temporary read-only IPC/status export |
 | `9..255` | Gatherlink reserved | Future internal services |
 | `256..65535` | user/application services | Normal configured UDP services |

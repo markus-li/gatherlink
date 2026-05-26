@@ -1,0 +1,71 @@
+name: Speed result report
+description: Share real-world or lab performance results.
+title: "[Speed]: "
+labels: ["performance", "field-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Real-world speed reports are very useful. Please include enough detail to compare results, and redact anything private.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      placeholder: Example: fiber + 5G, WireGuard-over-Gatherlink, 3 paths, TCP reached ...
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment type
+      options:
+        - Real world
+        - Lab
+        - VM
+        - WSL
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: links
+    attributes:
+      label: Link/path details
+      description: Path types, baseline speeds, RTT, jitter, loss, SQM/AQM, router/modem/dish details if known.
+      placeholder: |
+        path-a: fiber, baseline down/up, RTT, jitter, loss
+        path-b: 5G/LTE/Starlink/etc, baseline down/up, RTT, jitter, loss
+    validations:
+      required: true
+  - type: textarea
+    id: test
+    attributes:
+      label: Test method
+      description: Commands, profile name, TCP streams, UDP target, duration, MTU, scheduler, traffic bias.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: Include raw Gatherlink, WG-over-GL, direct WireGuard path-set, single-best-path, CPU, retransmits, UDP loss, queue pressure, or monitor output when available.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Gatherlink version or commit
+      placeholder: v0.9.3 or git commit hash
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Debian version, kernel version, CPU, VM/bare metal
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed private keys, tokens, passwords, private hostnames, and private IPs I do not want to share.
+          required: true

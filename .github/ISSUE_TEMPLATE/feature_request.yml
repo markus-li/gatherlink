@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest a new feature or improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please keep the request focused on Gatherlink's scope: Debian-focused multipath transport, helpers, diagnostics, labs, and operator workflows.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What real user/operator problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: What should Gatherlink do?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Existing tools, config workarounds, or helper approaches.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope notes
+      description: Any security, platform, helper/core boundary, or compatibility concerns.

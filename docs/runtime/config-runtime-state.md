@@ -37,6 +37,7 @@ Compiled runtime state should contain primitives such as:
 - replay window and counter parameters
 - helper/service runtime permissions
 - relay-hop session authorization
+- authenticated-session metadata used by Python for live rekey policy
 - diagnostic event codes and labels
 
 Runtime state should not contain human names as policy authority. Names may be
@@ -45,6 +46,18 @@ included only as diagnostic labels if they cannot affect packet-time decisions.
 Rust must not receive unresolved policy names such as "prefer home", "guest
 exit", or "allow helper X" and decide what they mean. Python resolves those into
 explicit runtime values first.
+
+Authenticated runtime security distinguishes two kinds of facts:
+
+- Rust executor facts: receiver indexes, traffic keys, replay state, and packet
+  counters.
+- Python policy facts: local node id, peer node id, topology generation,
+  session role, creation/expiry time, and rekey thresholds.
+
+The second group is keyless metadata. It is safe to show in config/runtime
+introspection and lets Python reconstruct the current authenticated session for
+future live rekey orchestration without teaching Rust identity or topology
+policy.
 
 ## Live reload
 

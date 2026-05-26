@@ -17,5 +17,5 @@ authorization. Promote a topic into a release roadmap before building it.
 
 - Keep these as design notes until a release roadmap promotes them.
 - Do not create runtime placeholder packages from future notes.
-- Follow `docs/operations/documentation-maintenance.md` for duplication,
+- Follow [`docs/operations/documentation-maintenance.md`](../operations/documentation-maintenance.md) for duplication,
   canonical-linking, and volatile-fact rules.

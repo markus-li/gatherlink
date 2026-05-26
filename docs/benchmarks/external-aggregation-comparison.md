@@ -217,9 +217,9 @@ field targets on those profiles, it is honest to describe the result as useful
 for real-world small-site aggregation. If it also passes `WG Gate`, it becomes
 competitive with direct tunnel aggregation rather than merely useful.
 
-Post-v0.9.2, a connection-profiling helper should be able to collect real path
-behavior and export a lab shape that resembles it. Those generated profiles
-should sit beside the fixed profiles above, not replace them. Fixed profiles
-are for repeatable comparison; generated profiles are for reproducing a user's
-actual Starlink, 5G, LTE, Wi-Fi, or mixed-link behavior closely enough to tune
-and debug scheduler decisions.
+In current and future performance work, a connection-profiling helper should be
+able to collect real path behavior and export a lab shape that resembles it.
+Those generated profiles should sit beside the fixed profiles above, not
+replace them. Fixed profiles are for repeatable comparison; generated profiles
+are for reproducing a user's actual Starlink, 5G, LTE, Wi-Fi, or mixed-link
+behavior closely enough to tune and debug scheduler decisions.

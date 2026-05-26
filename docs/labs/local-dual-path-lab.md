@@ -540,7 +540,7 @@ one script. The first scenario config should live at
 `configs/lab/local-dual-path.json`.
 
 The config should be able to describe future scenarios from
-`docs/operations/testing-strategy.md` even when they are not implemented yet. Unsupported
+[`docs/operations/testing-strategy.md`](../operations/testing-strategy.md) even when they are not implemented yet. Unsupported
 features must appear in the lab plan as `not_implemented` instead of being
 silently ignored.
 
