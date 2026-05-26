@@ -28,7 +28,13 @@ from gatherlink.helpers.transport import (
     MissingGatherlinkTransportError,
 )
 from gatherlink.helpers.udp_stream import GatherlinkUdpStreamExit, GatherlinkUdpStreamTransport
-from gatherlink.helpers.wireguard import wireguard_tool_status, wireguard_transport_plans
+from gatherlink.helpers.wireguard import (
+    WireGuardSetupRequest,
+    default_local_paths,
+    generate_wireguard_setup,
+    wireguard_tool_status,
+    wireguard_transport_plans,
+)
 from gatherlink.time.helper_client import TimeCorrectionRequest, request_time_correction
 
 EXAMPLE_CONFIG_DIR = Path("configs/examples")
@@ -252,12 +258,21 @@ async def _smoke_socks5_helper() -> HelperSmokeResult:
 def _smoke_wireguard_helper() -> HelperSmokeResult:
     runtime = expand_config(validate_config_file(EXAMPLE_CONFIG_DIR / "wireguard-client.json"))
     plans = wireguard_transport_plans(runtime)
+    setup = generate_wireguard_setup(
+        WireGuardSetupRequest(model="split", paths=default_local_paths(2), security="static", local_only=True)
+    )
     tool_status = wireguard_tool_status()
-    ok = bool(plans and plans[0].gatherlink_listen and plans[0].wireguard_target)
+    ok = bool(
+        plans
+        and plans[0].gatherlink_listen
+        and plans[0].wireguard_target
+        and "gatherlink-client.json" in setup.files
+        and "wireguard-stable-client.conf" in setup.files
+    )
     return HelperSmokeResult(
         "wireguard",
         ok,
-        f"service={plans[0].service if plans else '-'} wg={'yes' if tool_status['wg'] else 'no'}",
+        f"service={plans[0].service if plans else '-'} setup=split wg={'yes' if tool_status['wg'] else 'no'}",
     )
 
 

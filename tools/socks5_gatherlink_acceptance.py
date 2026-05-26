@@ -206,10 +206,20 @@ def main() -> int:
         assert b"200 OK" in headers, headers.decode("utf-8", errors="replace")
         assert f"listening=127.0.0.1:{acceptance_ports.status_http}" in body_text
         assert "Gatherlink local status (EXPERIMENTAL)" in body_text
+        # Give background diagnostics drains a short chance to flush before the
+        # supervisor tears down foreground helper processes.
+        time.sleep(0.75)
+        diagnostics = {
+            "socks5": _read_jsonl_codes(out_dir / "socks5.jsonl"),
+            "stream_exit": _read_jsonl_codes(out_dir / "stream-exit.jsonl"),
+        }
+        assert "helper.stream.opened" in diagnostics["socks5"], diagnostics
+        assert "helper.stream.opened" in diagnostics["stream_exit"], diagnostics
         report["http_status_payload"] = {
             "listen": f"127.0.0.1:{acceptance_ports.status_http}",
             "body_preview": body_text[:300],
         }
+        report["diagnostics"] = diagnostics
         report["passed"] = True
         report["steps"].append("socks5-http-over-gatherlink-ok")
         print(json.dumps(report, indent=2, sort_keys=True))
@@ -358,6 +368,24 @@ def _allocate_ports(count: int) -> list[int]:
         for sock in sockets:
             with closing(sock):
                 pass
+
+
+def _read_jsonl_codes(path: Path) -> list[str]:
+    """Return diagnostic event codes from one JSONL sink, tolerating blank lines."""
+    if not path.exists():
+        return []
+    codes: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        code = event.get("code")
+        if isinstance(code, str):
+            codes.append(code)
+    return codes
 
 
 def _random_key() -> str:

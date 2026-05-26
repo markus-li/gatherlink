@@ -7,6 +7,9 @@ from typing import cast
 from urllib.parse import urlparse
 
 import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from gatherlink.config.expansion import expand_config
 from gatherlink.config.validation import validate_config_file
@@ -20,9 +23,21 @@ from gatherlink.helpers.status_http import StatusHttpConfig, run_status_http_ser
 from gatherlink.helpers.tcp_forward import TcpForwardConfig, run_lab_direct_tcp_forwarder, run_tcp_forwarder
 from gatherlink.helpers.traffic_split import TrafficSplitPlan, execute_traffic_split_commands, render_commands
 from gatherlink.helpers.udp_stream import GatherlinkUdpStreamTransport, run_gatherlink_udp_stream_exit
-from gatherlink.helpers.wireguard import render_peer_endpoint_snippet, wireguard_tool_status, wireguard_transport_plans
+from gatherlink.helpers.wireguard import (
+    GeneratedWireGuardSetup,
+    WireGuardSetupPath,
+    WireGuardSetupRequest,
+    default_local_paths,
+    discover_network_interfaces,
+    generate_wireguard_setup,
+    parse_setup_path,
+    render_peer_endpoint_snippet,
+    wireguard_tool_status,
+    wireguard_transport_plans,
+)
 
 app = typer.Typer(help="Run optional Gatherlink helper services.")
+console = Console()
 
 
 @app.command("dns-serve")
@@ -210,6 +225,62 @@ def wireguard_plan(
         diagnostics_bus.drain()
     if sink is not None:
         sink.close()
+
+
+@app.command("wireguard-setup")
+def wireguard_setup(
+    output: Path = typer.Option(
+        Path("wireguard-gatherlink-setup"),
+        "--output",
+        "-o",
+        help="Directory for generated Gatherlink and WireGuard files.",
+    ),
+    model: str = typer.Option(
+        "split",
+        "--model",
+        help="WireGuard profile model: split or single. Split is the default mixed TCP/UDP profile.",
+    ),
+    path: list[str] = typer.Option(
+        None,
+        "--path",
+        help=(
+            "Carrier path as name=iface,client_bind=HOST:PORT,server_bind=HOST:PORT[,mtu=1200][,tx=BPS][,rx=BPS]. "
+            "Can be passed multiple times."
+        ),
+    ),
+    path_count: int = typer.Option(2, "--path-count", min=1, help="Number of localhost paths to generate."),
+    local_only: bool = typer.Option(False, "--local-only", help="Generate a localhost-only first-run setup."),
+    security: str = typer.Option("static", "--security", help="Gatherlink security mode for generated configs: static or none."),
+    non_interactive: bool = typer.Option(False, "--non-interactive", help="Do not prompt; use options/defaults."),
+    force: bool = typer.Option(False, "--force", help="Overwrite generated files in --output."),
+) -> None:
+    """
+    Interactive WireGuard-over-Gatherlink setup wizard.
+
+    The wizard renders operator-owned WireGuard config skeletons and
+    Gatherlink-owned UDP transport configs. It does not create WireGuard
+    interfaces, change routes, or install firewall policy unless the operator
+    separately reviews and runs the generated traffic-split plan.
+    """
+    if non_interactive:
+        request = _wireguard_setup_from_options(
+            output=output,
+            model=model,
+            path_values=path or [],
+            path_count=path_count,
+            local_only=local_only,
+            security=security,
+        )
+    else:
+        request, output = _wireguard_setup_interactive(
+            default_output=output,
+            default_model=model,
+            default_path_count=path_count,
+            default_security=security,
+    )
+    setup = generate_wireguard_setup(request)
+    written = setup.write(output, force=force)
+    _render_wireguard_setup_result(setup, written)
 
 
 @app.command("traffic-split")
@@ -422,6 +493,179 @@ def relay_discover(
     """Load relay metadata and print candidate health diagnostics."""
     report = discover_relays_from_file(metadata, required_protocol_version=required_capability)
     typer.echo(report.model_dump_json(indent=2))
+
+
+def _wireguard_setup_from_options(
+    *,
+    output: Path,
+    model: str,
+    path_values: list[str],
+    path_count: int,
+    local_only: bool,
+    security: str,
+) -> WireGuardSetupRequest:
+    """Build a setup request from CLI options without prompting."""
+    del output
+    setup_model = _wireguard_setup_model(model)
+    setup_security = _wireguard_setup_security(security)
+    if path_values:
+        paths = [_parse_setup_path_for_cli(value) for value in path_values]
+    elif local_only:
+        paths = default_local_paths(path_count)
+    else:
+        raise typer.BadParameter("--path is required unless --local-only is used in --non-interactive mode")
+    return WireGuardSetupRequest(model=setup_model, paths=paths, security=setup_security, local_only=local_only)
+
+
+def _wireguard_setup_interactive(
+    *,
+    default_output: Path,
+    default_model: str,
+    default_path_count: int,
+    default_security: str,
+) -> tuple[WireGuardSetupRequest, Path]:
+    """Collect setup choices through a small installer-style shell wizard."""
+    console.print(
+        Panel.fit(
+            (
+                "[bold]Gatherlink WireGuard setup wizard[/bold]\n"
+                "This writes configs only. It does not modify WireGuard interfaces, routes, or firewall policy."
+            ),
+            title="WireGuard over Gatherlink",
+            border_style="cyan",
+        )
+    )
+    console.print(
+        "[dim]Defaults favor split WireGuard: one stable/TCP profile and one fast/UDP profile.[/dim]\n"
+    )
+    model = _wireguard_setup_model(
+        typer.prompt("WireGuard model [split/single]", default=_wireguard_setup_model(default_model))
+    )
+    local_only = typer.confirm("Is this a localhost-only lab setup?", default=True)
+    security = _wireguard_setup_security(typer.prompt("Gatherlink security [static/none]", default=default_security))
+    path_count = int(typer.prompt("How many Gatherlink paths?", default=str(default_path_count)))
+    if local_only:
+        paths = default_local_paths(path_count)
+    else:
+        paths = _prompt_wireguard_paths(path_count)
+    output = Path(typer.prompt("Output directory", default=str(default_output)))
+    return WireGuardSetupRequest(model=model, paths=paths, security=security, local_only=local_only), output
+
+
+def _prompt_wireguard_paths(path_count: int) -> list[WireGuardSetupPath]:
+    """Ask which Debian interfaces are WAN paths and collect path endpoints."""
+    interfaces = discover_network_interfaces()
+    if interfaces:
+        _render_interface_choices(interfaces)
+        console.print("[bold]Mark each interface[/bold] as [cyan]wan[/cyan], [green]lan[/green], management, or ignore.")
+        selected: list[str] = []
+        for item in interfaces:
+            role = _wireguard_interface_role(typer.prompt(f"Role for {item.name}", default="ignore"))
+            if role == "wan":
+                selected.append(item.name)
+        if not selected:
+            console.print("[yellow]No WAN interfaces selected; falling back to manual names.[/yellow]", stderr=True)
+            selected = [f"eth{index}" for index in range(1, path_count + 1)]
+    else:
+        console.print("[yellow]No interfaces discovered; using manual interface names.[/yellow]", stderr=True)
+        selected = [f"eth{index}" for index in range(1, path_count + 1)]
+    selected = selected[:path_count]
+    while len(selected) < path_count:
+        selected.append(typer.prompt(f"Interface for path {len(selected) + 1}", default=f"eth{len(selected) + 1}"))
+    paths = []
+    for index, interface in enumerate(selected, start=1):
+        name = f"path-{chr(ord('a') + index - 1)}"
+        client_bind = typer.prompt(f"{name} client bind host:port", default=f"0.0.0.0:{56000 + index}")
+        server_bind = typer.prompt(f"{name} server bind host:port", default=f"0.0.0.0:{57000 + index}")
+        client_remote = typer.prompt(f"{name} client remote host:port", default=server_bind)
+        server_remote = typer.prompt(f"{name} server remote host:port", default=client_bind)
+        paths.append(
+            WireGuardSetupPath(
+                name=name,
+                interface=interface,
+                client_bind=client_bind,
+                server_bind=server_bind,
+                client_remote=client_remote,
+                server_remote=server_remote,
+            )
+        )
+    return paths
+
+
+def _render_interface_choices(interfaces: list[object]) -> None:
+    """Render discovered interfaces as a compact Rich table before prompting."""
+    table = Table(title="Detected interfaces", box=None, show_edge=False)
+    table.add_column("interface", style="cyan", no_wrap=True)
+    table.add_column("wizard role")
+    for item in interfaces:
+        table.add_row(getattr(item, "name", str(item)), "wan / lan / management / ignore")
+    console.print(table)
+
+
+def _render_wireguard_setup_result(setup: GeneratedWireGuardSetup, written: list[Path]) -> None:
+    """Render generated setup facts with Rich while keeping output testable."""
+    console.print(
+        Panel.fit(
+            f"[bold green]WireGuard-over-Gatherlink setup generated[/bold green]\n"
+            f"model: [bold]{setup.request.model}[/bold]\n"
+            f"paths: [bold]{len(setup.request.normalized_paths())}[/bold]",
+            title="Complete",
+            border_style="green",
+        )
+    )
+    file_table = Table(title="Generated files")
+    file_table.add_column("file", style="cyan")
+    file_table.add_column("written path", overflow="fold")
+    written_by_name = {path.name: path for path in written}
+    for name in sorted(setup.files):
+        path = written_by_name.get(Path(name).name)
+        file_table.add_row(name, str(path) if path is not None else "-")
+    console.print(file_table)
+
+    warning_table = Table(title="Warnings", show_header=False)
+    warning_table.add_column("warning", style="yellow")
+    for warning in setup.warnings:
+        warning_table.add_row(warning)
+    console.print(warning_table)
+
+    next_table = Table(title="Next actions")
+    next_table.add_column("#", justify="right", style="green", no_wrap=True)
+    next_table.add_column("command or action")
+    for index, step in enumerate(setup.next_steps, start=1):
+        next_table.add_row(str(index), step)
+    console.print(next_table)
+
+
+def _wireguard_setup_model(value: str) -> str:
+    """Validate setup model text for Typer callbacks and prompts."""
+    normalized = value.strip().lower()
+    if normalized not in {"split", "single"}:
+        raise typer.BadParameter("model must be split or single")
+    return normalized
+
+
+def _wireguard_setup_security(value: str) -> str:
+    """Validate setup security text for Typer callbacks and prompts."""
+    normalized = value.strip().lower()
+    if normalized not in {"static", "none"}:
+        raise typer.BadParameter("security must be static or none")
+    return normalized
+
+
+def _wireguard_interface_role(value: str) -> str:
+    """Validate interface role text for the interactive setup wizard."""
+    normalized = value.strip().lower()
+    if normalized not in {"wan", "lan", "management", "ignore"}:
+        raise typer.BadParameter("interface role must be wan, lan, management, or ignore")
+    return normalized
+
+
+def _parse_setup_path_for_cli(value: str) -> WireGuardSetupPath:
+    """Parse setup path values and convert model errors to Typer errors."""
+    try:
+        return parse_setup_path(value)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 def _parse_host_port(value: str) -> tuple[str, int]:

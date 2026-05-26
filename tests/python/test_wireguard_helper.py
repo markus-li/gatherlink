@@ -9,13 +9,16 @@ from gatherlink.config.expansion import expand_config
 from gatherlink.config.validation import validate_config_file
 from gatherlink.helpers.traffic_split import TrafficSplitPlan, execute_traffic_split_commands, render_commands
 from gatherlink.helpers.wireguard import (
+    WireGuardSetupRequest,
     derive_public_key,
+    generate_wireguard_setup,
     render_peer_endpoint_snippet,
     wireguard_tool_status,
     wireguard_transport_plans,
 )
 from gatherlink.helpers.wireguard.config import WireGuardTransportPlan
 from gatherlink.helpers.wireguard.keys import generate_private_key
+from gatherlink.helpers.wireguard.setup import default_local_paths, parse_setup_path
 from typer.testing import CliRunner
 
 EXAMPLES = Path("configs/examples")
@@ -127,6 +130,100 @@ def test_wireguard_plan_cli_renders_dual_profile_guidance() -> None:
     assert "profile: dual_profile traffic_class: fast" in result.output
     assert "Endpoint = 127.0.0.1:55180 # stable profile" in result.output
     assert "Endpoint = 127.0.0.1:55181 # fast profile" in result.output
+
+
+def test_wireguard_setup_generates_valid_split_multipath_configs() -> None:
+    setup = generate_wireguard_setup(
+        WireGuardSetupRequest(model="split", paths=default_local_paths(3), security="static", local_only=True)
+    )
+
+    assert sorted(setup.files) == [
+        "README.md",
+        "gatherlink-client.json",
+        "gatherlink-server.json",
+        "traffic-split-plan.sh",
+        "wireguard-fast-client.conf",
+        "wireguard-fast-server.conf",
+        "wireguard-stable-client.conf",
+        "wireguard-stable-server.conf",
+    ]
+    client = json.loads(setup.files["gatherlink-client.json"])
+    server = json.loads(setup.files["gatherlink-server.json"])
+    assert [path["name"] for path in client["paths"]] == ["path-a", "path-b", "path-c"]
+    assert [path["name"] for path in server["paths"]] == ["path-a", "path-b", "path-c"]
+    assert client["helpers"]["wireguard"]["mode"] == "dual_profile"
+    assert {service["name"] for service in client["services"]} == {"wireguard-stable", "wireguard-fast"}
+    assert client["security"]["send_key"] == server["security"]["receive_key"]
+    assert client["security"]["receive_key"] == server["security"]["send_key"]
+
+
+def test_wireguard_setup_cli_writes_valid_local_files(tmp_path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "helpers",
+            "wireguard-setup",
+            "--non-interactive",
+            "--local-only",
+            "--path-count",
+            "2",
+            "--output",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "model: split" in result.output
+    assert "paths: 2" in result.output
+    assert (tmp_path / "gatherlink-client.json").exists()
+    assert validate_config_file(tmp_path / "gatherlink-client.json").node == "node-a"
+    assert validate_config_file(tmp_path / "gatherlink-server.json").role == "server"
+
+
+def test_wireguard_setup_cli_accepts_explicit_paths(tmp_path) -> None:
+    result = CliRunner().invoke(
+        app,
+        [
+            "helpers",
+            "wireguard-setup",
+            "--non-interactive",
+            "--model",
+            "single",
+            "--path",
+            "wan1=eth1,client_bind=10.0.1.2:56001,server_bind=10.0.1.1:57001,tx=1000,rx=2000",
+            "--output",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / "wireguard-client.conf").exists()
+    config = json.loads((tmp_path / "gatherlink-client.json").read_text(encoding="utf-8"))
+    assert config["paths"][0]["transport_bind"] == "10.0.1.2:56001"
+    assert config["paths"][0]["scheduler"]["tx_capacity_bps"] == 1000
+
+
+def test_wireguard_setup_cli_prompts_for_localhost_defaults(tmp_path) -> None:
+    result = CliRunner().invoke(
+        app,
+        ["helpers", "wireguard-setup", "--force"],
+        input=f"\n\n\n1\n{tmp_path}\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Gatherlink WireGuard setup wizard" in result.output
+    assert "paths: 1" in result.output
+    assert validate_config_file(tmp_path / "gatherlink-server.json").role == "server"
+
+
+def test_wireguard_setup_path_parser_derives_remote_endpoints() -> None:
+    path = parse_setup_path("wan1=eth1,client_bind=10.0.1.2:56001,server_bind=10.0.1.1:57001,mtu=1380")
+
+    assert path.name == "wan1"
+    assert path.interface == "eth1"
+    assert path.client_remote == "10.0.1.1:57001"
+    assert path.server_remote == "10.0.1.2:56001"
+    assert path.mtu == 1380
 
 
 def test_traffic_split_plan_is_reviewable_and_reversible() -> None:

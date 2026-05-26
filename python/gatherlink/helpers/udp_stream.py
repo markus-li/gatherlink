@@ -17,6 +17,7 @@ logger = get_logger(__name__)
 
 FRAME_VERSION = 1
 FRAME_CHUNK_BYTES = 900
+STREAM_INITIAL_CREDIT_BYTES = FRAME_CHUNK_BYTES * 32
 
 
 class GatherlinkUdpStreamTransport(HelperStreamTransport):
@@ -122,8 +123,28 @@ class GatherlinkUdpStreamExit:
             session = self._sessions.get(key)
             if session is not None:
                 payload = _decode_payload(frame)
+                session.bytes_from_peer += len(payload)
+                session.data_frames_from_peer += 1
                 session.writer.write(payload)
+                session.write_backlog_peak_bytes = max(
+                    session.write_backlog_peak_bytes,
+                    session.writer.transport.get_write_buffer_size(),
+                )
                 await session.writer.drain()
+        elif frame_type == "credit":
+            session = self._sessions.get(key)
+            if session is not None:
+                session.credit_bytes = max(session.credit_bytes, _int_or_zero(frame.get("credit_bytes")))
+                self._publish_helper_event(
+                    code="helper.stream.credit",
+                    message="helper UDP stream credit updated",
+                    stream_id=key[0],
+                    peer=addr,
+                    credit_bytes=session.credit_bytes,
+                    write_backlog_peak_bytes=session.write_backlog_peak_bytes,
+                )
+        elif frame_type == "reset":
+            await self._reset_session(key, reason=str(frame.get("reason", "reset")))
         elif frame_type == "close":
             await self._close_session_write(key)
 
@@ -132,6 +153,7 @@ class GatherlinkUdpStreamExit:
     ) -> None:
         host = str(frame.get("host", ""))
         port = int(frame.get("port", 0))
+        stream_hint = _stream_hint_from_frame(frame)
         if not self._target_allowed(host, port):
             self._publish_helper_event(
                 code="helper.stream.denied",
@@ -141,6 +163,7 @@ class GatherlinkUdpStreamExit:
                 peer=addr,
                 target_host=host,
                 target_port=port,
+                **stream_hint,
             )
             self._send({"type": "close", "sid": key[0], "reason": "target denied"}, addr)
             return
@@ -159,6 +182,7 @@ class GatherlinkUdpStreamExit:
                 target_host=host,
                 target_port=port,
                 error=str(exc),
+                **stream_hint,
             )
             self._send({"type": "close", "sid": key[0], "reason": "connect failed"}, addr)
             return
@@ -171,6 +195,7 @@ class GatherlinkUdpStreamExit:
             peer=addr,
             target_host=host,
             target_port=port,
+            **stream_hint,
         )
         task = asyncio.create_task(self._pump_remote_to_udp(key, session))
         task.add_done_callback(_log_task_failure)
@@ -181,11 +206,31 @@ class GatherlinkUdpStreamExit:
                 data = await session.reader.read(FRAME_CHUNK_BYTES)
                 if not data:
                     break
+                session.bytes_to_peer += len(data)
+                session.data_frames_to_peer += 1
                 self._send(_data_frame(key[0], data), session.peer)
         finally:
-            await self._close_session(key, notify=True)
+            await self._close_session(key, notify=True, reason="remote_eof")
 
-    async def _close_session(self, key: tuple[str, tuple[str, int]], *, notify: bool = False) -> None:
+    async def _reset_session(self, key: tuple[str, tuple[str, int]], *, reason: str) -> None:
+        """Close one session after an explicit helper stream reset frame."""
+        session = self._sessions.get(key)
+        if session is None:
+            return
+        self._publish_helper_event(
+            code="helper.stream.reset",
+            severity="warning",
+            message="helper UDP stream reset",
+            stream_id=key[0],
+            peer=session.peer,
+            reason=reason[:128],
+            **session.outcome_details(),
+        )
+        await self._close_session(key, notify=False, reason="reset")
+
+    async def _close_session(
+        self, key: tuple[str, tuple[str, int]], *, notify: bool = False, reason: str = "closed"
+    ) -> None:
         session = self._sessions.pop(key, None)
         if session is None:
             return
@@ -196,6 +241,8 @@ class GatherlinkUdpStreamExit:
             message="helper UDP stream closed",
             stream_id=key[0],
             peer=session.peer,
+            reason=reason,
+            **session.outcome_details(),
         )
         if notify:
             self._send({"type": "close", "sid": key[0]}, session.peer)
@@ -273,6 +320,23 @@ class _ExitSession:
     writer: asyncio.StreamWriter
     peer: tuple[str, int]
     write_closed: bool = False
+    bytes_from_peer: int = 0
+    bytes_to_peer: int = 0
+    data_frames_from_peer: int = 0
+    data_frames_to_peer: int = 0
+    credit_bytes: int = 0
+    write_backlog_peak_bytes: int = 0
+
+    def outcome_details(self) -> dict[str, int]:
+        """Return bounded helper stream outcome facts for diagnostics and schedulers."""
+        return {
+            "bytes_from_peer": self.bytes_from_peer,
+            "bytes_to_peer": self.bytes_to_peer,
+            "data_frames_from_peer": self.data_frames_from_peer,
+            "data_frames_to_peer": self.data_frames_to_peer,
+            "credit_bytes": self.credit_bytes,
+            "write_backlog_peak_bytes": self.write_backlog_peak_bytes,
+        }
 
 
 class _ClientUdpProtocol(asyncio.DatagramProtocol):
@@ -339,9 +403,22 @@ class _GatherlinkUdpClientBridge:
         self.server = server
 
     async def handle_local_stream(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        self._send({"type": "open", "sid": self.stream_id, "host": self.target.host, "port": self.target.port})
+        self._send(
+            {
+                "type": "open",
+                "sid": self.stream_id,
+                "host": self.target.host,
+                "port": self.target.port,
+                "traffic_class": self.target.traffic_class,
+                "flowlet_key": self.target.flowlet_key or self.stream_id,
+            }
+        )
+        self._send({"type": "credit", "sid": self.stream_id, "credit_bytes": STREAM_INITIAL_CREDIT_BYTES})
         try:
             await asyncio.gather(self._local_to_udp(reader), self._udp_to_local(writer))
+        except Exception as exc:
+            self._send({"type": "reset", "sid": self.stream_id, "reason": type(exc).__name__})
+            raise
         finally:
             self._send({"type": "close", "sid": self.stream_id})
             writer.close()
@@ -377,6 +454,18 @@ def _data_frame(stream_id: str, payload: bytes) -> dict[str, Any]:
     return {"type": "data", "sid": stream_id, "payload": base64.b64encode(payload).decode("ascii")}
 
 
+def _stream_hint_from_frame(frame: dict[str, Any]) -> dict[str, str]:
+    """Extract bounded stream scheduler hints from a helper open frame."""
+    hints = {}
+    traffic_class = str(frame.get("traffic_class", "")).strip()
+    flowlet_key = str(frame.get("flowlet_key", "")).strip()
+    if traffic_class:
+        hints["traffic_class"] = traffic_class[:64]
+    if flowlet_key:
+        hints["flowlet_key"] = flowlet_key[:128]
+    return hints
+
+
 def _encode_frame(frame: dict[str, Any]) -> bytes:
     payload = {"v": FRAME_VERSION, **frame}
     return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -397,6 +486,14 @@ def _decode_payload(frame: dict[str, Any]) -> bytes:
     if not isinstance(payload, str):
         return b""
     return base64.b64decode(payload.encode("ascii"))
+
+
+def _int_or_zero(value: object) -> int:
+    """Parse helper frame counters without trusting peer-provided data."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _log_task_failure(task: asyncio.Task[object]) -> None:

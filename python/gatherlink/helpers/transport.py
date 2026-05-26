@@ -16,6 +16,8 @@ class HelperStreamTarget:
 
     host: str
     port: int
+    traffic_class: str = "tcp_ordered"
+    flowlet_key: str | None = None
 
 
 @dataclass(frozen=True)

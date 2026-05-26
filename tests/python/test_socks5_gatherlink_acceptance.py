@@ -29,3 +29,5 @@ def test_socks5_connect_reaches_status_http_helper_over_gatherlink(tmp_path: Pat
     assert report["passed"] is True
     assert "socks5-http-over-gatherlink-ok" in report["steps"]
     assert "Gatherlink local status (EXPERIMENTAL)" in report["http_status_payload"]["body_preview"]
+    assert "helper.stream.opened" in report["diagnostics"]["socks5"]
+    assert "helper.stream.opened" in report["diagnostics"]["stream_exit"]
