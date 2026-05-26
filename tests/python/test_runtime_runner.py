@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from threading import Event
 
 import pytest
@@ -12,10 +13,17 @@ from gatherlink.control.policy import apply_control_policy_to_dataplane
 from gatherlink.control.remote_status import encode_request
 from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.protocol import (
+    GATHERLINK_V1_HEADER_LEN,
+    SERVICE_ID_AUTH_CRYPTO,
     SERVICE_ID_CONTROL_METADATA,
     SERVICE_ID_REMOTE_STATUS,
     decode_control_payload,
     encode_control_payload,
+)
+from gatherlink.runtime.rekey import (
+    LiveRekeyRuntimeContext,
+    create_runtime_rekey_initiation,
+    runtime_security_from_session,
 )
 from gatherlink.runtime.runner import (
     CoreRunnerState,
@@ -23,6 +31,11 @@ from gatherlink.runtime.runner import (
     _scheduler_status_tuple,
     run_core_service,
 )
+from gatherlink.secrets.identity import IdentityPublicRecord
+from gatherlink.secrets.provisioning import ProvisionedNode, TopologyBundleBody
+from gatherlink.security.keys import NodeIdentity
+from gatherlink.security.rekey_control import RekeyControlMessage
+from gatherlink.security.sessions import plan_authenticated_static_session
 from gatherlink.time.offset import InternalClockSyncMessage
 
 
@@ -32,6 +45,14 @@ class FakeOutcome:
 
     def payload_len(self) -> int:
         return self.length
+
+
+class MemoryDiagnosticSink:
+    def __init__(self) -> None:
+        self.events: list[DiagnosticEvent] = []
+
+    def write(self, event: DiagnosticEvent) -> None:
+        self.events.append(event)
 
 
 class FakeDataplane:
@@ -75,14 +96,6 @@ class FakeDataplane:
         _ = path_id
         self.transmitted_payloads.append((service_id, payload))
         return 1
-
-
-class MemoryDiagnosticSink:
-    def __init__(self) -> None:
-        self.events: list[DiagnosticEvent] = []
-
-    def write(self, event: DiagnosticEvent) -> None:
-        self.events.append(event)
 
 
 class SummaryFakeDataplane(FakeDataplane):
@@ -413,6 +426,62 @@ class FakeRemoteStatusDataplane(FakeDataplane):
         )
 
 
+class FakeAuthCryptoDataplane(FakeDataplane):
+    def __init__(self) -> None:
+        super().__init__()
+        self._reserved_events = [FakeReservedEvent(SERVICE_ID_AUTH_CRYPTO, 1, 20, b"not-json")]
+
+    def drain_reserved_service_events(self):
+        events = self._reserved_events
+        self._reserved_events = []
+        return events
+
+
+class FakeValidAuthCryptoDataplane(FakeDataplane):
+    def __init__(self) -> None:
+        super().__init__()
+        message = RekeyControlMessage(
+            message_type="rekey_initiation",
+            sender_node_id="peer-node",
+            peer_node_id="local-node",
+            topology_generation=7,
+            current_receiver_index=42,
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            noise={"phase": "initiation"},
+        )
+        self._reserved_events = [FakeReservedEvent(SERVICE_ID_AUTH_CRYPTO, 1, 21, message.encode())]
+
+    def drain_reserved_service_events(self):
+        events = self._reserved_events
+        self._reserved_events = []
+        return events
+
+    def set_service_scheduler(self, *args):
+        _ = args
+
+
+class FakeLiveRekeyDataplane(FakeDataplane):
+    def __init__(self, payload: bytes) -> None:
+        super().__init__()
+        self._reserved_events = [FakeReservedEvent(SERVICE_ID_AUTH_CRYPTO, 1, 22, payload)]
+        self.rekey_transmits: list[tuple[int, bytes]] = []
+        self.rekey_operations: list[str] = []
+
+    def drain_reserved_service_events(self):
+        events = self._reserved_events
+        self._reserved_events = []
+        return events
+
+    def transmit_service_payload(self, service_id: int, payload: bytes) -> int:
+        self.rekey_transmits.append((service_id, payload))
+        if service_id == SERVICE_ID_AUTH_CRYPTO:
+            self.rekey_operations.append("transmit")
+        return 1
+
+    def set_service_scheduler(self, *args):
+        _ = args
+
+
 class PathOnlyFakeDataplane(FakeDataplane):
     def receive_available_from_paths(self, batch_size: int):
         assert batch_size == 8
@@ -464,6 +533,19 @@ def _runtime_config():
         services=[ServiceConfig(name="udp-main", listen="127.0.0.1:55180", target="127.0.0.1:51820")],
     )
     return expand_config(config)
+
+
+def _rekey_topology(local: NodeIdentity, peer: NodeIdentity, now: datetime) -> TopologyBundleBody:
+    return TopologyBundleBody(
+        generation=7,
+        issuer_node_id=IdentityPublicRecord.from_identity(local).node_id,
+        created_at=now,
+        valid_from=now,
+        nodes=[
+            ProvisionedNode(name="local", identity=IdentityPublicRecord.from_identity(local)),
+            ProvisionedNode(name="peer", identity=IdentityPublicRecord.from_identity(peer)),
+        ],
+    )
 
 
 def test_remote_scheduler_policy_preserves_local_service_path_selection() -> None:
@@ -709,6 +791,8 @@ def test_core_runner_uses_ipc_service_outcome_for_python_budgeting() -> None:
         {"service": "stable", "degraded": True, "reason": "live tcp retransmits increased"}
     ]
     assert state.snapshot()["service_outcomes"] == state.service_outcomes
+    assert state.snapshot()["service_budget"]["active"] is False
+    assert state.snapshot()["service_budget"]["reason"] == "not enough samples"
     assert any(
         event.code == "scheduler.decision" and event.details.get("source") == "service_ipc" for event in sink.events
     )
@@ -734,6 +818,43 @@ def test_core_runner_flushes_short_burst_data_timing_before_idle_cadence() -> No
     ]
     assert dataplane.drain_calls == 1
     assert advertised_samples == [(0, 1024, 1, 10_000)]
+
+
+def test_control_metadata_trims_data_timing_samples_to_path_mtu() -> None:
+    from gatherlink.control.announcements import announce_control_metadata
+    from gatherlink.control.metadata import empty_control_metadata
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler=PathSchedulerConfig(mtu=1200)),
+            PathConfig(name="path-b", interface="gl-b", scheduler=PathSchedulerConfig(mtu=1200)),
+            PathConfig(name="path-c", interface="gl-c", scheduler=PathSchedulerConfig(mtu=1200)),
+        ],
+        services=[ServiceConfig(name="udp-main", listen="127.0.0.1:55180", target="127.0.0.1:51820")],
+    )
+    dataplane = FakeDataplane()
+    runtime_config = expand_config(config)
+    samples = [(0, 10_000 + index, 1, 1_000_000 + index) for index in range(128)]
+
+    announcement = announce_control_metadata(
+        dataplane,
+        runtime_config,
+        empty_control_metadata(),
+        data_transmit_samples=samples,
+    )
+
+    assert announcement.data_transmit_sample_count < len(samples)
+    assert announcement.omitted_data_transmit_sample_count == len(samples) - announcement.data_transmit_sample_count
+    service_id, payload = dataplane.transmitted_payloads[-1]
+    assert service_id == SERVICE_ID_CONTROL_METADATA
+    assert len(payload) + GATHERLINK_V1_HEADER_LEN <= 1200
+    decoded = decode_control_payload(payload)
+    assert decoded is not None
+    assert 0 < len(decoded.data_transmit_samples) == announcement.data_transmit_sample_count
 
 
 def test_core_runner_supervises_standard_carrier_before_rust_bridge() -> None:
@@ -893,6 +1014,7 @@ def test_core_runner_drains_python_reserved_services_and_applies_policy() -> Non
     assert dataplane.disabled_services == [(256, "peer disabled test service")]
     assert dataplane.scheduler_policies == [
         (1, 0, 0, 0, 0, 0, "inherit"),
+        (7, 1, 0, 0, 0, 0, "inherit"),
         (8, 1, 0, 0, 0, 0, "inherit"),
         (256, 2, 96, 50_000, 500_000, 64, "single_best_path"),
     ]
@@ -906,6 +1028,130 @@ def test_core_runner_drains_python_reserved_services_and_applies_policy() -> Non
         "path_run_datagrams": 64,
         "path_policy": "single_best_path",
     }
+
+
+def test_core_runner_routes_reserved_auth_crypto_payloads_to_python_diagnostics() -> None:
+    dataplane = FakeAuthCryptoDataplane()
+    sink = MemoryDiagnosticSink()
+    bus = DiagnosticsBus(sinks=[sink])
+
+    run_core_service(
+        _runtime_config(),
+        dataplane_factory=lambda _runtime_config: dataplane,
+        max_iterations=1,
+        batch_size=8,
+        diagnostics_bus=bus,
+    )
+
+    events = [event for event in sink.events if event.code == "rekey.rejected"]
+    assert len(events) == 1
+    assert events[0].kind == "runtime"
+    assert events[0].severity == "warning"
+    assert events[0].details["path_id"] == 1
+    assert events[0].details["sequence"] == 20
+    assert "invalid rekey control payload" in events[0].details["reason"]
+
+
+def test_core_runner_exposes_decoded_auth_crypto_facts_in_status() -> None:
+    dataplane = FakeValidAuthCryptoDataplane()
+    state = CoreRunnerState(
+        node="local",
+        security_mode="authenticated",
+        service_names=["udp-main"],
+        stop_event=Event(),
+    )
+
+    run_core_service(
+        _runtime_config(),
+        dataplane_factory=lambda _runtime_config: dataplane,
+        max_iterations=1,
+        batch_size=8,
+        runner_state=state,
+    )
+
+    status = state.snapshot()
+    assert status["auth_crypto_messages"] == [
+        {
+            "type": "rekey_initiation",
+            "peer": "remote",
+            "sender_node_id": "peer-node",
+            "peer_node_id": "local-node",
+            "topology_generation": 7,
+            "current_receiver_index": 42,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "expires_at": None,
+            "reason": None,
+            "has_noise": True,
+            "path_id": 1,
+            "sequence": 21,
+        }
+    ]
+
+
+def test_core_runner_hot_reapplies_valid_live_rekey_and_sends_response() -> None:
+    local = NodeIdentity.generate()
+    peer = NodeIdentity.generate()
+    now = datetime.now(UTC)
+    topology = _rekey_topology(local, peer, now)
+    local_session = plan_authenticated_static_session(
+        local,
+        IdentityPublicRecord.from_identity(peer),
+        topology,
+        role="responder",
+        receiver_index=100,
+        now=now,
+        lifetime_seconds=120,
+    )
+    peer_session = plan_authenticated_static_session(
+        peer,
+        IdentityPublicRecord.from_identity(local),
+        topology,
+        role="initiator",
+        receiver_index=100,
+        now=now,
+        lifetime_seconds=120,
+    )
+    pending = create_runtime_rekey_initiation(
+        peer,
+        IdentityPublicRecord.from_identity(local),
+        topology,
+        peer_session,
+        now=now,
+        receiver_index=222,
+    )
+    runtime_config = _runtime_config().model_copy(update={"security": runtime_security_from_session(local_session)})
+    dataplane = FakeLiveRekeyDataplane(pending.payload)
+    applied = []
+
+    def fake_reapply(_dataplane, updated_runtime_config):
+        dataplane.rekey_operations.append("reapply")
+        applied.append(updated_runtime_config.security)
+
+    run_core_service(
+        runtime_config,
+        dataplane_factory=lambda _runtime_config: dataplane,
+        dataplane_reapply=fake_reapply,
+        max_iterations=1,
+        batch_size=8,
+        live_rekey_context=LiveRekeyRuntimeContext(
+            local_identity=local,
+            peer_identity=IdentityPublicRecord.from_identity(peer),
+            topology=topology,
+            current_session=local_session,
+        ),
+    )
+
+    assert applied
+    assert applied[0].source_mode == "authenticated"
+    assert applied[0].local_node_id == IdentityPublicRecord.from_identity(local).node_id
+    auth_payloads = [
+        payload for service_id, payload in dataplane.rekey_transmits if service_id == SERVICE_ID_AUTH_CRYPTO
+    ]
+    assert auth_payloads
+    response = RekeyControlMessage.decode(auth_payloads[0])
+    assert response.message_type == "rekey_response"
+    assert response.peer_node_id == IdentityPublicRecord.from_identity(peer).node_id
+    assert dataplane.rekey_operations[:2] == ["transmit", "reapply"]
 
 
 def test_core_runner_sends_clock_sync_responses_without_waiting_for_next_cadence() -> None:

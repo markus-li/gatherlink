@@ -416,8 +416,8 @@ fn ordered_multipath_uses_available_credit_before_overfilled_paths() {
     let selected = forward_burst_payloads_with_mode(
         SchedulerMode::OrderedMultipath,
         vec![
-            path_with_queue_and_limits(10, 1_000_000_000, 1_000, 1, 1200, 0, 0),
-            path_with_queue_and_limits(20, 1_000_000_000, 1_000, 64, 64 * 1200, 0, 0),
+            path_with_queue_and_limits(10, 1_000_000_000, 1_000_000, 1, 1200, 0, 0),
+            path_with_queue_and_limits(20, 1_000_000_000, 1_000_000, 64, 64 * 1200, 0, 0),
         ],
         3,
     );
@@ -441,8 +441,8 @@ fn ordered_multipath_reports_in_flight_and_delivery_facts() {
         )
         .unwrap()],
         vec![
-            path_with_queue_and_limits(10, 1_000_000_000, 1_000, 64, 64 * 1200, 0, 0),
-            path_with_queue_and_limits(20, 1_000_000_000, 2_000, 64, 64 * 1200, 0, 0),
+            path_with_queue_and_limits(10, 1_000_000_000, 1_000_000, 64, 64 * 1200, 0, 0),
+            path_with_queue_and_limits(20, 1_000_000_000, 1_100_000, 64, 64 * 1200, 0, 0),
         ],
         SchedulerConfig::new(SchedulerMode::OrderedMultipath),
     )

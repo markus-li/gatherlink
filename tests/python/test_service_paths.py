@@ -172,6 +172,90 @@ def test_service_path_allocator_expands_bulk_service_when_observed_demand_exceed
     assert fast.scheduler_path_weights == [(1, 140), (2, 90)]
 
 
+def test_service_path_allocator_reserves_capacity_between_bulk_services() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="source",
+        role="client",
+        peer="sink",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive"),
+        paths=[
+            PathConfig(
+                name="path-a",
+                interface="lo",
+                scheduler=PathSchedulerConfig(tx_capacity_bps=200_000_000, rx_capacity_bps=200_000_000),
+            ),
+            PathConfig(
+                name="path-b",
+                interface="lo",
+                scheduler=PathSchedulerConfig(tx_capacity_bps=100_000_000, rx_capacity_bps=100_000_000),
+            ),
+            PathConfig(
+                name="path-c",
+                interface="lo",
+                scheduler=PathSchedulerConfig(tx_capacity_bps=100_000_000, rx_capacity_bps=100_000_000),
+            ),
+        ],
+        services=[
+            ServiceConfig(
+                name="stable",
+                listen="127.0.0.1:10000",
+                target="127.0.0.1:20000",
+                priority="high",
+                scheduler_allowed_paths=["path-a"],
+            ),
+            ServiceConfig(
+                name="fast-a",
+                listen="127.0.0.1:10001",
+                target="127.0.0.1:20001",
+                priority="bulk",
+                scheduler_allowed_paths=["path-b"],
+            ),
+            ServiceConfig(
+                name="fast-b",
+                listen="127.0.0.1:10002",
+                target="127.0.0.1:20002",
+                priority="bulk",
+                scheduler_allowed_paths=["path-b"],
+            ),
+        ],
+    )
+    runtime = expand_config(config)
+    allocator = ServicePathAllocator()
+    telemetry = SchedulerTelemetrySnapshot(
+        paths={
+            "path-a": PathSchedulerMetrics(path_name="path-a", path_id=0, tx_capacity_bps=200_000_000),
+            "path-b": PathSchedulerMetrics(path_name="path-b", path_id=1, tx_capacity_bps=100_000_000),
+            "path-c": PathSchedulerMetrics(path_name="path-c", path_id=2, tx_capacity_bps=100_000_000),
+        }
+    )
+    allocator.update(
+        config,
+        runtime,
+        telemetry,
+        {"service_stats": {"fast-a": {"tx_bytes": 1_000_000}, "fast-b": {"tx_bytes": 1_000_000}}},
+        now=10.0,
+    )
+
+    decision = allocator.update(
+        config,
+        runtime,
+        telemetry,
+        {
+            "service_stats": {
+                "fast-a": {"tx_bytes": 60_000_000},
+                "fast-b": {"tx_bytes": 60_000_000},
+            }
+        },
+        now=16.0,
+    )
+
+    fast_a = next(service for service in decision.services if service.name == "fast-a")
+    fast_b = next(service for service in decision.services if service.name == "fast-b")
+    assert fast_a.scheduler_allowed_path_ids == [1]
+    assert fast_b.scheduler_allowed_path_ids == [2]
+
+
 def test_service_path_allocator_treats_tcp_ordered_class_as_protected_without_priority() -> None:
     config = _config().model_copy(
         update={

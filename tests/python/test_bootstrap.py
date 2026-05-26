@@ -496,6 +496,13 @@ def test_secrets_cli_creates_noise_ik_security_files(tmp_path) -> None:
     assert initiator_security["remote_receiver_index"] == 444
     assert responder_security["local_receiver_index"] == 444
     assert responder_security["remote_receiver_index"] == 333
+    assert initiator_security["session_role"] == "initiator"
+    assert responder_security["session_role"] == "responder"
+    assert initiator_security["topology_generation"] == 8
+    assert responder_security["topology_generation"] == 8
+    assert initiator_security["peer_node_id"] == responder_security["local_node_id"]
+    assert responder_security["peer_node_id"] == initiator_security["local_node_id"]
+    assert initiator_security["session_expires_at"]
     assert initiator_security["send_key"] == responder_security["receive_key"]
     assert initiator_security["receive_key"] == responder_security["send_key"]
 
@@ -607,6 +614,9 @@ def test_secrets_cli_noise_ik_generates_receiver_indexes_by_default(tmp_path) ->
     responder_security = json.loads(responder_security_path.read_text(encoding="utf-8"))
     assert initiator_security["local_receiver_index"] >= 1
     assert initiator_security["remote_receiver_index"] >= 1
+    assert initiator_security["session_role"] == "initiator"
+    assert responder_security["session_role"] == "responder"
+    assert initiator_security["topology_generation"] == 9
     assert responder_security["local_receiver_index"] == initiator_security["remote_receiver_index"]
     assert responder_security["remote_receiver_index"] == initiator_security["local_receiver_index"]
     assert {

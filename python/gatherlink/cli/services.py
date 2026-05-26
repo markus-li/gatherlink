@@ -569,6 +569,10 @@ def _row_from_status(
         "path": "",
         "control_metadata": status.get("control_metadata") if isinstance(status.get("control_metadata"), dict) else {},
         "service_config": status.get("service_config") if isinstance(status.get("service_config"), list) else [],
+        "service_budget": status.get("service_budget") if isinstance(status.get("service_budget"), dict) else {},
+        "auth_crypto_messages": (
+            status.get("auth_crypto_messages") if isinstance(status.get("auth_crypto_messages"), list) else []
+        ),
         "system_time": _system_time_context(status.get("control_metadata")),
         "gatherlink_time": _gatherlink_time_context(status.get("control_metadata")),
         "ntp": _ntp_context(status.get("control_metadata")),
@@ -667,6 +671,14 @@ def _render_aggregate_rows(
     if service_policy:
         lines.append("")
         lines.extend(service_policy)
+    service_budget = _render_service_budget_rows(rows)
+    if service_budget:
+        lines.append("")
+        lines.extend(service_budget)
+    auth_crypto = _render_auth_crypto_rows(rows)
+    if auth_crypto:
+        lines.append("")
+        lines.extend(auth_crypto)
     path_control = _render_path_control_rows(rows)
     if path_control:
         lines.append("")
@@ -820,6 +832,101 @@ def _render_service_policy_rows(rows: list[dict[str, object]]) -> list[str]:
     return _render_named_table(
         "service policy",
         ["runner", "service", "class", "prio", "listen", "target"],
+        rendered_rows,
+    )
+
+
+def _render_service_budget_rows(rows: list[dict[str, object]]) -> list[str]:
+    """Render Python-owned service budget/QoS decisions."""
+    rendered_rows: list[list[str]] = []
+    for row in rows:
+        if row.get("row_type") != "service":
+            continue
+        budget = row.get("service_budget")
+        if not isinstance(budget, dict) or not budget:
+            continue
+        packet_overrides = budget.get("packet_budget_overrides")
+        byte_overrides = budget.get("byte_budget_overrides")
+        samples = budget.get("samples")
+        rendered_rows.append(
+            [
+                str(row["service"]),
+                "yes" if budget.get("active") else "no",
+                _truncate(_service_budget_overrides_context(packet_overrides), 30),
+                _truncate(_service_budget_overrides_context(byte_overrides), 30),
+                _truncate(_service_budget_samples_context(samples), 40),
+                _truncate(str(budget.get("reason") or "-"), 56),
+            ]
+        )
+    if not rendered_rows:
+        return []
+    return _render_named_table(
+        "service budget",
+        ["runner", "active", "pkt", "bytes", "samples", "reason"],
+        rendered_rows,
+    )
+
+
+def _service_budget_overrides_context(value: object) -> str:
+    """Return compact service-budget override text."""
+    if not isinstance(value, dict) or not value:
+        return "-"
+    return ",".join(f"{key}={value[key]}" for key in sorted(value))
+
+
+def _service_budget_samples_context(value: object) -> str:
+    """Return compact service sample-rate text for monitor tables."""
+    if not isinstance(value, list) or not value:
+        return "-"
+    parts = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        service = str(item.get("service") or "?")
+        bytes_per_second = _float_or_zero(item.get("tx_bytes_per_second"))
+        packets_per_second = _float_or_zero(item.get("tx_packets_per_second"))
+        parts.append(f"{service}:{bytes_per_second:.0f}B/s/{packets_per_second:.0f}pps")
+    return ",".join(parts) if parts else "-"
+
+
+def _float_or_zero(value: object) -> float:
+    """Parse monitor-only floating counters without trusting runtime status."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _render_auth_crypto_rows(rows: list[dict[str, object]]) -> list[str]:
+    """Render operator-safe reserved auth/crypto facts."""
+    rendered_rows: list[list[str]] = []
+    for row in rows:
+        if row.get("row_type") != "service":
+            continue
+        messages = row.get("auth_crypto_messages")
+        if not isinstance(messages, list):
+            continue
+        for item in messages[-4:]:
+            if not isinstance(item, dict):
+                continue
+            rendered_rows.append(
+                [
+                    str(row["service"]),
+                    _truncate(str(item.get("type") or "-"), 18),
+                    _truncate(str(item.get("peer") or item.get("sender_node_id") or "-"), 24),
+                    str(item.get("topology_generation") or "-"),
+                    str(item.get("current_receiver_index") or "-"),
+                    "yes" if item.get("has_noise") else "no",
+                    str(item.get("path_id") or "-"),
+                    str(item.get("sequence") or "-"),
+                    _truncate(str(item.get("reason") or "-"), 40),
+                ]
+            )
+    if not rendered_rows:
+        return []
+    return _render_named_table(
+        "auth/rekey control",
+        ["runner", "type", "peer", "gen", "recv", "noise", "path", "seq", "reason"],
         rendered_rows,
     )
 
@@ -1441,6 +1548,8 @@ def _aggregate_legend() -> list[str]:
         "  svc      number of service-id/name mappings learned through control metadata; endpoints stay in config",
         "  pol      number of peer service scheduler policies learned for Python-owned receive expectations",
         "  class    Python-owned service traffic class used to compile scheduler policy; Rust receives only primitives",
+        "  budget  Python-owned service budget/QoS status; Rust receives only drain quantum and byte caps",
+        "  auth     operator-safe reserved auth/crypto facts; Noise payload bytes and traffic keys are never shown",
         "  err      endpoint assertion mismatches that stopped traffic for a service",
         "  off      peer service-disable assertions currently advertised through control metadata",
         "  svc_off  compact context summary of peer-disabled services",

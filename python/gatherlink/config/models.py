@@ -8,6 +8,7 @@ input format has been normalized.
 from __future__ import annotations
 
 from base64 import b64decode
+from datetime import datetime
 from typing import ClassVar, Literal
 
 from pydantic import Field, model_validator
@@ -16,6 +17,7 @@ from gatherlink.shared.models import FieldTransform, GatherlinkBaseModel
 
 NodeRole = Literal["client", "server"]
 SecurityMode = Literal["none", "static", "authenticated"]
+SecuritySessionRole = Literal["initiator", "responder"]
 CarrierKind = Literal["udp", "quic-datagram", "http3-datagram"]
 ConfigFormat = Literal[
     "minimal-client",
@@ -28,6 +30,7 @@ ConfigFormat = Literal[
 ]
 PathSchedulerState = Literal["active", "busy", "drain", "disabled"]
 SchedulerTrafficBias = Literal["auto", "tcp", "udp"]
+SchedulerCongestionPolicy = Literal["off", "conservative", "adaptive", "volatile"]
 ServiceSchedulerPathPolicy = Literal["inherit", "single_best_path", "weighted_round_robin"]
 SchedulerPolicy = Literal[
     "round_robin",
@@ -112,6 +115,12 @@ class SchedulerConfig(GatherlinkBaseModel):
     # or UDP-like aggregation, while Rust still receives only primitive path
     # state and weights.
     traffic_bias: SchedulerTrafficBias = "auto"
+    # Python-owned fairness hint. Rust executes only the compiled primitive
+    # pacing/credit numbers and bypasses them when they are zero. Use `off` for
+    # benchmark baselines, `conservative` for shared links, `adaptive` for the
+    # normal default, and `volatile` for wireless/bufferbloaty links where
+    # pressure should reduce Gatherlink's sender budget more aggressively.
+    congestion_policy: SchedulerCongestionPolicy = "adaptive"
 
 
 class PathConfig(GatherlinkBaseModel):
@@ -226,6 +235,18 @@ class SecurityConfig(GatherlinkBaseModel):
     remote_receiver_index: int | None = Field(default=None, ge=0, le=2**32 - 1)
     send_key: str | None = None
     receive_key: str | None = None
+    # TODO(live-rekey): These metadata fields are Python control-plane state,
+    # not Rust executor state. Noise provisioning writes them so the foreground
+    # runner can later reconstruct authenticated-session policy without
+    # smuggling identities/topology into Rust DTOs.
+    local_node_id: str | None = None
+    peer_node_id: str | None = None
+    topology_generation: int | None = Field(default=None, ge=0)
+    session_role: SecuritySessionRole | None = None
+    session_created_at: datetime | None = None
+    session_expires_at: datetime | None = None
+    rekey_after_packets: int | None = Field(default=None, ge=0)
+    rekey_after_bytes: int | None = Field(default=None, ge=0)
     sessions: list[SecuritySessionConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")

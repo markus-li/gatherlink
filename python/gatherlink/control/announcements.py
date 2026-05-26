@@ -33,6 +33,7 @@ class ControlMetadataAnnouncement:
     data_transmit_sample_count: int
     sink_time_count: int
     clock_sync_count: int
+    omitted_data_transmit_sample_count: int
     payload_bytes: int
 
 
@@ -93,24 +94,29 @@ def announce_control_metadata(
     path_latency = path_latency or {}
     path_mtu = path_mtu or {}
     path_pressure = path_pressure or {}
+    original_data_transmit_sample_count = len(data_transmit_samples or [])
     data_transmit_samples = data_transmit_samples or []
     service_disables = service_disables or {}
     path_clock_sync = path_clock_sync or []
-    payload = encode_control_payload(
+    payload_kwargs = {
+        "service_metadata": service_metadata,
+        "service_endpoint_assertions": service_endpoint_assertions,
+        "service_scheduler_policies": service_scheduler_policies,
+        "service_disables": service_disables,
+        "path_capacity_bps": control_metadata_helpers.capacity_by_path_id(path_capacity, path_ids),
+        "path_latency_us": control_metadata_helpers.latency_by_path_id(path_latency, path_ids),
+        "path_latency_quality": control_metadata_helpers.latency_quality_by_path_id(path_latency, path_ids),
+        "path_mtu": control_metadata_helpers.mtu_by_path_id(path_mtu, path_ids),
+        "path_pressure": control_metadata_helpers.pressure_by_path_id(path_pressure, path_ids),
+        "scheduler_status": scheduler_status,
+        "path_clock_sync": path_clock_sync,
+        "sink_time": sink_time,
+    }
+    payload, data_transmit_samples = _encode_control_payload_with_path_budget(
+        runtime_config,
         path_metadata,
-        service_metadata=service_metadata,
-        service_endpoint_assertions=service_endpoint_assertions,
-        service_scheduler_policies=service_scheduler_policies,
-        service_disables=service_disables,
-        path_capacity_bps=control_metadata_helpers.capacity_by_path_id(path_capacity, path_ids),
-        path_latency_us=control_metadata_helpers.latency_by_path_id(path_latency, path_ids),
-        path_latency_quality=control_metadata_helpers.latency_quality_by_path_id(path_latency, path_ids),
-        path_mtu=control_metadata_helpers.mtu_by_path_id(path_mtu, path_ids),
-        path_pressure=control_metadata_helpers.pressure_by_path_id(path_pressure, path_ids),
-        scheduler_status=scheduler_status,
-        data_transmit_samples=data_transmit_samples,
-        path_clock_sync=path_clock_sync,
-        sink_time=sink_time,
+        data_transmit_samples,
+        payload_kwargs,
     )
     if scheduler_status is not None:
         configured_mode, effective_mode, rust_mode = scheduler_status
@@ -153,8 +159,66 @@ def announce_control_metadata(
         data_transmit_sample_count=len(data_transmit_samples),
         sink_time_count=len(sink_time),
         clock_sync_count=len(path_clock_sync),
+        omitted_data_transmit_sample_count=max(0, original_data_transmit_sample_count - len(data_transmit_samples)),
         payload_bytes=len(payload),
     )
+
+
+def _encode_control_payload_with_path_budget(
+    runtime_config: Any,
+    path_metadata: dict[int, str],
+    data_transmit_samples: list[DataTransmitSample],
+    payload_kwargs: dict[str, object],
+) -> tuple[bytes, list[DataTransmitSample]]:
+    """
+    Encode control metadata while keeping sparse data-timing samples below path MTU.
+
+    Python owns the policy choice to advertise real-data timing facts. Rust then
+    executes the normal reserved-service send path, which cannot assume a large
+    control frame will fit every active carrier. Non-sample metadata is kept
+    intact; only opportunistic data timing samples are reduced when a path's
+    compiled MTU budget is tight.
+    """
+    payload_budget = _smallest_control_payload_budget(runtime_config)
+    if payload_budget is None or not data_transmit_samples:
+        return (
+            encode_control_payload(path_metadata, data_transmit_samples=data_transmit_samples, **payload_kwargs),
+            data_transmit_samples,
+        )
+
+    base_payload = encode_control_payload(path_metadata, data_transmit_samples=[], **payload_kwargs)
+    if len(base_payload) >= payload_budget:
+        return base_payload, []
+
+    # A DATA_TRANSMIT_SAMPLE is currently 1 byte type + 2 byte length + 22 bytes
+    # of value. The final encode check keeps this robust if the compact wire
+    # shape changes later.
+    sample_wire_bytes = 25
+    available_samples = min(len(data_transmit_samples), (payload_budget - len(base_payload)) // sample_wire_bytes)
+    while available_samples > 0:
+        selected_samples = data_transmit_samples[:available_samples]
+        payload = encode_control_payload(path_metadata, data_transmit_samples=selected_samples, **payload_kwargs)
+        if len(payload) <= payload_budget:
+            return payload, selected_samples
+        available_samples -= 1
+    return base_payload, []
+
+
+def _smallest_control_payload_budget(runtime_config: Any) -> int | None:
+    """Return payload bytes that fit the smallest active path's Rust frame MTU."""
+    budgets: list[int] = []
+    for path in getattr(runtime_config, "paths", []):
+        scheduler = getattr(path, "scheduler", None)
+        if scheduler is None or not getattr(scheduler, "enabled", True):
+            continue
+        try:
+            mtu = int(getattr(scheduler, "mtu"))
+        except (TypeError, ValueError):
+            continue
+        budget = mtu - GATHERLINK_V1_HEADER_LEN
+        if budget > 0:
+            budgets.append(budget)
+    return min(budgets) if budgets else None
 
 
 def _service_path_policy_code(policy: str) -> int:

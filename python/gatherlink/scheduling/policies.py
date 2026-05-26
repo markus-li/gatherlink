@@ -35,6 +35,7 @@ ORDERED_CAPACITY_AWARE_REORDER_HOLD_MIN_US = 25_000
 ORDERED_CAPACITY_AWARE_LARGE_MTU_BYTES = 4096
 ORDERED_MAX_PRESSURE_CREDIT_DIVISOR = 16
 ORDERED_REORDER_PRESSURE_PACKET_STEP = 1024
+ORDERED_REORDER_BUFFER_AGE_STEP_US = 25_000
 ORDERED_QUEUE_PRESSURE_PACKET_STEP = 128
 ORDERED_LOSS_PRESSURE_PPM_STEP = 10_000
 ORDERED_DROP_PRESSURE_PACKET_STEP = 4096
@@ -205,7 +206,7 @@ class OrderedMultipathPolicy(SchedulerPolicyBase):
     def reorder_hold_us(self, context: CompiledPathContext) -> int:
         """Bound single-flow reordering unless config explicitly overrides it."""
         return _ordered_reorder_hold_us(
-            super().latency_us(context),
+            _bounded_scheduler_latency_us(_ordered_latency_us(context.metrics)) or super().latency_us(context),
             context.path.scheduler.reorder_hold_us,
             _path_jitter_us(context.metrics),
         )
@@ -481,6 +482,8 @@ def _ordered_pressure_credit_divisor(metrics: PathSchedulerMetrics | None) -> in
     score += min(4, metrics.send_failures // ORDERED_SEND_FAILURE_PACKET_STEP)
     score += min(4, metrics.receive_gaps // ORDERED_REORDER_PRESSURE_PACKET_STEP)
     score += min(4, metrics.reorder_depth_packets // ORDERED_REORDER_PRESSURE_PACKET_STEP)
+    score += min(4, metrics.reorder_buffer_packets // ORDERED_REORDER_PRESSURE_PACKET_STEP)
+    score += min(4, metrics.reorder_buffer_oldest_age_us // ORDERED_REORDER_BUFFER_AGE_STEP_US)
     score += min(4, metrics.queue_depth_packets // ORDERED_QUEUE_PRESSURE_PACKET_STEP)
     score += min(4, metrics.loss_ppm // ORDERED_LOSS_PRESSURE_PPM_STEP)
     if metrics.observed_packets > 0:
@@ -531,8 +534,10 @@ def _ordered_latency_us(metrics: PathSchedulerMetrics | None) -> int | None:
         for value in (
             metrics.tx_latency_mean_us,
             metrics.tx_latency_current_us,
+            metrics.tx_p95_us,
             metrics.rx_latency_mean_us,
             metrics.rx_latency_current_us,
+            metrics.rx_p95_us,
         )
         if value is not None
     ]

@@ -25,10 +25,14 @@ from gatherlink.dataplane.rust_backend import RustDataplaneUnavailableError, Rus
 from gatherlink.diagnostics import DiagnosticEvent, DiagnosticsBus
 from gatherlink.diagnostics.sinks import JsonlDiagnosticSink
 from gatherlink.runtime.helper_supervisor import HelperLaunchPlan, build_helper_launch_plans
+from gatherlink.runtime.rekey import live_rekey_context_from_runtime
 from gatherlink.runtime.relay_runner import RelayRunnerState, RelayRuntimeConfig, run_relay_service
 from gatherlink.runtime.runner import DEFAULT_DATAPLANE_BATCH_SIZE, CoreRunnerState, run_core_service
 from gatherlink.runtime.services import ServiceIpcServer, ServiceRecord, ServiceRegistry, service_name
 from gatherlink.runtime.supervisor import plan_runtime_start
+from gatherlink.secrets.bundles import SignedDocument
+from gatherlink.secrets.identity import IdentityPublicRecord, IdentityRecord
+from gatherlink.secrets.provisioning import load_verified_topology_bundle
 
 app = typer.Typer(help="Plan and run Gatherlink runtime services.")
 
@@ -40,6 +44,48 @@ def _render_error(exc: ConfigValidationError) -> None:
         location = ".".join(detail.location) if detail.location else "config"
         typer.echo(f"  - {location}: {detail.message}", err=True)
     raise typer.Exit(1)
+
+
+def _load_live_rekey_context(
+    runtime_config,
+    *,
+    local_identity: Path | None,
+    peer_identity: Path | None,
+    topology: Path | None,
+    trust_root: Path | None,
+):
+    """
+    Load optional live-rekey context from explicit operator-provided files.
+
+    Packet execution does not need these files; autonomous rekey does. Requiring
+    all four paths keeps startup behavior predictable and avoids silently
+    guessing trust roots or peer identities from unrelated local state.
+    """
+    values = [local_identity, peer_identity, topology, trust_root]
+    if not any(values):
+        return None
+    if not all(values):
+        raise ValueError(
+            "autonomous rekey requires --rekey-local-identity, --rekey-peer-identity, "
+            "--rekey-topology, and --rekey-trust-root together"
+        )
+    assert local_identity is not None
+    assert peer_identity is not None
+    assert topology is not None
+    assert trust_root is not None
+    local_record = IdentityRecord.load(local_identity)
+    peer_record = IdentityPublicRecord.load(peer_identity)
+    trust_record = IdentityPublicRecord.load(trust_root)
+    topology_body = load_verified_topology_bundle(
+        SignedDocument.load(topology),
+        trusted_issuer=trust_record,
+    )
+    return live_rekey_context_from_runtime(
+        local_record.to_identity(),
+        peer_record,
+        topology_body,
+        runtime_config,
+    )
 
 
 @app.command("plan")
@@ -83,6 +129,26 @@ def service(
         "--scheduler-reapply-interval",
         help="Seconds between Python-owned status-to-scheduler hot reapply passes.",
     ),
+    rekey_local_identity: Path | None = typer.Option(
+        None,
+        "--rekey-local-identity",
+        help="Local private identity JSON used to originate/accept autonomous authenticated rekey.",
+    ),
+    rekey_peer_identity: Path | None = typer.Option(
+        None,
+        "--rekey-peer-identity",
+        help="Expected peer public or private identity JSON for autonomous authenticated rekey.",
+    ),
+    rekey_topology: Path | None = typer.Option(
+        None,
+        "--rekey-topology",
+        help="Signed topology bundle used to validate autonomous authenticated rekey.",
+    ),
+    rekey_trust_root: Path | None = typer.Option(
+        None,
+        "--rekey-trust-root",
+        help="Trusted topology issuer identity JSON for autonomous authenticated rekey.",
+    ),
 ) -> None:
     """Run a foreground Rust-backed core service from a config file."""
     sink = JsonlDiagnosticSink(diagnostics_jsonl) if diagnostics_jsonl is not None else None
@@ -92,6 +158,13 @@ def service(
     try:
         source_config = validate_config_file(path)
         runtime_config = expand_config(source_config)
+        live_rekey_context = _load_live_rekey_context(
+            runtime_config,
+            local_identity=rekey_local_identity,
+            peer_identity=rekey_peer_identity,
+            topology=rekey_topology,
+            trust_root=rekey_trust_root,
+        )
         if service_name_override is not None:
             runner_state = CoreRunnerState(
                 node=runtime_config.node,
@@ -136,6 +209,7 @@ def service(
             runner_state=runner_state,
             source_config=source_config,
             scheduler_reapply_interval_seconds=scheduler_reapply_interval,
+            live_rekey_context=live_rekey_context,
         )
     except ConfigValidationError as exc:
         _publish_start_failed(
@@ -341,6 +415,26 @@ def start(
         "--scheduler-reapply-interval",
         help="Seconds between Python-owned status-to-scheduler hot reapply passes.",
     ),
+    rekey_local_identity: Path | None = typer.Option(
+        None,
+        "--rekey-local-identity",
+        help="Local private identity JSON used to originate/accept autonomous authenticated rekey.",
+    ),
+    rekey_peer_identity: Path | None = typer.Option(
+        None,
+        "--rekey-peer-identity",
+        help="Expected peer public or private identity JSON for autonomous authenticated rekey.",
+    ),
+    rekey_topology: Path | None = typer.Option(
+        None,
+        "--rekey-topology",
+        help="Signed topology bundle used to validate autonomous authenticated rekey.",
+    ),
+    rekey_trust_root: Path | None = typer.Option(
+        None,
+        "--rekey-trust-root",
+        help="Trusted topology issuer identity JSON for autonomous authenticated rekey.",
+    ),
 ) -> None:
     """Start a process-managed Rust-backed core service in the background."""
     try:
@@ -379,6 +473,26 @@ def start(
     ]
     if scheduler_reapply_interval is not None:
         command.extend(["--scheduler-reapply-interval", str(scheduler_reapply_interval)])
+    if any([rekey_local_identity, rekey_peer_identity, rekey_topology, rekey_trust_root]):
+        if not all([rekey_local_identity, rekey_peer_identity, rekey_topology, rekey_trust_root]):
+            typer.echo(
+                "autonomous rekey requires --rekey-local-identity, --rekey-peer-identity, "
+                "--rekey-topology, and --rekey-trust-root together",
+                err=True,
+            )
+            raise typer.Exit(1)
+        command.extend(
+            [
+                "--rekey-local-identity",
+                str(rekey_local_identity),
+                "--rekey-peer-identity",
+                str(rekey_peer_identity),
+                "--rekey-topology",
+                str(rekey_topology),
+                "--rekey-trust-root",
+                str(rekey_trust_root),
+            ]
+        )
     service_dir.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as log_handle:
         process = subprocess.Popen(

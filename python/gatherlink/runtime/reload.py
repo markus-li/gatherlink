@@ -12,6 +12,7 @@ from gatherlink.config.runtime import RuntimeConfig, RuntimePathSchedulerConfig,
 from gatherlink.dataplane.rust_backend import reapply_core_scheduler
 from gatherlink.diagnostics.events import DiagnosticEvent
 from gatherlink.scheduling.compiler import compile_scheduler
+from gatherlink.scheduling.congestion import CongestionFairnessController, compile_congestion_fairness
 from gatherlink.scheduling.coordinator import SchedulerPolicyCoordinator
 from gatherlink.scheduling.metrics import (
     PathSchedulerMetrics,
@@ -37,6 +38,7 @@ def recompile_runtime_from_status(
     telemetry_smoother: SchedulerTelemetrySmoother | None = None,
     scheduler_coordinator: SchedulerPolicyCoordinator | None = None,
     service_path_allocator: ServicePathAllocator | None = None,
+    congestion_controller: CongestionFairnessController | None = None,
 ) -> RuntimeConfig:
     """
     Rebuild the Rust runtime scheduler from one structured service status snapshot.
@@ -54,7 +56,12 @@ def recompile_runtime_from_status(
         if scheduler_coordinator is not None
         else None
     )
-    compiled_scheduler = compile_scheduler(config, telemetry=telemetry, effective_mode=effective_mode)
+    compiled_scheduler = compile_scheduler(
+        config,
+        telemetry=telemetry,
+        effective_mode=effective_mode,
+        congestion_controller=congestion_controller,
+    )
     scheduler_paths = _runtime_scheduler_paths(
         compiled_scheduler.paths,
         runtime_config=runtime_config,
@@ -103,6 +110,7 @@ def hot_reapply_scheduler_from_status(
     telemetry_smoother: SchedulerTelemetrySmoother | None = None,
     scheduler_coordinator: SchedulerPolicyCoordinator | None = None,
     service_path_allocator: ServicePathAllocator | None = None,
+    congestion_controller: CongestionFairnessController | None = None,
 ) -> RuntimeConfig:
     """
     Recompile scheduler primitives from live status and hot-apply them to Rust.
@@ -118,6 +126,7 @@ def hot_reapply_scheduler_from_status(
         telemetry_smoother=telemetry_smoother,
         scheduler_coordinator=scheduler_coordinator,
         service_path_allocator=service_path_allocator,
+        congestion_controller=congestion_controller,
     )
     if _scheduler_runtime_equivalent(runtime_config, updated):
         # Scheduler loops can run frequently during benchmarks and production
@@ -152,10 +161,14 @@ def scheduler_decision_event_from_status(
     details = {
         "mode": runtime_config.scheduler.mode,
         "configured_mode": config.scheduler.mode,
+        "congestion_policy": config.scheduler.congestion_policy,
         "selected_path": selected,
         "paths": [_path_decision_details(score, runtime_paths_by_name.get(score.path_name)) for score in ranked_scores],
         "service_traffic": service_traffic_summary_from_status(runtime_config.services, status).export_dict(),
     }
+    congestion = _congestion_decision_details(config, runtime_config, telemetry)
+    if congestion:
+        details["congestion_fairness"] = congestion
     if scheduler_coordinator is not None and scheduler_coordinator.last_decision is not None:
         details["coordinator"] = scheduler_coordinator.last_decision.export_dict()
         details["coordinator_recent"] = scheduler_coordinator.recent_decisions()[-4:]
@@ -413,6 +426,67 @@ def _path_decision_details(
                 "max_in_flight_packets": runtime_scheduler.max_in_flight_packets,
                 "max_in_flight_bytes": runtime_scheduler.max_in_flight_bytes,
                 "pacing_budget_bps": runtime_scheduler.pacing_budget_bps,
+            }
+        )
+    return details
+
+
+def _congestion_decision_details(
+    config: GatherlinkConfig,
+    runtime_config: RuntimeConfig,
+    telemetry: SchedulerTelemetrySnapshot,
+) -> list[dict[str, object]]:
+    """Return operator-facing self-limiting facts for scheduler diagnostics."""
+    if config.scheduler.congestion_policy == "off":
+        return []
+    details: list[dict[str, object]] = []
+    runtime_paths_by_name = {path.name: path for path in runtime_config.paths}
+    configured_paths_by_name = {path.name: path for path in config.paths}
+    for path_name, metrics in sorted(telemetry.paths.items()):
+        runtime_path = runtime_paths_by_name.get(path_name)
+        configured_path = configured_paths_by_name.get(path_name)
+        if runtime_path is None or configured_path is None:
+            continue
+        if configured_path.scheduler.pacing_budget_bps:
+            details.append(
+                {
+                    "path": path_name,
+                    "policy": config.scheduler.congestion_policy,
+                    "pressure_level": "explicit",
+                    "reason": "explicit_pacing_budget",
+                    "pacing_budget_bps": runtime_path.scheduler.pacing_budget_bps,
+                    "capacity_bps": runtime_path.scheduler.tx_capacity_bps,
+                }
+            )
+            continue
+        decision = compile_congestion_fairness(
+            metrics,
+            policy=config.scheduler.congestion_policy,
+            capacity_bps=runtime_path.scheduler.tx_capacity_bps,
+        )
+        if decision.pressure_level <= 0 and runtime_path.scheduler.pacing_budget_bps <= 0:
+            continue
+        reason = decision.reason
+        if decision.pressure_level <= 0 and runtime_path.scheduler.pacing_budget_bps > 0:
+            reason = "held_for_recovery_hysteresis"
+        elif (
+            runtime_path.scheduler.pacing_budget_bps
+            and runtime_path.scheduler.pacing_budget_bps != decision.pacing_budget_bps
+        ):
+            reason = f"stable_{reason}"
+        details.append(
+            {
+                "path": path_name,
+                "policy": config.scheduler.congestion_policy,
+                "pressure_level": decision.pressure_level,
+                "reason": reason,
+                "pacing_budget_bps": runtime_path.scheduler.pacing_budget_bps or decision.pacing_budget_bps,
+                "capacity_bps": runtime_path.scheduler.tx_capacity_bps,
+                "loss_ppm": metrics.loss_ppm,
+                "queue_depth_packets": metrics.queue_depth_packets,
+                "queue_oldest_age_us": metrics.queue_oldest_age_us,
+                "send_failures": metrics.send_failures,
+                "local_drops": metrics.local_drops,
             }
         )
     return details

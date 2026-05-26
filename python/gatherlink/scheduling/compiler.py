@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from gatherlink.config.models import GatherlinkConfig, PathConfig, SchedulerPolicy, ServicePriority
 from gatherlink.config.runtime import RuntimePathSchedulerConfig, RuntimeSchedulerConfig
+from gatherlink.scheduling.congestion import CongestionFairnessController, compile_congestion_fairness
 from gatherlink.scheduling.metrics import SchedulerTelemetrySnapshot
 from gatherlink.scheduling.policies import compile_path_policy, rust_mode_for_policy
 from gatherlink.scheduling.scoring import score_snapshot
@@ -62,17 +63,25 @@ def compile_scheduler(
     *,
     telemetry: SchedulerTelemetrySnapshot | None = None,
     effective_mode: SchedulerPolicy | None = None,
+    congestion_controller: CongestionFairnessController | None = None,
 ) -> RuntimeSchedulerConfig:
     """Compile scheduler policy into a small runtime DTO for Rust execution."""
-    # TODO(scheduler-hot-reapply): Feed this function from the path manager's
-    # live telemetry loop. The shape is ready now: Python can recompile mode,
-    # path state, weights, and primitive limits without moving policy to Rust.
+    # Scheduler hot-reapply calls this compiler from Python-owned runtime
+    # telemetry. Keep this function as the narrow translation point from policy
+    # decisions into Rust-executed mode, path state, weights, and primitive
+    # limits.
     selected_mode = effective_mode or _compilable_mode(config)
     paths = [
         compile_path_scheduler(path, index=index, config=config, telemetry=telemetry, effective_mode=effective_mode)
         for index, path in enumerate(config.paths)
     ]
     if telemetry is not None:
+        paths = _apply_congestion_fairness(
+            paths,
+            config=config,
+            telemetry=telemetry,
+            congestion_controller=congestion_controller,
+        )
         paths = _apply_health_guard(paths, config=config, telemetry=telemetry, effective_mode=selected_mode)
     if selected_mode == "latency_guarded_capacity":
         paths = _apply_latency_guard(paths)
@@ -86,6 +95,44 @@ def compile_scheduler(
         mode=rust_mode_for_policy(selected_mode),
         paths=paths,
     )
+
+
+def _apply_congestion_fairness(
+    paths: list[RuntimePathSchedulerConfig],
+    *,
+    config: GatherlinkConfig,
+    telemetry: SchedulerTelemetrySnapshot,
+    congestion_controller: CongestionFairnessController | None = None,
+) -> list[RuntimePathSchedulerConfig]:
+    """
+    Compile path pressure into narrow self-limiting primitives.
+
+    Python owns the fairness model because "be a good network citizen" is
+    operator policy. Rust only sees a `pacing_budget_bps` value, and the fast
+    path bypasses this primitive when it is zero. Explicit per-path pacing from
+    config always wins because it is an operator override, not inference.
+    """
+    policy = config.scheduler.congestion_policy
+    if policy == "off":
+        return paths
+    guarded: list[RuntimePathSchedulerConfig] = []
+    for path, configured_path in zip(paths, config.paths, strict=True):
+        if configured_path.scheduler.pacing_budget_bps or path.state != "active":
+            guarded.append(path)
+            continue
+        metrics = telemetry.paths.get(configured_path.name)
+        capacity_bps = path.tx_capacity_bps or configured_path.scheduler.tx_capacity_bps
+        if metrics is None:
+            guarded.append(path)
+            continue
+        decision = compile_congestion_fairness(metrics, policy=policy, capacity_bps=capacity_bps)
+        if congestion_controller is not None:
+            decision = congestion_controller.stabilize(configured_path.name, decision)
+        if decision.pacing_budget_bps <= 0:
+            guarded.append(path)
+            continue
+        guarded.append(path.model_copy(update={"pacing_budget_bps": decision.pacing_budget_bps}))
+    return guarded
 
 
 def default_effective_scheduler_policy(config: GatherlinkConfig) -> SchedulerPolicy:

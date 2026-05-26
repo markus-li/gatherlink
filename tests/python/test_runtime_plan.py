@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 from gatherlink.config import expand_config, validate_config_file
@@ -111,6 +112,31 @@ def test_runtime_plan_does_not_warn_for_authenticated_security_source() -> None:
     assert runtime_config.security.mode == "static"
     assert runtime_config.security.source_mode == "authenticated"
     assert not any("security.mode=static is lab/manual" in warning for warning in plan.warnings)
+    assert any("lacks keyless session metadata" in warning for warning in plan.warnings)
+
+
+def test_runtime_plan_accepts_authenticated_security_with_rekey_metadata() -> None:
+    config = validate_config_file(EXAMPLES / "windows-two-node-a.json")
+    config = config.model_copy(
+        update={
+            "security": config.security.model_copy(
+                update={
+                    "mode": "authenticated",
+                    "local_node_id": "node-a",
+                    "peer_node_id": "node-b",
+                    "topology_generation": 1,
+                    "session_role": "initiator",
+                    "session_created_at": datetime(2026, 1, 1, tzinfo=UTC),
+                    "session_expires_at": datetime(2026, 1, 1, 0, 2, tzinfo=UTC),
+                }
+            )
+        }
+    )
+    runtime_config = expand_config(config)
+
+    plan = plan_runtime_start(runtime_config)
+
+    assert not any("lacks keyless session metadata" in warning for warning in plan.warnings)
 
 
 def test_runtime_plan_warns_when_multi_session_service_return_is_ambiguous() -> None:

@@ -9,6 +9,7 @@ services or talks to the Rust dataplane.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Literal
 
 from pydantic import Field, field_serializer
@@ -19,6 +20,7 @@ from gatherlink.config.models import (
     NodeRole,
     PathSchedulerState,
     SecurityMode,
+    SecuritySessionRole,
     ServicePriority,
     ServiceReturnMode,
     ServiceSchedulerPathPolicy,
@@ -147,6 +149,14 @@ class RuntimeSecurityConfig(GatherlinkBaseModel):
     remote_receiver_index: int = 1
     send_key: bytes | None = None
     receive_key: bytes | None = None
+    local_node_id: str | None = None
+    peer_node_id: str | None = None
+    topology_generation: int | None = None
+    session_role: SecuritySessionRole | None = None
+    session_created_at: datetime | None = None
+    session_expires_at: datetime | None = None
+    rekey_after_packets: int | None = None
+    rekey_after_bytes: int | None = None
     sessions: list[RuntimeSecuritySessionConfig] = Field(default_factory=list)
 
     @field_serializer("send_key", "receive_key", when_used="json")

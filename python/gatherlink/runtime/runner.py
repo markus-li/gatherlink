@@ -20,11 +20,12 @@ from gatherlink.config.models import GatherlinkConfig
 from gatherlink.config.runtime import RuntimeConfig
 from gatherlink.control import ControlCadenceState
 from gatherlink.control.announcements import announce_control_metadata, announce_path_pinned_clock_sync
+from gatherlink.control.auth import decode_auth_crypto_event
 from gatherlink.control.metadata import empty_control_metadata, merge_control_path_latency
 from gatherlink.control.policy import apply_control_policy_to_dataplane
 from gatherlink.control.remote_status import RemoteStatusState, handle_event, send_request_if_due
 from gatherlink.control.reserved import drain_reserved_service_events
-from gatherlink.dataplane.rust_backend import bind_core_dataplane
+from gatherlink.dataplane.rust_backend import bind_core_dataplane, reapply_core_dataplane
 from gatherlink.dataplane.status import (
     merge_control_metadata,
     merge_disabled_service_errors,
@@ -46,10 +47,12 @@ from gatherlink.paths.telemetry import (
     PathLatencyTracker,
     take_data_transmit_sample_batch,
 )
-from gatherlink.protocol import SERVICE_ID_CONTROL_METADATA, SERVICE_ID_REMOTE_STATUS
+from gatherlink.protocol import SERVICE_ID_AUTH_CRYPTO, SERVICE_ID_CONTROL_METADATA, SERVICE_ID_REMOTE_STATUS
 from gatherlink.runtime.plan import runtime_warnings
+from gatherlink.runtime.rekey import LiveRekeyRuntimeContext, authenticated_session_from_runtime_config
 from gatherlink.runtime.reload import hot_reapply_scheduler_from_status, scheduler_decision_event_from_status
 from gatherlink.scheduling.compiler import default_effective_scheduler_policy
+from gatherlink.scheduling.congestion import CongestionFairnessController
 from gatherlink.scheduling.coordinator import SchedulerPolicyCoordinator
 from gatherlink.scheduling.metrics import path_pressure_from_path_stats
 from gatherlink.scheduling.service_budget import ServiceBudgetController, ServiceOutcomeSnapshot
@@ -77,6 +80,8 @@ IDLE_SLEEP_SECONDS = 0.001
 DATAPLANE_BURST_CYCLES = 64
 DEFAULT_DATAPLANE_BATCH_SIZE = 512
 DATA_TIMING_SAMPLE_CONTROL_INTERVAL_SECONDS = 1.0
+AUTH_CRYPTO_MESSAGE_HISTORY_LIMIT = 16
+AUTH_REKEY_EVALUATION_INTERVAL_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -108,12 +113,14 @@ class CoreRunnerState:
     service_stats: dict[str, dict[str, int]] | None = None
     service_path_stats: dict[str, dict[str, dict[str, int]]] | None = None
     path_stats: dict[str, dict[str, int]] | None = None
+    service_budget: dict[str, object] | None = None
     control_metadata: dict[str, object] | None = None
     security_drops: dict[str, int] | None = None
     service_outcomes: list[dict[str, object]] | None = None
     service_outcome_snapshot: ServiceOutcomeSnapshot | None = None
     control_cadence: ControlCadenceState | None = None
     remote_status: RemoteStatusState | None = None
+    auth_crypto_messages: list[dict[str, object]] = field(default_factory=list)
 
     def snapshot(self) -> dict[str, object]:
         """Return a service-monitor-friendly status payload."""
@@ -136,6 +143,8 @@ class CoreRunnerState:
             payload["service_path_stats"] = self.service_path_stats
         if self.path_stats is not None:
             payload["path_stats"] = self.path_stats
+        if self.service_budget is not None:
+            payload["service_budget"] = self.service_budget
         if self.control_metadata is not None:
             payload["control_metadata"] = self.control_metadata
         if self.security_drops is not None:
@@ -147,6 +156,8 @@ class CoreRunnerState:
         if remote_status is not None:
             payload["remote_status"] = remote_status["cache"]
             payload["remote_status_state"] = {key: value for key, value in remote_status.items() if key != "cache"}
+        if self.auth_crypto_messages:
+            payload["auth_crypto_messages"] = list(self.auth_crypto_messages)
         return payload
 
     def stop(self) -> None:
@@ -188,6 +199,7 @@ class CoreRunnerState:
 
 
 DataplaneFactory = Callable[[RuntimeConfig], Any]
+DataplaneReapply = Callable[[Any, RuntimeConfig], Any]
 
 
 def run_core_service(
@@ -201,6 +213,8 @@ def run_core_service(
     runner_state: CoreRunnerState | None = None,
     source_config: GatherlinkConfig | None = None,
     scheduler_reapply_interval_seconds: float | None = None,
+    live_rekey_context: LiveRekeyRuntimeContext | None = None,
+    dataplane_reapply: DataplaneReapply = reapply_core_dataplane,
 ) -> CoreRunnerResult:
     """
     Run a Rust-backed core service loop until stopped.
@@ -268,6 +282,7 @@ def run_core_service(
     scheduler_telemetry_smoother = SchedulerTelemetrySmoother() if next_scheduler_reapply_at is not None else None
     scheduler_policy_coordinator = SchedulerPolicyCoordinator() if next_scheduler_reapply_at is not None else None
     service_path_allocator = ServicePathAllocator() if next_scheduler_reapply_at is not None else None
+    congestion_controller = CongestionFairnessController() if next_scheduler_reapply_at is not None else None
     iterations = 0
     forwarded_packets = 0
     forwarded_bytes = 0
@@ -305,7 +320,61 @@ def run_core_service(
     _apply_reserved_service_schedulers(dataplane)
     next_control_metadata_at = 0.0
     next_data_sample_control_at = 0.0
+    next_auth_rekey_at = 0.0 if live_rekey_context is not None else None
     pending_data_transmit_samples: list[tuple[int, int, int, int]] = []
+
+    def apply_live_rekey_runtime(result: Any) -> bool:
+        """
+        Hot-apply a Python-validated replacement session into Rust execution.
+
+        The coordinator has already verified topology, identity, and receiver
+        indexes. This runner step is intentionally mechanical: recompile the
+        existing runtime DTOs, ask Rust to swap executable AEAD state, and keep
+        Python's current session metadata aligned for the next rekey window.
+        """
+        nonlocal runtime_config, peer_names_by_scope
+        if result is None:
+            return False
+        if getattr(result, "fail_closed", False):
+            stop_event.set()
+            return False
+        if not getattr(result, "applied", False):
+            return False
+        updated_runtime = result.runtime_config
+        dataplane_reapply(dataplane, updated_runtime)
+        runtime_config = updated_runtime
+        peer_names_by_scope = _peer_names_by_scope(runtime_config)
+        if live_rekey_context is not None:
+            updated_session = authenticated_session_from_runtime_config(runtime_config)
+            if updated_session is not None:
+                live_rekey_context.current_session = updated_session
+        if diagnostics_bus is not None:
+            diagnostics_bus.publish(
+                DiagnosticEvent.config_reapplied(
+                    node=runtime_config.node,
+                    details={"source": "auth_crypto_rekey"},
+                )
+            )
+        return True
+
+    def transmit_live_rekey(outbound: Any) -> None:
+        """Send one Python-generated auth/crypto payload through Rust unchanged."""
+        if outbound is None:
+            return
+        transmitted = dataplane.transmit_service_payload(SERVICE_ID_AUTH_CRYPTO, outbound.payload)
+        if diagnostics_bus is not None:
+            diagnostics_bus.publish(
+                DiagnosticEvent.rekey_event(
+                    code="rekey.started",
+                    message=f"{outbound.message_type.replace('_', ' ')} sent",
+                    peer=outbound.peer_node_id,
+                    details={
+                        "type": outbound.message_type,
+                        "bytes": len(outbound.payload),
+                        "paths": transmitted,
+                    },
+                )
+            )
 
     while not stop_event.is_set():
         now = time.monotonic()
@@ -366,6 +435,7 @@ def run_core_service(
                 batch_size=batch_size,
                 outcome=service_outcome,
             )
+            state.service_budget = _service_budget_for_status(budget_decision)
             if budget_decision.changed:
                 service_budget_overrides = budget_decision.packet_budget_overrides
                 service_byte_budget_overrides = budget_decision.byte_budget_overrides
@@ -461,6 +531,7 @@ def run_core_service(
         drained_reserved_events = _drain_python_reserved_services(
             dataplane,
             decoded_control_metadata,
+            runner_state=state,
             path_names_by_id=path_names_by_id,
             local_targets_by_service_id=local_targets_by_service_id,
             remote_status=state.remote_status,
@@ -471,6 +542,11 @@ def run_core_service(
             clock_sync_responses=clock_sync_responses,
             path_latency_tracker=path_latency_tracker,
             data_traffic_latency_tracker=data_traffic_latency_tracker,
+            diagnostics_bus=diagnostics_bus,
+            live_rekey_context=live_rekey_context,
+            runtime_config=runtime_config,
+            apply_live_rekey_runtime=apply_live_rekey_runtime,
+            transmit_live_rekey=transmit_live_rekey,
         )
         did_dataplane_work = did_dataplane_work or bool(drained_reserved_events)
         if drained_reserved_events and runtime_config.role == "server" and clock_sync_responses:
@@ -507,6 +583,28 @@ def run_core_service(
                 applied_disabled_services=applied_disabled_services,
                 logger=logger.warning,
             )
+        if next_auth_rekey_at is not None and live_rekey_context is not None and now >= next_auth_rekey_at:
+            try:
+                outbound = live_rekey_context.coordinator.maybe_start(
+                    live_rekey_context.local_identity,
+                    live_rekey_context.peer_identity,
+                    live_rekey_context.topology,
+                    live_rekey_context.current_session,
+                    runtime_config,
+                    state.snapshot(),
+                    diagnostics=diagnostics_bus,
+                )
+                transmit_live_rekey(outbound)
+            except (TypeError, ValueError, RuntimeError) as exc:
+                logger.warning("auth rekey evaluation skipped", extra={"error": str(exc)})
+                if diagnostics_bus is not None:
+                    diagnostics_bus.publish(
+                        DiagnosticEvent.warning(
+                            "auth rekey evaluation skipped",
+                            details={"error": str(exc), "source": "auth_crypto_rekey"},
+                        )
+                    )
+            next_auth_rekey_at = now + AUTH_REKEY_EVALUATION_INTERVAL_SECONDS
         now = time.monotonic()
         if now >= next_status_snapshot_at or (max_iterations is not None and iterations == max_iterations):
             _refresh_runner_state_from_dataplane(state, dataplane, runtime_config, decoded_control_metadata)
@@ -522,6 +620,7 @@ def run_core_service(
                 batch_size=batch_size,
                 outcome=service_outcome,
             )
+            state.service_budget = _service_budget_for_status(budget_decision)
             if budget_decision.changed:
                 service_budget_overrides = budget_decision.packet_budget_overrides
                 service_byte_budget_overrides = budget_decision.byte_budget_overrides
@@ -583,6 +682,7 @@ def run_core_service(
                     telemetry_smoother=scheduler_telemetry_smoother,
                     scheduler_coordinator=scheduler_policy_coordinator,
                     service_path_allocator=service_path_allocator,
+                    congestion_controller=congestion_controller,
                 )
                 _apply_reserved_service_schedulers(dataplane)
                 if diagnostics_bus is not None:
@@ -664,6 +764,27 @@ def _service_config_for_status(runtime_config: RuntimeConfig) -> list[dict[str, 
         }
         for service in runtime_config.services
     ]
+
+
+def _service_budget_for_status(decision: Any) -> dict[str, object]:
+    """Return operator-visible service-budget facts while keeping policy in Python."""
+    samples = getattr(decision, "samples", []) or []
+    return {
+        "active": bool(getattr(decision, "active", False)),
+        "reason": str(getattr(decision, "reason", "")),
+        "packet_budget_overrides": dict(getattr(decision, "packet_budget_overrides", {}) or {}),
+        "byte_budget_overrides": dict(getattr(decision, "byte_budget_overrides", {}) or {}),
+        "samples": [
+            {
+                "service": sample.service,
+                "priority": sample.priority,
+                "traffic_class": sample.traffic_class,
+                "tx_packets_per_second": round(sample.tx_packets_per_second, 3),
+                "tx_bytes_per_second": round(sample.tx_bytes_per_second, 3),
+            }
+            for sample in samples
+        ],
+    }
 
 
 def _refresh_runner_state_from_dataplane(
@@ -806,6 +927,7 @@ def _drain_python_reserved_services(
     dataplane: Any,
     control_metadata: dict[str, object],
     *,
+    runner_state: CoreRunnerState | None = None,
     path_names_by_id: dict[int, str],
     local_targets_by_service_id: dict[int, str],
     remote_status: RemoteStatusState | None = None,
@@ -816,6 +938,11 @@ def _drain_python_reserved_services(
     clock_sync_responses: list[InternalClockSyncMessage] | None = None,
     path_latency_tracker: PathLatencyTracker | None = None,
     data_traffic_latency_tracker: DataTrafficLatencyTracker | None = None,
+    diagnostics_bus: DiagnosticsBus | None = None,
+    live_rekey_context: LiveRekeyRuntimeContext | None = None,
+    runtime_config: RuntimeConfig | None = None,
+    apply_live_rekey_runtime: Callable[[Any], bool] | None = None,
+    transmit_live_rekey: Callable[[Any], None] | None = None,
 ) -> int:
     """
     Drain reserved service payloads that Rust intentionally forwards to Python.
@@ -828,6 +955,17 @@ def _drain_python_reserved_services(
     if not callable(drain):
         return 0
     extra_handlers = {}
+    extra_handlers[SERVICE_ID_AUTH_CRYPTO] = lambda event: _handle_auth_crypto_reserved_event(
+        event,
+        diagnostics=diagnostics_bus,
+        peer_name=_peer_name_for_event(event, peer_names_by_scope or {}, fallback_peer_name),
+        runner_state=runner_state,
+        live_rekey_context=live_rekey_context,
+        runtime_config=runtime_config,
+        status_provider=status_provider,
+        apply_live_rekey_runtime=apply_live_rekey_runtime,
+        transmit_live_rekey=transmit_live_rekey,
+    )
     if remote_status is not None and status_provider is not None:
         extra_handlers[SERVICE_ID_REMOTE_STATUS] = lambda event: handle_event(
             event,
@@ -849,6 +987,72 @@ def _drain_python_reserved_services(
         extra_handlers=extra_handlers,
         logger=logger.warning,
     )
+
+
+def _handle_auth_crypto_reserved_event(
+    event: Any,
+    *,
+    diagnostics: DiagnosticsBus | None,
+    peer_name: str | None,
+    runner_state: CoreRunnerState | None,
+    live_rekey_context: LiveRekeyRuntimeContext | None = None,
+    runtime_config: RuntimeConfig | None = None,
+    status_provider: Callable[[], dict[str, object]] | None = None,
+    apply_live_rekey_runtime: Callable[[Any], bool] | None = None,
+    transmit_live_rekey: Callable[[Any], None] | None = None,
+) -> bool:
+    """Decode auth/crypto reserved payloads and keep operator-safe Python state."""
+    result = decode_auth_crypto_event(event, diagnostics=diagnostics, peer_name=peer_name)
+    if runner_state is not None and result.message is not None:
+        message = result.message
+        runner_state.auth_crypto_messages.append(
+            {
+                "type": message.message_type,
+                "peer": peer_name or message.sender_node_id,
+                "sender_node_id": message.sender_node_id,
+                "peer_node_id": message.peer_node_id,
+                "topology_generation": message.topology_generation,
+                "current_receiver_index": message.current_receiver_index,
+                "created_at": message.created_at.isoformat(),
+                "expires_at": message.expires_at.isoformat() if message.expires_at else None,
+                "reason": message.reason,
+                "has_noise": message.noise is not None,
+                "path_id": _reserved_event_int(event, "path_id"),
+                "sequence": _reserved_event_int(event, "sequence"),
+            }
+        )
+        del runner_state.auth_crypto_messages[:-AUTH_CRYPTO_MESSAGE_HISTORY_LIMIT]
+    if live_rekey_context is not None and runtime_config is not None:
+        handled = live_rekey_context.coordinator.handle_peer_payload(
+            live_rekey_context.local_identity,
+            event.payload,
+            live_rekey_context.topology,
+            live_rekey_context.current_session,
+            runtime_config,
+            status_provider() if status_provider is not None else {},
+            diagnostics=diagnostics,
+        )
+        if handled.outbound is not None and transmit_live_rekey is not None:
+            # Rekey responses/rejects must be sent under the session that
+            # authenticated the inbound control message. The peer cannot open a
+            # responder's response if the responder swaps AEAD state before
+            # transmitting it.
+            transmit_live_rekey(handled.outbound)
+        if handled.runtime_result is not None and apply_live_rekey_runtime is not None:
+            apply_live_rekey_runtime(handled.runtime_result)
+        return handled.accepted
+    return result.accepted
+
+
+def _reserved_event_int(event: Any, name: str) -> int:
+    """Read an integer from either a Rust method-style event or a Python dataclass event."""
+    value = getattr(event, name, 0)
+    if callable(value):
+        value = value()
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _peer_names_by_scope(runtime_config: RuntimeConfig) -> dict[int, str]:
@@ -881,6 +1085,10 @@ def _apply_reserved_service_schedulers(dataplane: Any) -> None:
     if not callable(setter):
         return
     setter(SERVICE_ID_CONTROL_METADATA, 0, 0, 0, 0, 0, "inherit", None, None)
+    # Auth/crypto payloads are stateful Python messages. Keep them on a single
+    # scheduler-selected path here; Python can add explicit retry/dedupe policy
+    # later without making Rust understand Noise or rekey semantics.
+    setter(SERVICE_ID_AUTH_CRYPTO, 1, 0, 0, 0, 0, "inherit", None, None)
     setter(SERVICE_ID_REMOTE_STATUS, 1, 0, 0, 0, 0, "inherit", None, None)
 
 

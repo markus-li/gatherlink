@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -153,7 +154,21 @@ def test_path_relay_runtime_export_redacts_hop_key() -> None:
 def test_authenticated_security_compiles_to_rust_static_executor_and_redacts() -> None:
     config = validate_config_file(EXAMPLES / "windows-two-node-a.json")
     authenticated_config = config.model_copy(
-        update={"security": config.security.model_copy(update={"mode": "authenticated"})}
+        update={
+            "security": config.security.model_copy(
+                update={
+                    "mode": "authenticated",
+                    "local_node_id": "node-a-id",
+                    "peer_node_id": "node-b-id",
+                    "topology_generation": 9,
+                    "session_role": "initiator",
+                    "session_created_at": datetime(2026, 1, 1, tzinfo=UTC),
+                    "session_expires_at": datetime(2026, 1, 1, 0, 2, tzinfo=UTC),
+                    "rekey_after_packets": 123,
+                    "rekey_after_bytes": 456,
+                }
+            )
+        }
     )
 
     runtime = expand_config(authenticated_config)
@@ -161,7 +176,15 @@ def test_authenticated_security_compiles_to_rust_static_executor_and_redacts() -
 
     assert runtime.security.mode == "static"
     assert runtime.security.source_mode == "authenticated"
+    assert runtime.security.local_node_id == "node-a-id"
+    assert runtime.security.peer_node_id == "node-b-id"
+    assert runtime.security.topology_generation == 9
+    assert runtime.security.session_role == "initiator"
+    assert runtime.security.rekey_after_packets == 123
+    assert runtime.security.rekey_after_bytes == 456
     assert exported["security"]["source_mode"] == "authenticated"
+    assert exported["security"]["session_role"] == "initiator"
+    assert exported["security"]["session_created_at"] == "2026-01-01T00:00:00Z"
     assert exported["security"]["send_key"] == "[redacted:32 bytes]"
     assert exported["security"]["receive_key"] == "[redacted:32 bytes]"
 

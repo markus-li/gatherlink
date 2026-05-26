@@ -2,12 +2,23 @@ from __future__ import annotations
 
 from gatherlink.config.models import GatherlinkConfig, PathConfig, SchedulerConfig, ServiceConfig
 from gatherlink.scheduling.compiler import compile_scheduler
+from gatherlink.scheduling.congestion import (
+    CongestionFairnessController,
+    compile_congestion_fairness,
+    congestion_pressure_level,
+)
 from gatherlink.scheduling.coordinator import (
     SchedulerPolicyCoordinator,
     choose_candidate_policy,
+    classify_path_responsiveness,
     known_good_fallback_policy,
+    path_responsiveness_summary,
 )
-from gatherlink.scheduling.metrics import path_pressure_from_path_stats, scheduler_metrics_from_control_metadata
+from gatherlink.scheduling.metrics import (
+    PathSchedulerMetrics,
+    path_pressure_from_path_stats,
+    scheduler_metrics_from_control_metadata,
+)
 from gatherlink.scheduling.scoring import score_path, score_snapshot
 from gatherlink.scheduling.service_priority import service_poll_order
 from gatherlink.scheduling.smoothing import SchedulerTelemetrySmoother
@@ -111,6 +122,148 @@ def test_least_queue_scheduler_compiles_live_queue_primitives() -> None:
     assert path.queue_depth_packets == 7
     assert path.queue_depth_bytes == 8192
     assert path.queue_oldest_age_us == 12_000
+
+
+def test_congestion_policy_compiles_pacing_budget_from_path_pressure() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="capacity_aware", congestion_policy="adaptive"),
+        paths=[
+            PathConfig(
+                name="path-a",
+                interface="gl-a",
+                scheduler={"tx_capacity_bps": 100_000_000},
+            )
+        ],
+        services=[ServiceConfig(name="udp-main", target="127.0.0.1:51820")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_pressure": {
+                "path-a": {
+                    "queue_oldest_age_us": 120_000,
+                    "queue_depth_packets": 1200,
+                }
+            }
+        },
+        default_path_ids={"path-a": 0},
+    )
+
+    path = compile_scheduler(config, telemetry=telemetry).paths[0]
+
+    assert path.pacing_budget_bps == 65_000_000
+
+
+def test_congestion_controller_holds_recovery_until_clean_windows_are_sustained() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="capacity_aware", congestion_policy="adaptive"),
+        paths=[PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 100_000_000})],
+        services=[ServiceConfig(name="udp-main", target="127.0.0.1:51820")],
+    )
+    controller = CongestionFairnessController(recovery_windows_required=3)
+    pressure = scheduler_metrics_from_control_metadata(
+        {"path_pressure": {"path-a": {"queue_depth_packets": 1200}}},
+        default_path_ids={"path-a": 0},
+    )
+    clean = scheduler_metrics_from_control_metadata({}, default_path_ids={"path-a": 0})
+
+    assert compile_scheduler(config, telemetry=pressure, congestion_controller=controller).paths[0].pacing_budget_bps
+    assert compile_scheduler(config, telemetry=clean, congestion_controller=controller).paths[0].pacing_budget_bps
+    assert compile_scheduler(config, telemetry=clean, congestion_controller=controller).paths[0].pacing_budget_bps
+    assert compile_scheduler(config, telemetry=clean, congestion_controller=controller).paths[0].pacing_budget_bps == 0
+
+
+def test_congestion_fairness_helper_reports_reason_and_pressure_level() -> None:
+    metrics = PathSchedulerMetrics(
+        path_name="path-a",
+        path_id=0,
+        loss_ppm=25_000,
+        queue_depth_packets=300,
+    )
+
+    decision = compile_congestion_fairness(metrics, policy="adaptive", capacity_bps=100_000_000)
+
+    assert congestion_pressure_level(metrics) == 1
+    assert decision.pressure_level == 1
+    assert decision.reason == "moderate_pressure"
+    assert decision.pacing_budget_bps == 85_000_000
+
+
+def test_congestion_policy_off_and_explicit_pacing_bypass_inferred_fairness() -> None:
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_pressure": {
+                "path-a": {
+                    "loss_ppm": 100_000,
+                    "queue_oldest_age_us": 120_000,
+                }
+            }
+        },
+        default_path_ids={"path-a": 0},
+    )
+    off_config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="capacity_aware", congestion_policy="off"),
+        paths=[PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 100_000_000})],
+        services=[ServiceConfig(name="udp-main", target="127.0.0.1:51820")],
+    )
+    explicit_config = off_config.model_copy(
+        update={
+            "scheduler": SchedulerConfig(mode="capacity_aware", congestion_policy="volatile"),
+            "paths": [
+                PathConfig(
+                    name="path-a",
+                    interface="gl-a",
+                    scheduler={"tx_capacity_bps": 100_000_000, "pacing_budget_bps": 77_000_000},
+                )
+            ],
+        }
+    )
+
+    assert compile_scheduler(off_config, telemetry=telemetry).paths[0].pacing_budget_bps == 0
+    assert compile_scheduler(explicit_config, telemetry=telemetry).paths[0].pacing_budget_bps == 77_000_000
+
+
+def test_volatile_congestion_policy_backs_off_more_than_conservative() -> None:
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_pressure": {
+                "path-a": {
+                    "loss_ppm": 25_000,
+                    "queue_depth_packets": 300,
+                }
+            }
+        },
+        default_path_ids={"path-a": 0},
+    )
+    conservative = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="capacity_aware", congestion_policy="conservative"),
+        paths=[PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 100_000_000})],
+        services=[ServiceConfig(name="udp-main", target="127.0.0.1:51820")],
+    )
+    volatile = conservative.model_copy(
+        update={"scheduler": SchedulerConfig(mode="capacity_aware", congestion_policy="volatile")}
+    )
+
+    conservative_path = compile_scheduler(conservative, telemetry=telemetry).paths[0]
+    volatile_path = compile_scheduler(volatile, telemetry=telemetry).paths[0]
+
+    assert conservative_path.pacing_budget_bps == 75_000_000
+    assert volatile_path.pacing_budget_bps == 70_000_000
 
 
 def test_ordered_multipath_compiles_reorder_and_in_flight_credits() -> None:
@@ -381,6 +534,82 @@ def test_ordered_multipath_reorder_hold_includes_jitter_margin() -> None:
     assert path.reorder_hold_us == 52_500
 
 
+def test_ordered_multipath_uses_p95_latency_for_conservative_timeline() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath"),
+        paths=[
+            PathConfig(
+                name="path-a",
+                interface="gl-a",
+                scheduler={
+                    "mtu": 1200,
+                    "tx_capacity_bps": 100_000_000,
+                    "latency_us": 10_000,
+                },
+            )
+        ],
+        services=[ServiceConfig(name="udp-main", target="127.0.0.1:51820")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_latency": {
+                "path-a": {
+                    "tx_mean_us": 10_000,
+                    "tx_p95_us": 80_000,
+                    "rx_p95_us": 60_000,
+                }
+            }
+        },
+        default_path_ids={"path-a": 0},
+    )
+
+    path = compile_scheduler(config, telemetry=telemetry).paths[0]
+
+    assert path.latency_us == 80_000
+    assert path.reorder_hold_us == 100_000
+
+
+def test_ordered_multipath_receiver_buffer_age_tightens_credit() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath"),
+        paths=[
+            PathConfig(
+                name="path-a",
+                interface="gl-a",
+                scheduler={
+                    "mtu": 1200,
+                    "tx_capacity_bps": 1_000_000_000,
+                    "latency_us": 10_000,
+                },
+            )
+        ],
+        services=[ServiceConfig(name="udp-main", target="127.0.0.1:51820")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_pressure": {
+                "path-a": {
+                    "reorder_buffer_packets": 4096,
+                    "reorder_buffer_oldest_age_us": 100_000,
+                }
+            }
+        },
+        default_path_ids={"path-a": 0},
+    )
+
+    path = compile_scheduler(config, telemetry=telemetry).paths[0]
+
+    assert path.max_in_flight_bytes == 277_777
+
+
 def test_scheduler_telemetry_ignores_invalid_or_negative_control_values() -> None:
     telemetry = scheduler_metrics_from_control_metadata(
         {
@@ -470,6 +699,131 @@ def test_coordinated_adaptive_fallback_uses_configured_capacity_hints() -> None:
     assert scheduler.mode == "weighted_round_robin"
     assert scheduler.paths[0].weight == 300
     assert scheduler.paths[1].weight == 700
+
+
+def test_coordinated_adaptive_classifies_path_responsiveness_for_diagnostics() -> None:
+    assert (
+        classify_path_responsiveness(
+            PathSchedulerMetrics(
+                path_name="path-a",
+                path_id=0,
+                tx_latency_mean_us=12_000,
+                tx_jitter_us=1_000,
+                loss_ppm=0,
+                observed_packets=10_000,
+            )
+        )
+        == "wired_stable"
+    )
+    assert (
+        classify_path_responsiveness(
+            PathSchedulerMetrics(
+                path_name="path-b",
+                path_id=1,
+                tx_latency_mean_us=55_000,
+                tx_jitter_us=20_000,
+                loss_ppm=5_000,
+                observed_packets=10_000,
+            )
+        )
+        == "starlink_like"
+    )
+    assert (
+        classify_path_responsiveness(
+            PathSchedulerMetrics(
+                path_name="path-c",
+                path_id=2,
+                tx_latency_mean_us=40_000,
+                tx_jitter_us=9_000,
+                loss_ppm=2_000,
+                observed_packets=10_000,
+            )
+        )
+        == "cellular_like"
+    )
+    assert (
+        classify_path_responsiveness(
+            PathSchedulerMetrics(
+                path_name="path-d",
+                path_id=3,
+                tx_latency_mean_us=90_000,
+                tx_jitter_us=45_000,
+                loss_ppm=20_000,
+                observed_packets=10_000,
+            )
+        )
+        == "volatile_wireless"
+    )
+
+
+def test_coordinated_adaptive_exports_path_profile_signals() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 800_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 150_000_000}),
+        ],
+        services=[ServiceConfig(name="udp-main", target="127.0.0.1:51820")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {"path-a": {"tx_bps": 800_000_000}, "path-b": {"tx_bps": 150_000_000}},
+            "path_latency": {
+                "path-a": {"tx_mean_us": 12_000, "tx_jitter_us": 1_000},
+                "path-b": {"tx_mean_us": 45_000, "tx_jitter_us": 9_000},
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, signals = choose_candidate_policy(config, telemetry)
+
+    assert candidate in {"capacity_aware", "latency_guarded_capacity"}
+    assert reason
+    assert "profile:wired_stable" in signals
+    assert "profile:cellular_like" in signals
+    assert path_responsiveness_summary(list(telemetry.paths.values())) == ("wired_stable", "cellular_like")
+
+
+def test_coordinated_adaptive_scores_path_profiles_across_windows() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive"),
+        paths=[PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 800_000_000})],
+        services=[ServiceConfig(name="udp-main", target="127.0.0.1:51820")],
+    )
+    coordinator = SchedulerPolicyCoordinator(
+        minimum_dwell_packets=1,
+        minimum_dwell_seconds=0.0,
+        required_confidence_windows=1,
+    )
+    wired = scheduler_metrics_from_control_metadata(
+        {"path_latency": {"path-a": {"tx_mean_us": 12_000, "tx_jitter_us": 1_000}}},
+        default_path_ids={"path-a": 0},
+    )
+    volatile = scheduler_metrics_from_control_metadata(
+        {"path_latency": {"path-a": {"tx_mean_us": 90_000, "tx_jitter_us": 45_000}}},
+        default_path_ids={"path-a": 0},
+    )
+
+    coordinator.choose_effective_mode(config, wired)
+    first_profile = coordinator.last_decision.path_profiles[0]
+    assert first_profile.stable_class == "wired_stable"
+    assert first_profile.confidence_ppm == 1_000_000
+
+    coordinator.choose_effective_mode(config, volatile)
+    second_profile = coordinator.last_decision.path_profiles[0]
+    assert second_profile.current_class == "volatile_wireless"
+    assert second_profile.stable_class in {"wired_stable", "volatile_wireless"}
+    assert second_profile.confidence_ppm == 500_000
+    assert coordinator.last_decision.export_dict()["path_profiles"][0]["windows"] == 2
 
 
 def test_coordinated_adaptive_tcp_bias_compiles_single_best_path_until_telemetry_switch() -> None:

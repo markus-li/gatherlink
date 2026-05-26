@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from gatherlink.lab.reports import generate_three_path_scheduler_report
-from gatherlink.scheduling.simulation import POLICIES_TO_COMPARE, run_scheduler_matrix
+from gatherlink.scheduling.simulation import POLICIES_TO_COMPARE, run_congestion_fairness_matrix, run_scheduler_matrix
 
 
 def test_scheduler_matrix_covers_every_policy() -> None:
@@ -28,6 +28,19 @@ def test_scheduler_matrix_shows_expected_policy_differences() -> None:
     assert rust_modes["capacity_aware"] == "weighted_round_robin"
     assert lossy["loss_aware"] != "path-a"
     assert queued["least_queue"] != "path-a"
+
+
+def test_congestion_fairness_matrix_shows_clean_bypass_and_pressure_backoff() -> None:
+    matrix = run_congestion_fairness_matrix()
+    clean = {decision.policy: decision for decision in matrix["clean-shared-link"]}
+    moderate = {decision.policy: decision for decision in matrix["moderate-buffer-growth"]}
+    lossy = {decision.policy: decision for decision in matrix["lossy-bufferbloat"]}
+
+    assert clean["adaptive"].pacing_budget_bps == 0
+    assert moderate["adaptive"].pacing_budget_bps == 425_000_000
+    assert lossy["adaptive"].pacing_budget_bps == 325_000_000
+    assert lossy["volatile"].pacing_budget_bps < lossy["adaptive"].pacing_budget_bps
+    assert lossy["off"].pacing_budget_bps == 0
 
 
 def test_scheduler_report_includes_lab_and_policy_sections(tmp_path: Path) -> None:
@@ -60,6 +73,8 @@ def test_scheduler_report_includes_lab_and_policy_sections(tmp_path: Path) -> No
     report = generate_three_path_scheduler_report(tmp_path)
 
     assert "Scheduler policy matrix" in report
+    assert "Congestion fairness matrix" in report
+    assert "lossy-bufferbloat" in report
     assert "Saved lab runs" in report
     assert "sample" in report
     assert "synchronized (time.cloudflare.com)" in report

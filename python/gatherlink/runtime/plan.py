@@ -14,6 +14,7 @@ from typing import Any, Literal
 from pydantic import Field
 
 from gatherlink.config.runtime import RuntimeConfig
+from gatherlink.runtime.rekey import authenticated_session_from_runtime_config
 from gatherlink.shared.models import GatherlinkBaseModel
 
 
@@ -129,6 +130,11 @@ def runtime_warnings(config: RuntimeConfig) -> list[str]:
                 "WARNING: security.mode=static is lab/manual provisioning, not the normal v0.9 secure path.",
                 "WARNING: prefer security.mode=authenticated material produced by the signed handshake commands.",
             ]
+        )
+    if config.security.source_mode == "authenticated" and authenticated_session_from_runtime_config(config) is None:
+        warnings.append(
+            "WARNING: authenticated security material lacks keyless session metadata; "
+            "packet execution is supported but autonomous live rekey cannot originate from this config."
         )
     for service in config.services:
         if service.service_id_explicit:

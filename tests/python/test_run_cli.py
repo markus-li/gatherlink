@@ -102,6 +102,85 @@ def test_run_service_cli_wires_jsonl_diagnostics(monkeypatch, tmp_path) -> None:
     assert rows[0]["message"] == "plain test warning"
 
 
+def test_run_service_loads_autonomous_rekey_context_from_files(monkeypatch, tmp_path) -> None:
+    from gatherlink.cli import run as run_cli
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, ServiceConfig
+    from gatherlink.runtime.runner import CoreRunnerResult
+    from gatherlink.secrets.identity import IdentityPublicRecord, IdentityRecord
+    from gatherlink.secrets.provisioning import ProvisionedNode, TopologyBundleBody, sign_topology_bundle
+    from gatherlink.security.keys import NodeIdentity
+    from gatherlink.security.sessions import plan_authenticated_static_session
+
+    local = NodeIdentity.generate()
+    peer = NodeIdentity.generate()
+    local_identity = tmp_path / "local.identity.json"
+    peer_identity = tmp_path / "peer.public.json"
+    trust_root = tmp_path / "trust-root.public.json"
+    topology_path = tmp_path / "topology.signed.json"
+    config_path = tmp_path / "node.json"
+
+    IdentityRecord.from_identity(local).save(local_identity)
+    IdentityPublicRecord.from_identity(peer).save(peer_identity)
+    IdentityPublicRecord.from_identity(local).save(trust_root)
+    topology = TopologyBundleBody(
+        generation=9,
+        issuer_node_id=IdentityPublicRecord.from_identity(local).node_id,
+        nodes=[
+            ProvisionedNode(name="local", identity=IdentityPublicRecord.from_identity(local)),
+            ProvisionedNode(name="peer", identity=IdentityPublicRecord.from_identity(peer)),
+        ],
+    )
+    sign_topology_bundle(local, topology).save(topology_path)
+    session = plan_authenticated_static_session(
+        local,
+        IdentityPublicRecord.from_identity(peer),
+        topology,
+        role="initiator",
+        receiver_index=1234,
+    )
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="peer",
+        paths=[PathConfig(name="path-a", interface="lo")],
+        services=[ServiceConfig(name="udp-main", listen="127.0.0.1:0", target="127.0.0.1:51820")],
+        security=session.export_config(),
+    )
+    config_path.write_text(config.model_dump_json(indent=2), encoding="utf-8")
+    captured = {}
+
+    def fake_run_core_service(_runtime_config, **kwargs):
+        captured["live_rekey_context"] = kwargs["live_rekey_context"]
+        return CoreRunnerResult(1, 0, 0, 0, 0)
+
+    monkeypatch.setattr(run_cli, "run_core_service", fake_run_core_service)
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "service",
+            str(config_path),
+            "--max-iterations",
+            "1",
+            "--rekey-local-identity",
+            str(local_identity),
+            "--rekey-peer-identity",
+            str(peer_identity),
+            "--rekey-topology",
+            str(topology_path),
+            "--rekey-trust-root",
+            str(trust_root),
+        ],
+    )
+
+    assert result.exit_code == 0
+    context = captured["live_rekey_context"]
+    assert context.current_session.local_node_id == IdentityPublicRecord.from_identity(local).node_id
+    assert context.current_session.peer_node_id == IdentityPublicRecord.from_identity(peer).node_id
+    assert context.current_session.topology_generation == 9
+
+
 def test_run_start_registers_process_managed_core_service(monkeypatch, tmp_path) -> None:
     from gatherlink.cli import run as run_cli
     from gatherlink.runtime.services import SERVICE_REGISTRY_ENV, ServiceRegistry
@@ -137,6 +216,66 @@ def test_run_start_registers_process_managed_core_service(monkeypatch, tmp_path)
     assert "core.test-client" in launched["command"]
     assert "--scheduler-reapply-interval" in launched["command"]
     assert launched["kwargs"]["start_new_session"] is True
+
+
+def test_run_start_forwards_autonomous_rekey_context(monkeypatch, tmp_path) -> None:
+    from gatherlink.cli import run as run_cli
+    from gatherlink.runtime.services import SERVICE_REGISTRY_ENV
+
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(tmp_path / "services"))
+    launched = {}
+
+    class FakePopen:
+        def __init__(self, command, **kwargs):
+            launched["command"] = command
+            launched["kwargs"] = kwargs
+            self.pid = os.getpid()
+
+    monkeypatch.setattr(run_cli.subprocess, "Popen", FakePopen)
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "start",
+            str(EXAMPLES / "minimal-client.json"),
+            "--name",
+            "core.test-client",
+            "--rekey-local-identity",
+            "local.identity.json",
+            "--rekey-peer-identity",
+            "peer.identity.json",
+            "--rekey-topology",
+            "topology.signed.json",
+            "--rekey-trust-root",
+            "root.identity.json",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "--rekey-local-identity" in launched["command"]
+    assert "local.identity.json" in launched["command"]
+    assert "--rekey-peer-identity" in launched["command"]
+    assert "--rekey-topology" in launched["command"]
+    assert "--rekey-trust-root" in launched["command"]
+
+
+def test_run_start_rejects_partial_autonomous_rekey_context(monkeypatch, tmp_path) -> None:
+    from gatherlink.runtime.services import SERVICE_REGISTRY_ENV
+
+    monkeypatch.setenv(SERVICE_REGISTRY_ENV, str(tmp_path / "services"))
+    result = CliRunner().invoke(
+        app,
+        [
+            "run",
+            "start",
+            str(EXAMPLES / "minimal-client.json"),
+            "--rekey-local-identity",
+            "local.identity.json",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "autonomous rekey requires" in result.output
 
 
 def test_run_start_closes_existing_process_service_before_replacing(monkeypatch, tmp_path) -> None:

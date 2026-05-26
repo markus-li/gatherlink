@@ -108,6 +108,22 @@ class AuthenticatedSessionPlan:
             "has_compiled_security": self.security is not None,
         }
 
+    def export_config(self) -> dict[str, int | str]:
+        """Return a config-compatible authenticated security block with session metadata."""
+        if self.security is None:
+            raise ValueError("authenticated session has no compiled transport security")
+        return {
+            **self.security.export_config(mode="authenticated"),
+            "local_node_id": self.local_node_id,
+            "peer_node_id": self.peer_node_id,
+            "topology_generation": self.topology_generation,
+            "session_role": self.role,
+            "session_created_at": self.created_at.isoformat(),
+            "session_expires_at": self.expires_at.isoformat(),
+            "rekey_after_packets": self.rekey_after_packets,
+            "rekey_after_bytes": self.rekey_after_bytes,
+        }
+
 
 @dataclass(frozen=True)
 class SessionRotationDecision:

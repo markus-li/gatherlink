@@ -153,20 +153,30 @@ class ServicePathAllocator:
         degraded_services = _degraded_services(status)
         high_plan_paths = self._high_priority_path_ids(eligible, healthy_paths, telemetry)
         sample_by_service = {sample.service: sample for sample in samples}
+        reserved_bulk_bps: dict[int, int] = {}
 
         for service in services:
+            sample = sample_by_service.get(service.name)
             plan = self._plan_for_service(
                 service,
                 healthy_paths=healthy_paths,
                 high_plan_paths=high_plan_paths,
-                sample=sample_by_service.get(service.name),
+                sample=sample,
                 telemetry=telemetry,
                 degraded=service.name in degraded_services,
                 path_by_id=path_by_id,
+                reserved_bulk_bps=reserved_bulk_bps,
                 now=now,
             )
             plans.append(plan)
             updated_services.append(_apply_plan(service, plan))
+            if service_is_bulk(service) and sample is not None:
+                _reserve_bulk_capacity(
+                    reserved_bulk_bps,
+                    plan,
+                    path_by_id,
+                    int(sample.tx_bytes_per_second * 8 * SERVICE_PATH_HEADROOM),
+                )
 
         changed = any(
             _service_path_tuple(old) != _service_path_tuple(new)
@@ -248,13 +258,23 @@ class ServicePathAllocator:
         telemetry: SchedulerTelemetrySnapshot,
         degraded: bool,
         path_by_id: dict[int, RuntimePathConfig],
+        reserved_bulk_bps: dict[int, int],
         now: float,
     ) -> ServicePathPlan:
         """Compile one service path plan from priority, pressure, and path health."""
         if service_is_protected(service):
             return self._protected_service_plan(service, healthy_paths, telemetry, degraded, now)
         if service_is_bulk(service):
-            return self._bulk_service_plan(service, healthy_paths, high_plan_paths, sample, telemetry, path_by_id, now)
+            return self._bulk_service_plan(
+                service,
+                healthy_paths,
+                high_plan_paths,
+                sample,
+                telemetry,
+                path_by_id,
+                reserved_bulk_bps,
+                now,
+            )
         return self._normal_service_plan(service, healthy_paths, telemetry, now)
 
     def _protected_service_plan(
@@ -318,6 +338,7 @@ class ServicePathAllocator:
         sample: ServicePathRateSample | None,
         telemetry: SchedulerTelemetrySnapshot,
         path_by_id: dict[int, RuntimePathConfig],
+        reserved_bulk_bps: dict[int, int],
         now: float,
     ) -> ServicePathPlan:
         """Let bulk/fast services expand and shrink based on observed demand."""
@@ -332,7 +353,7 @@ class ServicePathAllocator:
         else:
             target_bps = int(sample.tx_bytes_per_second * 8 * SERVICE_PATH_HEADROOM)
             current_healthy = [path for path in current if path.scheduler.path_id in _path_id_set(candidates)]
-            current_capacity = sum(_path_capacity_bps(path) for path in current_healthy)
+            current_capacity = sum(_path_available_bps(path, reserved_bulk_bps) for path in current_healthy)
             if len(current_healthy) == 1 and target_bps <= int(current_capacity * SERVICE_PATH_EXPAND_HIGH_WATERMARK):
                 chosen = current_healthy
                 reason = (
@@ -340,7 +361,7 @@ class ServicePathAllocator:
                     f"{','.join(path.name for path in chosen)}"
                 )
             else:
-                chosen = _smallest_capacity_set(candidates, target_bps)
+                chosen = _smallest_capacity_set(candidates, target_bps, reserved_bulk_bps=reserved_bulk_bps)
                 reason = (
                     f"{service.name}: {target_bps}bps demand target compiled to "
                     f"{','.join(path.name for path in chosen)}"
@@ -406,19 +427,50 @@ def _metric_is_unhealthy(metric: PathSchedulerMetrics) -> bool:
     )
 
 
-def _smallest_capacity_set(paths: list[RuntimePathConfig], target_bps: int) -> list[RuntimePathConfig]:
+def _smallest_capacity_set(
+    paths: list[RuntimePathConfig],
+    target_bps: int,
+    *,
+    reserved_bulk_bps: dict[int, int] | None = None,
+) -> list[RuntimePathConfig]:
     """Choose the smallest high-capacity healthy path set that covers demand."""
-    ranked = sorted(paths, key=_path_capacity_bps, reverse=True)
+    reserved_bulk_bps = reserved_bulk_bps or {}
+    ranked = sorted(paths, key=lambda path: _path_available_bps(path, reserved_bulk_bps), reverse=True)
     if target_bps <= 0:
         return ranked[:1]
     chosen: list[RuntimePathConfig] = []
     total = 0
     for path in ranked:
         chosen.append(path)
-        total += _path_capacity_bps(path)
+        total += _path_available_bps(path, reserved_bulk_bps)
         if total >= target_bps:
             break
     return chosen or ranked[:1]
+
+
+def _reserve_bulk_capacity(
+    reserved_bulk_bps: dict[int, int],
+    plan: ServicePathPlan,
+    path_by_id: dict[int, RuntimePathConfig],
+    target_bps: int,
+) -> None:
+    """Reserve a planned bulk service load so later bulk plans see less spare capacity."""
+    planned_paths = [path_by_id[path_id] for path_id in plan.allowed_path_ids if path_id in path_by_id]
+    if not planned_paths or target_bps <= 0:
+        return
+    total_weight = sum(max(1, weight) for path_id, weight in plan.path_weights if path_id in path_by_id) or len(
+        planned_paths
+    )
+    for path in planned_paths:
+        weight = next((max(1, value) for path_id, value in plan.path_weights if path_id == path.scheduler.path_id), 1)
+        reserved_bulk_bps[path.scheduler.path_id] = reserved_bulk_bps.get(path.scheduler.path_id, 0) + (
+            target_bps * weight // total_weight
+        )
+
+
+def _path_available_bps(path: RuntimePathConfig, reserved_bulk_bps: dict[int, int]) -> int:
+    """Return path capacity after earlier same-pass bulk reservations."""
+    return max(1, _path_capacity_bps(path) - reserved_bulk_bps.get(path.scheduler.path_id, 0))
 
 
 def _best_path(paths: list[RuntimePathConfig], telemetry: SchedulerTelemetrySnapshot) -> RuntimePathConfig:

@@ -253,12 +253,7 @@ def noise_accept(
     _write_json_output(response_output, accepted.response, force=force, mode=0o644)
     if accepted.session.security is None:
         raise typer.BadParameter("accepted Noise handshake did not compile security material")
-    _write_json_output(
-        security_output,
-        accepted.session.security.export_config(mode="authenticated"),
-        force=force,
-        mode=0o600,
-    )
+    _write_json_output(security_output, accepted.session.export_config(), force=force, mode=0o600)
     typer.echo(
         json.dumps(
             {
@@ -293,12 +288,7 @@ def noise_complete(
     )
     if session.security is None:
         raise typer.BadParameter("completed Noise handshake did not compile security material")
-    _write_json_output(
-        security_output,
-        session.security.export_config(mode="authenticated"),
-        force=force,
-        mode=0o600,
-    )
+    _write_json_output(security_output, session.export_config(), force=force, mode=0o600)
     typer.echo(
         json.dumps(
             {
@@ -338,12 +328,7 @@ def handshake_accept(
     accepted.response.save(response_output, force=force)
     if accepted.session.security is None:
         raise typer.BadParameter("accepted handshake did not compile security material")
-    _write_json_output(
-        security_output,
-        accepted.session.security.export_config(mode="authenticated"),
-        force=force,
-        mode=0o600,
-    )
+    _write_json_output(security_output, accepted.session.export_config(), force=force, mode=0o600)
     typer.echo(
         json.dumps(
             {
@@ -377,12 +362,7 @@ def handshake_complete(
     )
     if session.security is None:
         raise typer.BadParameter("completed handshake did not compile security material")
-    _write_json_output(
-        security_output,
-        session.security.export_config(mode="authenticated"),
-        force=force,
-        mode=0o600,
-    )
+    _write_json_output(security_output, session.export_config(), force=force, mode=0o600)
     typer.echo(
         json.dumps(
             {

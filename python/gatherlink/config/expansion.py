@@ -117,6 +117,14 @@ def _expand_security(config: GatherlinkConfig, service_ids_by_name: dict[str, in
         remote_receiver_index=config.security.remote_receiver_index or config.security.receiver_index,
         send_key=b64decode(config.security.send_key, validate=True),
         receive_key=b64decode(config.security.receive_key, validate=True),
+        local_node_id=config.security.local_node_id,
+        peer_node_id=config.security.peer_node_id,
+        topology_generation=config.security.topology_generation,
+        session_role=config.security.session_role,
+        session_created_at=config.security.session_created_at,
+        session_expires_at=config.security.session_expires_at,
+        rekey_after_packets=config.security.rekey_after_packets,
+        rekey_after_bytes=config.security.rekey_after_bytes,
     )
 
 

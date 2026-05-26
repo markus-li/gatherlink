@@ -6,6 +6,7 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from time import monotonic
+from typing import Literal
 
 from gatherlink.config.models import GatherlinkConfig, SchedulerPolicy
 from gatherlink.scheduling.metrics import PathSchedulerMetrics, SchedulerTelemetrySnapshot
@@ -16,6 +17,7 @@ COORDINATED_DEFAULT_MIN_DWELL_PACKETS = 50_000
 COORDINATED_DEFAULT_MIN_DWELL_SECONDS = 5.0
 COORDINATED_DEFAULT_REQUIRED_CONFIDENCE_WINDOWS = 2
 COORDINATED_MAX_DECISION_HISTORY = 16
+COORDINATED_MAX_RESPONSIVENESS_HISTORY = 8
 COORDINATED_STALE_CONTROL_US = 120_000_000
 COORDINATED_HIGH_REORDER_PACKETS = 1024
 COORDINATED_HIGH_LOSS_PPM = 80_000
@@ -37,6 +39,29 @@ COORDINATED_TCP_ORDERED_MAX_REORDER_PACKETS = 128
 COORDINATED_TCP_ORDERED_MAX_REORDER_PPM = 5_000
 COORDINATED_TCP_ORDERED_MIN_KNOWN_PATHS = 2
 COORDINATED_TCP_ORDERED_MIN_OBSERVED_PACKETS = 1_000
+RESPONSIVENESS_WIRED_MAX_LATENCY_US = 25_000
+RESPONSIVENESS_WIRED_MAX_JITTER_US = 3_000
+RESPONSIVENESS_CELLULAR_MIN_LATENCY_US = 35_000
+RESPONSIVENESS_CELLULAR_MIN_JITTER_US = 8_000
+RESPONSIVENESS_STARLINK_MIN_LATENCY_US = 45_000
+RESPONSIVENESS_STARLINK_MIN_JITTER_US = 15_000
+RESPONSIVENESS_VOLATILE_MIN_JITTER_US = 40_000
+RESPONSIVENESS_VOLATILE_MIN_LOSS_PPM = 50_000
+
+PathResponsivenessClass = Literal[
+    "wired_stable",
+    "cellular_like",
+    "starlink_like",
+    "volatile_wireless",
+    "unknown",
+]
+PATH_RESPONSIVENESS_CLASSES: tuple[PathResponsivenessClass, ...] = (
+    "wired_stable",
+    "cellular_like",
+    "starlink_like",
+    "volatile_wireless",
+    "unknown",
+)
 
 COORDINATED_ALLOWED_POLICIES: set[SchedulerPolicy] = {
     "capacity_aware",
@@ -66,6 +91,7 @@ class SchedulerCoordinatorDecision:
     decision_number: int
     blocked_by: str | None = None
     signals: tuple[str, ...] = ()
+    path_profiles: tuple[PathResponsivenessProfile, ...] = ()
 
     def export_dict(self) -> dict[str, object]:
         """Return a stable diagnostic payload."""
@@ -84,6 +110,28 @@ class SchedulerCoordinatorDecision:
             "decision_number": self.decision_number,
             "blocked_by": self.blocked_by,
             "signals": list(self.signals),
+            "path_profiles": [profile.export_dict() for profile in self.path_profiles],
+        }
+
+
+@dataclass(frozen=True)
+class PathResponsivenessProfile:
+    """Confidence-scored responsiveness class for one path."""
+
+    path: str
+    current_class: PathResponsivenessClass
+    stable_class: PathResponsivenessClass
+    confidence_ppm: int
+    windows: int
+
+    def export_dict(self) -> dict[str, object]:
+        """Return a compact diagnostics payload."""
+        return {
+            "path": self.path,
+            "current_class": self.current_class,
+            "stable_class": self.stable_class,
+            "confidence_ppm": self.confidence_ppm,
+            "windows": self.windows,
         }
 
 
@@ -111,6 +159,7 @@ class SchedulerPolicyCoordinator:
         default_factory=lambda: deque(maxlen=COORDINATED_MAX_DECISION_HISTORY),
         init=False,
     )
+    _responsiveness_history: dict[str, deque[PathResponsivenessClass]] = field(default_factory=dict, init=False)
     last_decision: SchedulerCoordinatorDecision | None = field(default=None, init=False)
 
     def choose_effective_mode(
@@ -156,6 +205,8 @@ class SchedulerPolicyCoordinator:
             fallback=self.current_mode,
             service_traffic=service_traffic,
         )
+        path_profiles = self._update_path_profiles(telemetry)
+        signals = tuple(dict.fromkeys((*signals, *self._profile_signals(path_profiles))))
         if candidate == self._candidate_mode:
             self._candidate_confidence += 1
         else:
@@ -186,6 +237,7 @@ class SchedulerPolicyCoordinator:
             decision_number=self._decision_number,
             blocked_by=blocked_by,
             signals=signals,
+            path_profiles=path_profiles,
         )
         self._record_decision(decision)
         return self.current_mode
@@ -210,6 +262,47 @@ class SchedulerPolicyCoordinator:
         """Keep only bounded compact decision state, never per-packet logs."""
         self.last_decision = decision
         self._recent_decisions.append(decision)
+
+    def _update_path_profiles(self, telemetry: SchedulerTelemetrySnapshot) -> tuple[PathResponsivenessProfile, ...]:
+        """
+        Update bounded path responsiveness history and return scored profiles.
+
+        This is a coordinator diagnostic and policy hint only. It does not
+        override explicit config by itself; it gives Python a sustained view so
+        a single jitter spike does not relabel a path as volatile forever.
+        """
+        seen: set[str] = set()
+        profiles: list[PathResponsivenessProfile] = []
+        for path_name, metric in sorted(telemetry.paths.items()):
+            seen.add(path_name)
+            current_class = classify_path_responsiveness(metric)
+            history = self._responsiveness_history.setdefault(
+                path_name,
+                deque(maxlen=COORDINATED_MAX_RESPONSIVENESS_HISTORY),
+            )
+            history.append(current_class)
+            stable_class, confidence_ppm = _stable_responsiveness_class(history)
+            profiles.append(
+                PathResponsivenessProfile(
+                    path=path_name,
+                    current_class=current_class,
+                    stable_class=stable_class,
+                    confidence_ppm=confidence_ppm,
+                    windows=len(history),
+                )
+            )
+        for stale_path in set(self._responsiveness_history) - seen:
+            del self._responsiveness_history[stale_path]
+        return tuple(profiles)
+
+    @staticmethod
+    def _profile_signals(profiles: tuple[PathResponsivenessProfile, ...]) -> tuple[str, ...]:
+        """Return compact stable-profile signals for diagnostics."""
+        signals = []
+        for profile in profiles:
+            if profile.stable_class != "unknown" and profile.confidence_ppm >= 500_000:
+                signals.append(f"profile:{profile.stable_class}")
+        return tuple(dict.fromkeys(signals))
 
 
 def choose_candidate_policy(
@@ -655,7 +748,56 @@ def _telemetry_signals(config: GatherlinkConfig, metrics: list[PathSchedulerMetr
         signals.append("loss_pressure")
     if metrics and _capacity_confidence_is_high(metrics):
         signals.append("capacity_confident")
+    signals.extend(f"profile:{profile}" for profile in path_responsiveness_summary(metrics))
     return tuple(dict.fromkeys(signals))
+
+
+def path_responsiveness_summary(metrics: list[PathSchedulerMetrics]) -> tuple[PathResponsivenessClass, ...]:
+    """Return the path responsiveness classes represented in one telemetry window."""
+    return tuple(dict.fromkeys(classify_path_responsiveness(metric) for metric in metrics))
+
+
+def _stable_responsiveness_class(
+    history: deque[PathResponsivenessClass],
+) -> tuple[PathResponsivenessClass, int]:
+    """Return the most repeated class and confidence from bounded history."""
+    if not history:
+        return "unknown", 0
+    counts = {profile: 0 for profile in PATH_RESPONSIVENESS_CLASSES}
+    for profile in history:
+        counts[profile] = counts.get(profile, 0) + 1
+    stable_class, count = max(counts.items(), key=lambda item: (item[1], item[0] != "unknown"))
+    confidence_ppm = count * 1_000_000 // len(history)
+    return stable_class, confidence_ppm
+
+
+def classify_path_responsiveness(metric: PathSchedulerMetrics) -> PathResponsivenessClass:
+    """
+    Classify one path from scheduler-visible facts.
+
+    This is deliberately a weak, explainable hint. Fixed operator config and
+    direct scheduler telemetry still win. The class exists so Python can choose
+    safer defaults for real-world profiles without putting access-type meaning
+    into Rust.
+    """
+    latency_us = metric.scheduler_latency_us
+    jitter_us = _path_jitter_us(metric) or 0
+    if metric.loss_ppm >= RESPONSIVENESS_VOLATILE_MIN_LOSS_PPM or jitter_us >= RESPONSIVENESS_VOLATILE_MIN_JITTER_US:
+        return "volatile_wireless"
+    if latency_us is None:
+        return "unknown"
+    if (
+        latency_us <= RESPONSIVENESS_WIRED_MAX_LATENCY_US
+        and jitter_us <= RESPONSIVENESS_WIRED_MAX_JITTER_US
+        and metric.loss_ppm == 0
+        and metric.queue_depth_packets == 0
+    ):
+        return "wired_stable"
+    if latency_us >= RESPONSIVENESS_STARLINK_MIN_LATENCY_US and jitter_us >= RESPONSIVENESS_STARLINK_MIN_JITTER_US:
+        return "starlink_like"
+    if latency_us >= RESPONSIVENESS_CELLULAR_MIN_LATENCY_US or jitter_us >= RESPONSIVENESS_CELLULAR_MIN_JITTER_US:
+        return "cellular_like"
+    return "unknown"
 
 
 def _capacity_is_skewed(capacities: list[int | None]) -> bool:

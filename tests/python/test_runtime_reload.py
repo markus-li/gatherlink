@@ -5,6 +5,7 @@ from gatherlink.runtime.reload import (
     recompile_runtime_from_status,
     scheduler_decision_event_from_status,
 )
+from gatherlink.scheduling.congestion import CongestionFairnessController
 from gatherlink.scheduling.coordinator import SchedulerPolicyCoordinator
 from gatherlink.scheduling.metrics import SchedulerTelemetrySnapshot
 from gatherlink.scheduling.policies import (
@@ -530,6 +531,78 @@ def test_scheduler_decision_event_from_status_explains_path_health() -> None:
     assert "send_failures" in path_b["reasons"]
 
 
+def test_scheduler_decision_event_explains_congestion_fairness_backoff() -> None:
+    config = _config().model_copy(update={"scheduler": SchedulerConfig(mode="capacity_aware")})
+    runtime = expand_config(config)
+    updated = recompile_runtime_from_status(
+        config,
+        runtime,
+        {
+            "control_metadata": {
+                "path_capacity": {"path-a": {"tx_bps": 100_000_000}},
+                "path_pressure": {
+                    "path-a": {
+                        "loss_ppm": 100_000,
+                        "queue_depth_packets": 1200,
+                        "queue_oldest_age_us": 125_000,
+                    }
+                },
+            }
+        },
+    )
+
+    event = scheduler_decision_event_from_status(
+        config,
+        updated,
+        {
+            "control_metadata": {
+                "path_capacity": {"path-a": {"tx_bps": 100_000_000}},
+                "path_pressure": {
+                    "path-a": {
+                        "loss_ppm": 100_000,
+                        "queue_depth_packets": 1200,
+                        "queue_oldest_age_us": 125_000,
+                    }
+                },
+            }
+        },
+    )
+
+    fairness = event.details["congestion_fairness"][0]
+    assert event.details["congestion_policy"] == "adaptive"
+    assert fairness["path"] == "path-a"
+    assert fairness["pressure_level"] == 2
+    assert fairness["reason"] == "high_pressure"
+    assert fairness["pacing_budget_bps"] == 65_000_000
+    assert fairness["loss_ppm"] == 100_000
+
+
+def test_recompile_runtime_from_status_holds_congestion_recovery_until_stable() -> None:
+    config = _config().model_copy(update={"scheduler": SchedulerConfig(mode="capacity_aware")})
+    runtime = expand_config(config)
+    controller = CongestionFairnessController(recovery_windows_required=3)
+    pressure_status = {
+        "control_metadata": {
+            "path_capacity": {"path-a": {"tx_bps": 100_000_000}},
+            "path_pressure": {"path-a": {"queue_depth_packets": 1200}},
+        }
+    }
+    clean_status = {"control_metadata": {"path_capacity": {"path-a": {"tx_bps": 100_000_000}}}}
+
+    runtime = recompile_runtime_from_status(config, runtime, pressure_status, congestion_controller=controller)
+    assert runtime.paths[0].scheduler.pacing_budget_bps == 65_000_000
+    runtime = recompile_runtime_from_status(config, runtime, clean_status, congestion_controller=controller)
+    assert runtime.paths[0].scheduler.pacing_budget_bps == 65_000_000
+
+    event = scheduler_decision_event_from_status(config, runtime, clean_status)
+    fairness = event.details["congestion_fairness"][0]
+    assert fairness["reason"] == "held_for_recovery_hysteresis"
+
+    runtime = recompile_runtime_from_status(config, runtime, clean_status, congestion_controller=controller)
+    runtime = recompile_runtime_from_status(config, runtime, clean_status, congestion_controller=controller)
+    assert runtime.paths[0].scheduler.pacing_budget_bps == 0
+
+
 def test_scheduler_decision_event_includes_service_path_allocator_details() -> None:
     config = _config().model_copy(update={"scheduler": SchedulerConfig(mode="coordinated_adaptive")})
     runtime = expand_config(config)
@@ -628,6 +701,8 @@ def test_coordinated_adaptive_reapply_reports_effective_policy() -> None:
     assert event.details["configured_mode"] == "coordinated_adaptive"
     assert event.details["coordinator"]["effective_mode"] == "ordered_multipath_capacity_aware"
     assert event.details["coordinator"]["switched"] is True
+    assert event.details["coordinator"]["path_profiles"]
+    assert event.details["coordinator"]["path_profiles"][0]["path"] == "path-a"
     assert event.details["coordinator_recent"]
 
 

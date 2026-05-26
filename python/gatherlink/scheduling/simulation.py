@@ -10,8 +10,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from gatherlink.config.models import SchedulerPolicy
+from gatherlink.config.models import SchedulerCongestionPolicy, SchedulerPolicy
 from gatherlink.config.runtime import SchedulerMode
+from gatherlink.scheduling.congestion import compile_congestion_fairness
 from gatherlink.scheduling.policies import rust_mode_for_policy
 
 
@@ -47,6 +48,19 @@ class SchedulerDecision:
     rust_mode: SchedulerMode
     selected_path: str | None
     reason: str
+
+
+@dataclass(frozen=True)
+class CongestionDecision:
+    """One congestion fairness policy decision for a deterministic path sample."""
+
+    scenario: str
+    policy: SchedulerCongestionPolicy
+    path: str
+    pressure_level: int
+    pacing_budget_bps: int
+    reason: str
+    capacity_bps: int
 
 
 POLICIES_TO_COMPARE: tuple[SchedulerPolicy, ...] = (
@@ -125,12 +139,73 @@ THREE_PATH_SCENARIOS: tuple[SchedulerScenario, ...] = (
 )
 
 
+CONGESTION_SCENARIOS: tuple[SchedulerScenario, ...] = (
+    SchedulerScenario(
+        name="clean-shared-link",
+        description="No queue or loss; all policies should bypass inferred pacing.",
+        paths=(SimulatedPath("path-a", tx_capacity_bps=500_000_000, latency_us=8_000),),
+    ),
+    SchedulerScenario(
+        name="moderate-buffer-growth",
+        description="Queue growth suggests sharing pressure; inferred policies should self-limit.",
+        paths=(
+            SimulatedPath(
+                "path-a",
+                tx_capacity_bps=500_000_000,
+                latency_us=20_000,
+                queue_depth_packets=320,
+            ),
+        ),
+    ),
+    SchedulerScenario(
+        name="lossy-bufferbloat",
+        description="Loss and old queues indicate high pressure; volatile policy should back off most.",
+        paths=(
+            SimulatedPath(
+                "path-a",
+                tx_capacity_bps=500_000_000,
+                latency_us=80_000,
+                loss_ppm=100_000,
+                queue_depth_packets=1600,
+            ),
+        ),
+    ),
+)
+
+
 def run_scheduler_matrix(
     scenarios: tuple[SchedulerScenario, ...] = THREE_PATH_SCENARIOS,
     policies: tuple[SchedulerPolicy, ...] = POLICIES_TO_COMPARE,
 ) -> dict[str, list[SchedulerDecision]]:
     """Return deterministic scheduler decisions for every scenario and policy."""
     return {scenario.name: [choose_path(policy, scenario) for policy in policies] for scenario in scenarios}
+
+
+def run_congestion_fairness_matrix(
+    scenarios: tuple[SchedulerScenario, ...] = CONGESTION_SCENARIOS,
+    policies: tuple[SchedulerCongestionPolicy, ...] = ("off", "conservative", "adaptive", "volatile"),
+) -> dict[str, list[CongestionDecision]]:
+    """Return deterministic self-limiting decisions for congestion fairness reports."""
+    matrix: dict[str, list[CongestionDecision]] = {}
+    for scenario in scenarios:
+        decisions: list[CongestionDecision] = []
+        path = scenario.paths[0]
+        metrics = _simulated_path_metrics(path)
+        for policy in policies:
+            decision = compile_congestion_fairness(metrics, policy=policy, capacity_bps=path.tx_capacity_bps)
+            decisions.append(
+                CongestionDecision(
+                    scenario=scenario.name,
+                    policy=policy,
+                    path=path.name,
+                    pressure_level=decision.pressure_level,
+                    pacing_budget_bps=decision.pacing_budget_bps,
+                    reason=decision.reason,
+                    capacity_bps=path.tx_capacity_bps,
+                )
+            )
+        matrix[scenario.name] = decisions
+    return matrix
 
 
 def choose_path(policy: SchedulerPolicy, scenario: SchedulerScenario) -> SchedulerDecision:
@@ -256,3 +331,16 @@ def _ordered_multipath_score(payload_len: int):
         return (completion_us + path.reorder_hold_us + loss_ppm * 100, queue_penalty, inverse_capacity)
 
     return score
+
+
+def _simulated_path_metrics(path: SimulatedPath) -> object:
+    """Return the minimal metric-shaped object used by congestion fairness policy."""
+
+    class SimulatedMetrics:
+        loss_ppm = path.loss_ppm
+        queue_oldest_age_us = path.latency_us if path.queue_depth_packets else 0
+        queue_depth_packets = path.queue_depth_packets
+        send_failures = 0
+        local_drops = 0
+
+    return SimulatedMetrics()
