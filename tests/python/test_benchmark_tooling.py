@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import socket
 import sys
+import threading
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -12,6 +15,19 @@ def _load_three_path_bench_module():
     spec = importlib.util.spec_from_file_location(
         "run_three_path_profile_bench",
         REPO_ROOT / "tools/run_three_path_profile_bench.py",
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_tcp_stream_speed_module():
+    spec = importlib.util.spec_from_file_location(
+        "tcp_stream_speed",
+        REPO_ROOT / "tools/tcp_stream_speed.py",
     )
     assert spec is not None
     assert spec.loader is not None
@@ -55,6 +71,51 @@ def test_three_path_benchmark_thresholds_have_pass_and_target_terms() -> None:
     assert external_profile["path_capacity_mbit"] == [220, 240, 200, 230, 210]
     assert external_profile["external_pass_mbit"] == 300
     assert external_profile["external_strong_mbit"] == 650
+
+
+def test_tcp_stream_speed_moves_bytes_over_loopback() -> None:
+    module = _load_tcp_stream_speed_module()
+    ready = threading.Event()
+    holder = {}
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+
+    def run_sink() -> None:
+        ready.set()
+        holder["sink"] = module.run_sink(
+            bind=module.Endpoint("127.0.0.1", port),
+            duration_seconds=3,
+            idle_after_first_seconds=0.2,
+            receive_size=8192,
+        )
+
+    thread = threading.Thread(target=run_sink)
+    thread.start()
+    ready.wait(timeout=1)
+    sender = None
+    deadline = time.monotonic() + 2
+    while sender is None:
+        try:
+            sender = module.run_sender(
+                target=module.Endpoint("127.0.0.1", port),
+                duration_seconds=0.15,
+                payload_size=4096,
+                target_mbit=20,
+                connect_timeout_seconds=0.2,
+            )
+        except ConnectionRefusedError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.02)
+    thread.join(timeout=5)
+
+    sink = holder["sink"]
+    assert sender["bytes"] > 0
+    assert sink["bytes"] == sender["bytes"]
+    assert sink["connections"] == 1
+    assert sink["active_mbit_per_second"] > 0
 
 
 def test_hyperv_five_path_scripts_share_path_validation() -> None:
@@ -135,6 +196,10 @@ def test_three_path_benchmark_dry_run_writes_report(tmp_path: Path) -> None:
     assert summary["results"][0]["payload_size"] == 8192
     assert summary["results"][0]["path_capacity_mbit"] == [300.0, 500.0, 700.0]
     assert summary["results"][0]["wg_userland_mbit"] == 1500.0
+    assert summary["schema_version"] == 2
+    assert summary["results"][0]["schema_version"] == 2
+    assert summary["results"][0]["wg_userland_ratio"] == 0.0
+    assert summary["results"][0]["gate_status"] == "fail"
     assert summary["results"][0]["performance_target_met"] is False
 
 
@@ -320,14 +385,131 @@ def test_onehop_raw_setup_only_does_not_install_exit_cleanup_trap() -> None:
     assert 'pkill -f "gatherlink.cli.main run service /tmp/gl-onehop-node"' in script
 
 
+def test_path_profile_export_uses_conservative_medians() -> None:
+    from gatherlink.benchmarks.profile_export import PathObservation, export_profile
+
+    profile = export_profile(
+        "field-starlink-5g",
+        [
+            PathObservation("path-a", rx_mbit=160, rtt_ms=55, jitter_ms=12, loss_percent=0.2, mtu=1452),
+            PathObservation("path-a", rx_mbit=180, rtt_ms=65, jitter_ms=18, loss_percent=0.4, mtu=1452),
+            PathObservation("path-b", rx_mbit=85, rtt_ms=90, jitter_ms=25, loss_percent=1.2, mtu=1400),
+            PathObservation("path-b", rx_mbit=95, rtt_ms=100, jitter_ms=35, loss_percent=1.0, mtu=1400),
+        ],
+    )
+
+    exported = profile.export_dict()
+    assert exported["name"] == "field-starlink-5g"
+    assert exported["path_capacity_mbit"] == [170.0, 90.0]
+    assert exported["expected_capacity_mbit"] == 260.0
+    assert exported["pressure_mbit"] == 267.8
+    assert exported["path_mtu"] == 1400
+    assert exported["payload_size"] == 1200
+    assert exported["network_mode"]["targets"][0]["shape"] == {
+        "rate": "170mbit",
+        "delay": "30ms",
+        "jitter": "15ms",
+        "loss": "0.3%",
+    }
+
+
+def test_path_profile_export_cli_loads_observation_file(tmp_path: Path) -> None:
+    from gatherlink.benchmarks.profile_export import load_observations
+
+    source = tmp_path / "observed.json"
+    source.write_text(
+        json.dumps(
+            {
+                "profile_name": "field-fiber-cell",
+                "pressure_mbit": 500,
+                "samples": [
+                    {"path": "path-a", "rx_mbit": 400, "rtt_ms": 20, "jitter_ms": 2, "loss_percent": 0, "mtu": 1500}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    name, observations, pressure = load_observations(source)
+
+    assert name == "field-fiber-cell"
+    assert pressure == 500.0
+    assert observations[0].path == "path-a"
+    assert observations[0].rx_mbit == 400.0
+
+
+def test_observed_status_profile_export_uses_real_path_counters() -> None:
+    from gatherlink.benchmarks.status_profile_export import status_observations
+
+    status = {
+        "path_stats": {
+            "path-a": {"missed_packets": 0, "packets": 1000, "tx_bytes": 30_000_000},
+            "path-b": {"missed_packets": 10, "packets": 1000, "tx_bytes": 50_000_000},
+        },
+        "control_metadata": {
+            "path_latency": {
+                "path-a": {"rtt_us": 2000, "tx_jitter_us": 300},
+                "path-b": {"rtt_us": 5000, "tx_jitter_us": 900},
+            },
+            "path_mtu": {
+                "path-a": {"tx_frame_mtu": 1472},
+                "path-b": {"tx_frame_mtu": 1400},
+            },
+        },
+    }
+
+    observations = status_observations(
+        status,
+        duration_seconds=1.0,
+        pressure_mbit=900.0,
+        profile_name="vm-observed",
+    )
+
+    assert observations["profile_name"] == "vm-observed"
+    assert observations["pressure_mbit"] == 900.0
+    assert observations["samples"] == [
+        {"jitter_ms": 0.3, "loss_percent": 0.0, "mtu": 1472, "path": "path-a", "rtt_ms": 2.0, "rx_mbit": 240.0},
+        {"jitter_ms": 0.9, "loss_percent": 1.0, "mtu": 1400, "path": "path-b", "rtt_ms": 5.0, "rx_mbit": 400.0},
+    ]
+
+
 def test_onehop_raw_has_explicit_cleanup_only_mode() -> None:
     script = (REPO_ROOT / "tools/hyperv/run_gatherlink_onehop_speed.sh").read_text(encoding="utf-8")
 
+    assert 'source "${SCRIPT_DIR}/perf_common.sh"' in script
     assert "CLEANUP_ONLY=0" in script
     assert "--cleanup-only        Stop generated one-hop services" in script
     assert "--cleanup-only) CLEANUP_ONLY=1; shift ;;" in script
     assert 'if [[ "${CLEANUP_ONLY}" -eq 1 ]]; then' in script
     assert "Gatherlink raw UDP one-hop cleanup complete." in script
+
+
+def test_onehop_raw_can_run_direct_competing_path_traffic() -> None:
+    script = (REPO_ROOT / "tools/hyperv/run_gatherlink_onehop_speed.sh").read_text(encoding="utf-8")
+
+    assert 'COMPETING_RATE=""' in script
+    assert "--competing-rate RATE Start direct UDP competitors" in script
+    assert "--competing-rate) COMPETING_RATE=" in script
+    assert "start_competing_traffic()" in script
+    assert "/tmp/gatherlink-udp-pressure send --target ${client_target}:${port_number}" in script
+    assert "compete-path-*.json" in script
+
+
+def test_socks5_vm_acceptance_can_run_tcp_forward_throughput_probe() -> None:
+    script = (REPO_ROOT / "tools/hyperv/run_socks5_vm_acceptance.sh").read_text(encoding="utf-8")
+
+    assert 'TRANSPORT="${TRANSPORT:-plink}"' in script
+    assert "--transport NAME" in script
+    assert 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new' in script
+    assert "THROUGHPUT_SECONDS=0" in script
+    assert "--allow-port 18081 --allow-port 18100" in script
+    assert "kill \\$(cat /tmp/tcp-forward-helper.pid)" in script
+    assert "wait-tcp-throughput-sink" in script
+    assert "--throughput-seconds N" in script
+    assert "tools/tcp_stream_speed.py sink --bind 127.0.0.1:18100" in script
+    assert "helpers tcp-forward --listen 127.0.0.1:18083 --target 127.0.0.1:18100" in script
+    assert "tools/tcp_stream_speed.py send --target 127.0.0.1:18083" in script
+    assert "tcp-forward-throughput-sink.json" in script
 
 
 def test_background_iperf_fetch_waits_for_json_flush() -> None:

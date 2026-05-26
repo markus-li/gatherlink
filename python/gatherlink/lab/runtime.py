@@ -62,6 +62,8 @@ from gatherlink.paths.capacity import PATH_CAPACITY_DEFAULT_BPS as _PATH_CAPACIT
 from gatherlink.paths.capacity import PathCapacityDetector
 from gatherlink.paths.mtu import detect_runtime_path_mtu as _detect_runtime_path_mtu
 from gatherlink.paths.telemetry import DataTrafficLatencyTracker, PathLatencyTracker, take_data_transmit_sample_batch
+from gatherlink.protocol import SERVICE_ID_AUTH_CRYPTO as _SERVICE_ID_AUTH_CRYPTO
+from gatherlink.protocol import SERVICE_ID_CONTROL_METADATA as _SERVICE_ID_CONTROL_METADATA
 from gatherlink.protocol import SERVICE_ID_REMOTE_STATUS as _SERVICE_ID_REMOTE_STATUS
 from gatherlink.runtime.services import (
     ServiceIpcError,
@@ -1118,6 +1120,7 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
     from gatherlink.config.expansion import expand_config
     from gatherlink.dataplane.rust_backend import bind_core_dataplane
     from gatherlink.runtime.reload import hot_reapply_scheduler_from_status
+    from gatherlink.scheduling.congestion import CongestionFairnessController
     from gatherlink.scheduling.coordinator import SchedulerPolicyCoordinator
 
     ensure_service_not_root()
@@ -1127,7 +1130,8 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
     # Python owns service scheduling policy. Reserved control metadata is just
     # another service id from Rust's point of view; Python marks it as duplicated
     # across all paths so the executor can stay policy-free.
-    dataplane.set_service_scheduler(1, 0)
+    dataplane.set_service_scheduler(_SERVICE_ID_CONTROL_METADATA, 0)
+    dataplane.set_service_scheduler(_SERVICE_ID_AUTH_CRYPTO, 1)
     dataplane.set_service_scheduler(_SERVICE_ID_REMOTE_STATUS, 1)
     service_record = _ensure_lab_service_record(config) if role == "client" else _ensure_lab_sink_service_record(config)
     stop_event = Event()
@@ -1166,6 +1170,7 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
     next_control_metadata_at = 0.0
     next_scheduler_reapply_at = 0.0
     scheduler_policy_coordinator = SchedulerPolicyCoordinator()
+    congestion_controller = CongestionFairnessController()
     last_scheduler_path_stats: dict[str, dict[str, int]] = {}
     ntp_sample = _read_sink_ntp_sample() if role == "server" else None
     next_ntp_status_at = time.monotonic() + _NTP_STATUS_REFRESH_INTERVAL_SECONDS
@@ -1214,8 +1219,10 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
                 "path_stats": scheduler_path_stats,
             },
             scheduler_coordinator=scheduler_policy_coordinator,
+            congestion_controller=congestion_controller,
         )
-        dataplane.set_service_scheduler(1, 0)
+        dataplane.set_service_scheduler(_SERVICE_ID_CONTROL_METADATA, 0)
+        dataplane.set_service_scheduler(_SERVICE_ID_AUTH_CRYPTO, 1)
         dataplane.set_service_scheduler(_SERVICE_ID_REMOTE_STATUS, 1)
 
     def send_reverse_traffic(request: dict[str, object]) -> dict[str, object]:
@@ -1652,6 +1659,7 @@ def _announce_lab_control_metadata(
         f"service_disables={announcement.service_disable_count} capacity={announcement.capacity_count} "
         f"latency={announcement.latency_count} mtu={announcement.mtu_count} pressure={announcement.pressure_count} "
         f"data_samples={announcement.data_transmit_sample_count} "
+        f"data_samples_omitted={announcement.omitted_data_transmit_sample_count} "
         f"sink_time={announcement.sink_time_count} "
         f"bytes={announcement.payload_bytes}",
         flush=True,

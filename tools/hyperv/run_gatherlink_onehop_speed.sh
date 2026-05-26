@@ -31,6 +31,8 @@ FLOWLET_MAX_HOLD_US=0
 PATH_RUN_DATAGRAMS=0
 REORDER_HOLD_US=2000
 SHAPE_PROFILE="clean"
+COMPETING_RATE=""
+COMPETING_LENGTH=1200
 
 usage() {
   cat <<'USAGE'
@@ -71,6 +73,9 @@ Options:
                         Maximum hot-burst datagrams per path before rescheduling. Default 0.
   --reorder-hold-us N   Receiver hold time for path reordering in us. Default 2000.
   --shape-profile NAME  Hyper-V path shaping profile. Default clean.
+  --competing-rate RATE Start direct UDP competitors on every active path while Gatherlink sends.
+  --competing-length BYTES
+                        UDP block size for competing traffic. Default 1200.
   --out DIR             Report directory.
   --keep-running        Leave Gatherlink services running for inspection.
   --setup-only          Start core services but do not run the temporary UDP sink/generator.
@@ -101,6 +106,8 @@ while [[ $# -gt 0 ]]; do
     --path-run-datagrams) PATH_RUN_DATAGRAMS="$2"; shift 2 ;;
     --reorder-hold-us) REORDER_HOLD_US="$2"; shift 2 ;;
     --shape-profile) SHAPE_PROFILE="$2"; shift 2 ;;
+    --competing-rate) COMPETING_RATE="$2"; shift 2 ;;
+    --competing-length) COMPETING_LENGTH="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
     --keep-running) KEEP_RUNNING=1; shift ;;
     --setup-only) SETUP_ONLY=1; KEEP_RUNNING=1; shift ;;
@@ -391,6 +398,21 @@ if ! kill -0 \$(cat /tmp/gl-onehop-sink.pid) 2>/dev/null; then
 fi"
 }
 
+start_competing_traffic() {
+  [[ -n "${COMPETING_RATE}" ]] || return 0
+  local index path path_name port_number client_target competing_mbit
+  competing_mbit="${COMPETING_RATE%M}"
+  competing_mbit="${competing_mbit%m}"
+  for path in ${ACTIVE_PATH_LETTERS}; do
+    index="$(path_letter_index "${path}")"
+    path_name="path-${path}"
+    port_number=$((54000 + index))
+    client_target="10.91.${index}.11"
+    remote_a "rm -f /tmp/gl-onehop-compete-${path_name}.sink.json /tmp/gl-onehop-compete-${path_name}.sink.err /tmp/gl-onehop-compete-${path_name}.sink.pid; nohup /tmp/gatherlink-udp-pressure sink --bind 0.0.0.0:${port_number} --duration $((DURATION + 5)) --idle-after-first 2 --out /tmp/gl-onehop-compete-${path_name}.sink.progress >/tmp/gl-onehop-compete-${path_name}.sink.json 2>/tmp/gl-onehop-compete-${path_name}.sink.err < /dev/null & echo \$! >/tmp/gl-onehop-compete-${path_name}.sink.pid"
+    remote_b "rm -f /tmp/gl-onehop-compete-${path_name}.json /tmp/gl-onehop-compete-${path_name}.stderr; setsid -f sh -c '/tmp/gatherlink-udp-pressure send --target ${client_target}:${port_number} --duration ${DURATION} --payload-size ${COMPETING_LENGTH} --target-mbit ${competing_mbit} >/tmp/gl-onehop-compete-${path_name}.json 2>/tmp/gl-onehop-compete-${path_name}.stderr' >/dev/null 2>&1"
+  done
+}
+
 run_generator() {
   local target_arg=()
   if [[ -n "${TARGET_MBIT}" ]]; then
@@ -406,6 +428,28 @@ fetch_results() {
   remote_a "cat /tmp/gl-onehop-sink.err 2>/dev/null || true" >"${OUT_DIR}/sink.err" || true
   remote_b "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services status gl-onehop.vm.node-b" >"${OUT_DIR}/status-b.json" || true
   remote_a "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services status gl-onehop.vm.node-a" >"${OUT_DIR}/status-a.json" || true
+  if [[ -n "${COMPETING_RATE}" ]]; then
+    local index path path_name
+    for path in ${ACTIVE_PATH_LETTERS}; do
+      index="$(path_letter_index "${path}")"
+      path_name="path-${path}"
+      fetch_probe "${PORT_B}" "/tmp/gl-onehop-compete-${path_name}.json" "${OUT_DIR}/compete-${path_name}.json"
+      remote_b "cat /tmp/gl-onehop-compete-${path_name}.stderr 2>/dev/null || true" >"${OUT_DIR}/compete-${path_name}.stderr" || true
+      fetch_probe "${PORT_A}" "/tmp/gl-onehop-compete-${path_name}.sink.json" "${OUT_DIR}/compete-${path_name}.sink.json"
+      remote_a "cat /tmp/gl-onehop-compete-${path_name}.sink.err 2>/dev/null || true" >"${OUT_DIR}/compete-${path_name}.sink.err" || true
+    done
+  fi
+}
+
+path_letter_index() {
+  case "$1" in
+    a) printf '1' ;;
+    b) printf '2' ;;
+    c) printf '3' ;;
+    d) printf '4' ;;
+    e) printf '5' ;;
+    *) echo "unsupported active path: $1" >&2; return 2 ;;
+  esac
 }
 
 record "# Gatherlink Raw UDP One-Hop Speed"
@@ -428,6 +472,8 @@ record "- flowlet_max_hold_us: ${FLOWLET_MAX_HOLD_US}"
 record "- path_run_datagrams: ${PATH_RUN_DATAGRAMS}"
 record "- reorder_hold_us: ${REORDER_HOLD_US}"
 record "- shape_profile: ${SHAPE_PROFILE}"
+record "- competing_rate: ${COMPETING_RATE:-disabled}"
+record "- competing_length: ${COMPETING_LENGTH}"
 record "- setup_only: ${SETUP_ONLY}"
 record "- lab_kernel_tuning: ${APPLY_KERNEL_TUNING}"
 record "- out: ${OUT_DIR}"
@@ -453,10 +499,11 @@ if [[ "${SETUP_ONLY}" -eq 1 ]]; then
   exit 0
 fi
 start_sink
+start_competing_traffic
 run_generator
 fetch_results
 
-python3 - "${OUT_DIR}/generator.json" "${OUT_DIR}/sink.json" "${OUT_DIR}/sink-progress.json" "${REPORT_JSON}" <<'PY' | tee -a "${REPORT}"
+python3 - "${OUT_DIR}/generator.json" "${OUT_DIR}/sink.json" "${OUT_DIR}/sink-progress.json" "${REPORT_JSON}" "${OUT_DIR}" <<'PY' | tee -a "${REPORT}"
 from __future__ import annotations
 
 import json
@@ -467,6 +514,7 @@ generator = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 sink_path = Path(sys.argv[2])
 progress_path = Path(sys.argv[3])
 report_json = Path(sys.argv[4])
+out_dir = Path(sys.argv[5])
 sink_text = sink_path.read_text(encoding="utf-8").strip()
 if not sink_text:
     sink_text = progress_path.read_text(encoding="utf-8").strip()
@@ -498,6 +546,31 @@ if sink:
     )
 else:
     print("sink: no result")
+for compete in sorted(out_dir.glob("compete-path-*.json")):
+    if compete.name.endswith(".sink.json"):
+        continue
+    try:
+        data = json.loads(compete.read_text(encoding="utf-8"))
+        sink_path = compete.with_name(f"{compete.stem}.sink.json")
+        sink_data = json.loads(sink_path.read_text(encoding="utf-8")) if sink_path.exists() else {}
+        bps = float(data.get("bits_per_second", 0))
+        sink_bps = float(sink_data.get("bits_per_second", 0)) if sink_data else 0.0
+        sent_packets = int(data.get("packets", 0))
+        sink_packets = int(sink_data.get("packets", 0)) if sink_data else 0
+        packet_delta = sent_packets - sink_packets
+        print(f"{compete.stem}: send={bps / 1_000_000:.2f} Mbit/s sink={sink_bps / 1_000_000:.2f} Mbit/s delta={packet_delta}")
+        results.append(
+            {
+                "name": compete.stem,
+                "bits_per_second": bps,
+                "mbit_per_second": bps / 1_000_000,
+                "sink_bits_per_second": sink_bps,
+                "sink_mbit_per_second": sink_bps / 1_000_000,
+                "application_packet_delta": packet_delta,
+            }
+        )
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        print(f"{compete.stem}: no result")
 report_json.write_text(json.dumps({"results": results}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 

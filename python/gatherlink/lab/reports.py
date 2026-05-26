@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from gatherlink.scheduling.simulation import SchedulerDecision, run_scheduler_matrix
+from gatherlink.scheduling.simulation import (
+    CongestionDecision,
+    SchedulerDecision,
+    run_congestion_fairness_matrix,
+    run_scheduler_matrix,
+)
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,14 @@ def generate_three_path_scheduler_report(results_dir: Path) -> str:
         "## Scheduler policy matrix",
         "",
         _scheduler_matrix_table(),
+        "",
+        "## Congestion fairness matrix",
+        "",
+        "This deterministic matrix proves the Python-owned self-limiting policy compiles to zero pacing on clean "
+        "links and progressively tighter pacing under queue/loss pressure. It is a lab-report check, not a "
+        "packet-path reliability feature.",
+        "",
+        _congestion_fairness_table(),
         "",
         "## Saved lab runs",
         "",
@@ -181,6 +194,25 @@ def _scheduler_decision_row(scenario_name: str, decision: SchedulerDecision) -> 
     return (
         f"| {scenario_name} | `{decision.policy}` | `{decision.rust_mode}` | "
         f"{decision.selected_path or '-'} | {decision.reason} |"
+    )
+
+
+def _congestion_fairness_table() -> str:
+    decisions_by_scenario = run_congestion_fairness_matrix()
+    header = "| scenario | policy | path | pressure | capacity | pacing budget | reason |"
+    divider = "| --- | --- | --- | ---: | ---: | ---: | --- |"
+    rows = [header, divider]
+    for decisions in decisions_by_scenario.values():
+        for decision in decisions:
+            rows.append(_congestion_decision_row(decision))
+    return "\n".join(rows)
+
+
+def _congestion_decision_row(decision: CongestionDecision) -> str:
+    return (
+        f"| {decision.scenario} | `{decision.policy}` | {decision.path} | {decision.pressure_level} | "
+        f"{_bps(decision.capacity_bps)} | {_bps(decision.pacing_budget_bps) if decision.pacing_budget_bps else '-'} | "
+        f"{decision.reason} |"
     )
 
 

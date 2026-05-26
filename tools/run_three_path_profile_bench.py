@@ -34,6 +34,7 @@ DEFAULT_SCHEDULERS = [
 DEFAULT_REPORTED_PATH_MTU = 1200
 DEFAULT_PAYLOAD_SIZE = 1200
 KEEP_RUNTIME_ENV = "GATHERLINK_BENCH_KEEP_RUNTIME"
+REPORT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ class BenchResult:
     def export_dict(self) -> dict[str, Any]:
         """Return a stable JSON representation."""
         return {
+            "schema_version": REPORT_SCHEMA_VERSION,
             "profile": self.profile,
             "scheduler": self.scheduler,
             "cache_mode": self.cache_mode,
@@ -91,6 +93,8 @@ class BenchResult:
             "client_tx_mbit": self.client_tx_mbit,
             "sink_rx_mbit": self.sink_rx_mbit,
             "delivery_ratio": self.delivery_ratio,
+            "wg_userland_ratio": self.wg_userland_ratio,
+            "gate_status": self.gate_status,
             "pass_threshold_met": self.pass_threshold_met,
             "performance_target_met": self.performance_target_met,
             "missed_packets": self.missed_packets,
@@ -99,6 +103,22 @@ class BenchResult:
             "path_rx_mbit": self.path_rx_mbit,
             "path_drops": self.path_drops,
         }
+
+    @property
+    def wg_userland_ratio(self) -> float | None:
+        """Return sink throughput divided by the matching userspace-WireGuard baseline."""
+        if self.wg_userland_mbit <= 0:
+            return None
+        return self.sink_rx_mbit / self.wg_userland_mbit
+
+    @property
+    def gate_status(self) -> str:
+        """Return the compact benchmark gate status for this row."""
+        if self.performance_target_met:
+            return "target"
+        if self.pass_threshold_met:
+            return "pass"
+        return "fail"
 
 
 class NoopRunner:
@@ -497,7 +517,11 @@ def path_delta(after: dict[str, Any], before: dict[str, Any], path_name: str, ke
 
 def write_reports(out_dir: Path, results: list[BenchResult]) -> None:
     """Write JSON and Markdown benchmark reports."""
-    payload = {"generated_at": datetime.now(UTC).isoformat(), "results": [result.export_dict() for result in results]}
+    payload = {
+        "schema_version": REPORT_SCHEMA_VERSION,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "results": [result.export_dict() for result in results],
+    }
     (out_dir / "summary.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     (out_dir / "report.md").write_text(render_markdown_report(results), encoding="utf-8")
 

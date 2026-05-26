@@ -11,6 +11,8 @@ VM_A="gatherlink-vm-a"
 VM_B="gatherlink-vm-b"
 IP_A=""
 IP_B=""
+PORT_A=""
+PORT_B=""
 HOST_KEY_A=""
 HOST_KEY_B=""
 COUNT=5
@@ -37,6 +39,8 @@ Options:
   --inventory FILE          Optional ignored env file with VM IPs, host keys, and defaults.
   --ip-a IP                 VM A management IP. If omitted, resolve via Hyper-V helper.
   --ip-b IP                 VM B management IP. If omitted, resolve via Hyper-V helper.
+  --port-a PORT             Optional SSH port for VM A when using a shared portproxy IP.
+  --port-b PORT             Optional SSH port for VM B when using a shared portproxy IP.
   --host-key-a KEY          PuTTY host-key fingerprint for VM A.
   --host-key-b KEY          PuTTY host-key fingerprint for VM B.
   --branch NAME             Branch to push to the VM-local bare repos. Defaults current branch.
@@ -70,6 +74,8 @@ if [[ -n "${INVENTORY}" ]]; then
   VM_B="${HYPERV_VM_B:-${VM_B}}"
   IP_A="${HYPERV_VM_A_IP:-${IP_A}}"
   IP_B="${HYPERV_VM_B_IP:-${IP_B}}"
+  PORT_A="${HYPERV_VM_A_PORT:-${PORT_A}}"
+  PORT_B="${HYPERV_VM_B_PORT:-${PORT_B}}"
   HOST_KEY_A="${HYPERV_VM_A_HOST_KEY:-${HOST_KEY_A}}"
   HOST_KEY_B="${HYPERV_VM_B_HOST_KEY:-${HOST_KEY_B}}"
   BRANCH="${HYPERV_BRANCH:-${BRANCH}}"
@@ -87,6 +93,8 @@ while [[ $# -gt 0 ]]; do
     --inventory) INVENTORY="$2"; shift 2 ;;
     --ip-a) IP_A="$2"; shift 2 ;;
     --ip-b) IP_B="$2"; shift 2 ;;
+    --port-a) PORT_A="$2"; shift 2 ;;
+    --port-b) PORT_B="$2"; shift 2 ;;
     --host-key-a) HOST_KEY_A="$2"; shift 2 ;;
     --host-key-b) HOST_KEY_B="$2"; shift 2 ;;
     --branch) BRANCH="$2"; shift 2 ;;
@@ -151,47 +159,62 @@ IP_B="$(hyperv_resolve_vm_ip "${REPO_ROOT}" "${SCRIPT_DIR}" "${VM_B}" "${IP_B}")
 remote() {
   local label="$1"
   local ip="$2"
-  local host_key="$3"
-  local command="$4"
-  log_cmd "${label}" "plink ${ip} ${command}"
-  "${PLINK}" -batch -agent -hostkey "${host_key}" -l gatherlink "${ip}" "${command}"
+  local port="$3"
+  local host_key="$4"
+  local command="$5"
+  local port_args=()
+  if [[ -n "${port}" ]]; then
+    port_args=(-P "${port}")
+  fi
+  log_cmd "${label}" "plink ${ip}${port:+:${port}} ${command}"
+  "${PLINK}" -batch -agent -hostkey "${host_key}" "${port_args[@]}" -l gatherlink "${ip}" "${command}"
 }
 
 remote_capture() {
   local label="$1"
   local ip="$2"
-  local host_key="$3"
-  local command="$4"
-  local output="$5"
-  log_cmd "${label}" "plink ${ip} ${command} > ${output}"
-  "${PLINK}" -batch -agent -hostkey "${host_key}" -l gatherlink "${ip}" "${command}" >"${output}"
+  local port="$3"
+  local host_key="$4"
+  local command="$5"
+  local output="$6"
+  local port_args=()
+  if [[ -n "${port}" ]]; then
+    port_args=(-P "${port}")
+  fi
+  log_cmd "${label}" "plink ${ip}${port:+:${port}} ${command} > ${output}"
+  "${PLINK}" -batch -agent -hostkey "${host_key}" "${port_args[@]}" -l gatherlink "${ip}" "${command}" >"${output}"
 }
 
 remote_a() {
-  remote "$1" "${IP_A}" "${HOST_KEY_A}" "$2"
+  remote "$1" "${IP_A}" "${PORT_A}" "${HOST_KEY_A}" "$2"
 }
 
 remote_b() {
-  remote "$1" "${IP_B}" "${HOST_KEY_B}" "$2"
+  remote "$1" "${IP_B}" "${PORT_B}" "${HOST_KEY_B}" "$2"
 }
 
 sync_node() {
   local label="$1"
   local ip="$2"
-  local host_key="$3"
-  remote "${label}-prepare-repo" "${ip}" "${host_key}" \
+  local port="$3"
+  local host_key="$4"
+  local git_port_args=""
+  if [[ -n "${port}" ]]; then
+    git_port_args=" -P ${port}"
+  fi
+  remote "${label}-prepare-repo" "${ip}" "${port}" "${host_key}" \
     "mkdir -p /home/gatherlink/repos && if [ ! -d /home/gatherlink/repos/gatherlink.git ]; then git init --bare /home/gatherlink/repos/gatherlink.git; fi && git --git-dir=/home/gatherlink/repos/gatherlink.git symbolic-ref HEAD refs/heads/${BRANCH} || true"
-  log_cmd "${label}-push" "git push ssh://gatherlink@${ip}/home/gatherlink/repos/gatherlink.git HEAD:${BRANCH}"
+  log_cmd "${label}-push" "git push ssh://gatherlink@${ip}${port:+:${port}}/home/gatherlink/repos/gatherlink.git HEAD:${BRANCH}"
   (
     cd "${REPO_ROOT}"
-    GIT_SSH_COMMAND="${PLINK} -batch -agent -hostkey ${host_key}" \
+    GIT_SSH_COMMAND="${PLINK} -batch -agent -hostkey ${host_key}${git_port_args}" \
       git push --force "ssh://gatherlink@${ip}/home/gatherlink/repos/gatherlink.git" "HEAD:refs/heads/${BRANCH}"
   )
   local install_command=""
   if [[ "${BUILD_RUST}" -eq 1 ]]; then
     install_command=" && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt >/tmp/gatherlink-pip-install.log && .venv/bin/pip install -e . >>/tmp/gatherlink-pip-install.log && .venv/bin/maturin develop --manifest-path crates/pybindings/Cargo.toml --release >/tmp/gatherlink-maturin.log"
   fi
-  remote "${label}-checkout" "${ip}" "${host_key}" \
+  remote "${label}-checkout" "${ip}" "${port}" "${host_key}" \
     "mkdir -p /home/gatherlink/src && if [ ! -d /home/gatherlink/src/gatherlink/.git ]; then rm -rf /home/gatherlink/src/gatherlink && git clone /home/gatherlink/repos/gatherlink.git /home/gatherlink/src/gatherlink; fi && cd /home/gatherlink/src/gatherlink && git fetch origin && git reset --hard origin/${BRANCH}${install_command}"
 }
 
@@ -240,8 +263,8 @@ run_duration_traffic() {
   # the acceptance ratio is based on the final count, not a rounded in-flight
   # snapshot.
   remote_b "duration-wait-receiver" "pid=\$(cat /tmp/duration-receiver.pid); while kill -0 \"\${pid}\" 2>/dev/null; do sleep 0.2; done"
-  remote_capture "duration-sent-count" "${IP_A}" "${HOST_KEY_A}" "grep '^sent_packets=' /tmp/duration-sent.txt" "${OUT_DIR}/duration-sent.txt"
-  remote_capture "duration-received-count" "${IP_B}" "${HOST_KEY_B}" "cat /tmp/duration-received-count.txt" "${OUT_DIR}/duration-received.txt"
+  remote_capture "duration-sent-count" "${IP_A}" "${PORT_A}" "${HOST_KEY_A}" "grep '^sent_packets=' /tmp/duration-sent.txt" "${OUT_DIR}/duration-sent.txt"
+  remote_capture "duration-received-count" "${IP_B}" "${PORT_B}" "${HOST_KEY_B}" "cat /tmp/duration-received-count.txt" "${OUT_DIR}/duration-received.txt"
   assert_duration_delivery
 }
 
@@ -388,23 +411,23 @@ PY
 }
 
 assert_service_cleanup() {
-  remote_capture "list-a-after-stop" "${IP_A}" "${HOST_KEY_A}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services list" "${OUT_DIR}/services-node-a.txt"
-  remote_capture "list-b-after-stop" "${IP_B}" "${HOST_KEY_B}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services list" "${OUT_DIR}/services-node-b.txt"
+  remote_capture "list-a-after-stop" "${IP_A}" "${PORT_A}" "${HOST_KEY_A}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services list" "${OUT_DIR}/services-node-a.txt"
+  remote_capture "list-b-after-stop" "${IP_B}" "${PORT_B}" "${HOST_KEY_B}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services list" "${OUT_DIR}/services-node-b.txt"
   if [[ "${KEEP_RUNNING}" -eq 1 ]]; then
     return
   fi
   grep -q "vm.node-a .*state=stopped" "${OUT_DIR}/services-node-a.txt"
   grep -q "vm.node-b .*state=stopped" "${OUT_DIR}/services-node-b.txt"
-  remote_capture "prune-a-after-stop" "${IP_A}" "${HOST_KEY_A}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services prune && .venv/bin/gatherlink services list" "${OUT_DIR}/services-node-a-pruned.txt"
-  remote_capture "prune-b-after-stop" "${IP_B}" "${HOST_KEY_B}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services prune && .venv/bin/gatherlink services list" "${OUT_DIR}/services-node-b-pruned.txt"
+  remote_capture "prune-a-after-stop" "${IP_A}" "${PORT_A}" "${HOST_KEY_A}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services prune && .venv/bin/gatherlink services list" "${OUT_DIR}/services-node-a-pruned.txt"
+  remote_capture "prune-b-after-stop" "${IP_B}" "${PORT_B}" "${HOST_KEY_B}" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services prune && .venv/bin/gatherlink services list" "${OUT_DIR}/services-node-b-pruned.txt"
   grep -q "services: none" "${OUT_DIR}/services-node-a-pruned.txt"
   grep -q "services: none" "${OUT_DIR}/services-node-b-pruned.txt"
 }
 
 assert_diagnostics_meaningful() {
   local expect_shutdown="$1"
-  remote_capture "diag-a-copy" "${IP_A}" "${HOST_KEY_A}" "cat /tmp/gatherlink-node-a.jsonl 2>/dev/null || true" "${OUT_DIR}/diagnostics-node-a.jsonl"
-  remote_capture "diag-b-copy" "${IP_B}" "${HOST_KEY_B}" "cat /tmp/gatherlink-node-b.jsonl 2>/dev/null || true" "${OUT_DIR}/diagnostics-node-b.jsonl"
+  remote_capture "diag-a-copy" "${IP_A}" "${PORT_A}" "${HOST_KEY_A}" "cat /tmp/gatherlink-node-a.jsonl 2>/dev/null || true" "${OUT_DIR}/diagnostics-node-a.jsonl"
+  remote_capture "diag-b-copy" "${IP_B}" "${PORT_B}" "${HOST_KEY_B}" "cat /tmp/gatherlink-node-b.jsonl 2>/dev/null || true" "${OUT_DIR}/diagnostics-node-b.jsonl"
   python3 "${REPO_ROOT}/tools/vm_acceptance/validate_jsonl.py" "${OUT_DIR}/diagnostics-node-a.jsonl" | tee "${OUT_DIR}/diagnostics-node-a.validation.txt"
   python3 "${REPO_ROOT}/tools/vm_acceptance/validate_jsonl.py" "${OUT_DIR}/diagnostics-node-b.jsonl" | tee "${OUT_DIR}/diagnostics-node-b.validation.txt"
   python3 - "${expect_shutdown}" "${SCHEDULER_REAPPLY_INTERVAL}" "${OUT_DIR}/diagnostics-node-a.jsonl" "${OUT_DIR}/diagnostics-node-b.jsonl" <<'PY'
@@ -452,8 +475,8 @@ cat >"${REPORT}" <<REPORT
 REPORT
 
 step "Sync And Build"
-sync_node "node-a" "${IP_A}" "${HOST_KEY_A}"
-sync_node "node-b" "${IP_B}" "${HOST_KEY_B}"
+sync_node "node-a" "${IP_A}" "${PORT_A}" "${HOST_KEY_A}"
+sync_node "node-b" "${IP_B}" "${PORT_B}" "${HOST_KEY_B}"
 record "source synced by Git and VM working trees reset to ${BRANCH}"
 
 step "Validate"

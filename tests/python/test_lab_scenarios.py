@@ -2350,6 +2350,44 @@ def test_service_monitor_renders_python_owned_service_policy_table() -> None:
                     "target": "127.0.0.1:51821",
                 },
             ],
+            "service_budget": {
+                "active": True,
+                "reason": "bulk service dominated high-priority traffic for 3 samples",
+                "packet_budget_overrides": {"wireguard-fast": 128},
+                "byte_budget_overrides": {"wireguard-fast": 98304},
+                "samples": [
+                    {
+                        "service": "wireguard-stable",
+                        "priority": "high",
+                        "traffic_class": "tcp_ordered",
+                        "tx_packets_per_second": 500,
+                        "tx_bytes_per_second": 250000,
+                    },
+                    {
+                        "service": "wireguard-fast",
+                        "priority": "bulk",
+                        "traffic_class": "udp_bulk",
+                        "tx_packets_per_second": 4000,
+                        "tx_bytes_per_second": 3000000,
+                    },
+                ],
+            },
+            "auth_crypto_messages": [
+                {
+                    "type": "rekey_initiation",
+                    "peer": "peer-a",
+                    "sender_node_id": "peer-a-node",
+                    "peer_node_id": "local-node",
+                    "topology_generation": 7,
+                    "current_receiver_index": 42,
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "expires_at": "2026-01-01T00:00:30+00:00",
+                    "reason": None,
+                    "has_noise": True,
+                    "path_id": 1,
+                    "sequence": 99,
+                }
+            ],
             "system_time": "-",
             "gatherlink_time": "-",
             "ntp": "-",
@@ -2370,4 +2408,11 @@ def test_service_monitor_renders_python_owned_service_policy_table() -> None:
     assert "runner service          class       prio" in rendered
     assert "core   wireguard-stable tcp_ordered high" in rendered
     assert "core   wireguard-fast   udp_bulk    bulk" in rendered
+    assert "service budget" in rendered
+    assert "core   yes    wireguard-fast=128" in rendered
+    assert "wireguard-stable:250000B/s/500pps" in rendered
+    assert "auth/rekey control" in rendered
+    assert "core   rekey_initiation peer-a" in rendered
+    assert "auth     operator-safe reserved auth/crypto facts" in rendered
     assert "class    Python-owned service traffic class" in rendered
+    assert "budget  Python-owned service budget/QoS status" in rendered
