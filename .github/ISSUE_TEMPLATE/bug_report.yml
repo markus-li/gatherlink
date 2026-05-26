@@ -1,28 +1,43 @@
-name: Bug report
-description: Report something that failed or behaved incorrectly.
-title: "[Bug]: "
-labels: ["bug"]
+name: Bug, docs, or performance report
+description: Report a bug, documentation problem, performance result, or regression.
+title: "[Report]: "
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for reporting this. Please remove secrets, private keys, tokens, public IPs you do not want to share, and private hostnames before submitting.
-  - type: textarea
-    id: summary
+        Use this for bugs, stale or unclear documentation, performance results, performance regressions, scheduler comparisons, and lab or VM acceptance reports.
+
+        Please remove secrets, private keys, tokens, public IPs you do not want to share, and private hostnames before submitting.
+  - type: dropdown
+    id: report_type
     attributes:
-      label: What happened?
-      description: Describe the failure and what you expected instead.
+      label: Report type
+      options:
+        - Bug or incorrect behavior
+        - Documentation problem
+        - Performance result
+        - Performance regression
+        - Scheduler or lab report
+        - Other
     validations:
       required: true
   - type: textarea
-    id: reproduce
+    id: summary
     attributes:
-      label: Steps to reproduce
-      description: Include the commands/config shape if possible.
+      label: Summary
+      description: Describe what happened, what is unclear, or what you measured.
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details, steps, or test method
+      description: Include steps, commands, config shape, docs page, benchmark profile, scheduler, MTU, path speeds, or comparison baseline when relevant.
       placeholder: |
-        1. ...
-        2. ...
-        3. ...
+        steps or command:
+        environment/topology:
+        expected result:
+        actual result:
     validations:
       required: true
   - type: input
@@ -38,8 +53,8 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Relevant output
-      description: Paste redacted logs, diagnostics JSONL snippets, monitor output, or error text.
+      label: Relevant output, links, or results
+      description: Paste redacted logs, diagnostics JSONL snippets, monitor output, error text, docs links, throughput, delivery %, drops, retransmits, CPU, or report paths.
       render: text
   - type: checkboxes
     id: privacy
