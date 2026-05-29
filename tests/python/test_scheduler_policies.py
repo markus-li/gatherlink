@@ -424,6 +424,112 @@ def test_ordered_multipath_uses_receiver_capacity_for_credit_when_narrower() -> 
     assert path.max_in_flight_packets == 520
 
 
+def test_ordered_multipath_does_not_drain_clock_only_startup_paths() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath_capacity_aware"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 500_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 500_000_000}),
+            PathConfig(name="path-c", interface="gl-c", scheduler={"tx_capacity_bps": 500_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820", traffic_class="tcp_ordered")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {
+                "path-a": {"tx_bps": 500_000_000},
+                "path-b": {"tx_bps": 500_000_000},
+                "path-c": {"tx_bps": 500_000_000},
+            },
+            "path_latency": {
+                "path-a": {
+                    "tx_mean_us": 2_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+                "path-b": {
+                    "tx_mean_us": 80_000,
+                    "source": "clock-synced-one-way",
+                    "confidence": "good",
+                },
+                "path-c": {
+                    "tx_mean_us": 85_000,
+                    "source": "clock-synced-one-way",
+                    "confidence": "good",
+                },
+            },
+            "path_pressure": {
+                "path-a": {"observed_packets": 100_000},
+                "path-b": {"observed_packets": 0},
+                "path-c": {"observed_packets": 0},
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1, "path-c": 2},
+    )
+
+    scheduler = compile_scheduler(config, telemetry=telemetry)
+
+    assert scheduler.mode == "ordered_multipath"
+    assert [path.state for path in scheduler.paths] == ["active", "active", "active"]
+    assert scheduler.paths[1].latency_us < 80_000
+    assert scheduler.paths[2].latency_us < 85_000
+
+
+def test_ordered_multipath_keeps_unproven_paths_active_for_control_and_probes() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath_capacity_aware"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 500_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 500_000_000}),
+            PathConfig(name="path-c", interface="gl-c", scheduler={"tx_capacity_bps": 500_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820", traffic_class="tcp_ordered")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {
+                "path-a": {"tx_bps": 500_000_000},
+                "path-b": {"tx_bps": 500_000_000},
+                "path-c": {"tx_bps": 500_000_000},
+            },
+            "path_latency": {
+                "path-a": {
+                    "tx_mean_us": 2_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+                "path-b": {
+                    "tx_mean_us": 3_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+                "path-c": {
+                    "tx_mean_us": 85_000,
+                    "source": "clock-synced-one-way",
+                    "confidence": "good",
+                },
+            },
+            "path_pressure": {
+                "path-a": {"observed_packets": 100_000},
+                "path-b": {"observed_packets": 100_000},
+                "path-c": {"observed_packets": 0},
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1, "path-c": 2},
+    )
+
+    scheduler = compile_scheduler(config, telemetry=telemetry)
+
+    assert scheduler.mode == "ordered_multipath"
+    assert [path.state for path in scheduler.paths] == ["active", "active", "active"]
+
+
 def test_ordered_multipath_receiver_pressure_reduces_compiled_credit() -> None:
     config = GatherlinkConfig(
         schema_version=1,
@@ -964,7 +1070,7 @@ def test_tcp_biased_known_good_fallback_is_single_best_even_with_latency_spread(
     assert known_good_fallback_policy(config, telemetry) == "single_best_path"
 
 
-def test_coordinated_adaptive_tcp_bias_keeps_clean_paths_on_best_path() -> None:
+def test_coordinated_adaptive_tcp_bias_promotes_clean_proven_paths_to_ordered_capacity() -> None:
     config = GatherlinkConfig(
         schema_version=1,
         node="local",
@@ -1017,12 +1123,229 @@ def test_coordinated_adaptive_tcp_bias_keeps_clean_paths_on_best_path() -> None:
     candidate, reason, signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
     scheduler = compile_scheduler(config, telemetry=telemetry, effective_mode=candidate)
 
-    assert candidate == "single_best_path"
-    assert "best path" in reason
-    assert scheduler.mode == "weighted_round_robin"
-    assert sum(path.state == "active" for path in scheduler.paths) == 1
+    assert candidate == "ordered_multipath_capacity_aware"
+    assert "ordered capacity aggregation" in reason
+    assert scheduler.mode == "ordered_multipath"
+    assert sum(path.state == "active" for path in scheduler.paths) == 3
     assert all(path.pacing_budget_bps == 0 for path in scheduler.paths)
     assert "capacity_confident" in signals
+
+
+def test_coordinated_adaptive_tcp_bias_rejects_high_clock_uncertainty() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive", traffic_bias="tcp"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 220_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 240_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {"path-a": {"tx_bps": 220_000_000}, "path-b": {"tx_bps": 240_000_000}},
+            "path_latency": {
+                "path-a": {
+                    "tx_mean_us": 20_000,
+                    "source": "clock-synced-one-way",
+                    "confidence": "good",
+                    "clock_error_us": 12_000,
+                },
+                "path-b": {
+                    "tx_mean_us": 24_000,
+                    "source": "clock-synced-one-way",
+                    "confidence": "good",
+                    "clock_error_us": 150_000,
+                },
+            },
+            "path_pressure": {
+                "path-a": {"observed_packets": 10_000},
+                "path-b": {"observed_packets": 10_000},
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
+
+    assert candidate == "single_best_path"
+    assert "latency uncertainty" in reason
+    assert "latency_uncertainty" in signals
+    assert "tcp_ordered_latency_risk" in signals
+
+
+def test_coordinated_adaptive_tcp_bias_rejects_extreme_data_latency_spread() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive", traffic_bias="tcp"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 220_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 240_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {"path-a": {"tx_bps": 220_000_000}, "path-b": {"tx_bps": 240_000_000}},
+            "path_latency": {
+                "path-a": {
+                    "tx_mean_us": 20_000,
+                    "tx_p95_us": 25_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+                "path-b": {
+                    "tx_mean_us": 2_000_000,
+                    "tx_p95_us": 2_500_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+            },
+            "path_pressure": {
+                "path-a": {"observed_packets": 10_000},
+                "path-b": {"observed_packets": 10_000},
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
+
+    assert candidate == "single_best_path"
+    assert "latency uncertainty" in reason
+    assert "tcp_ordered_latency_risk" in signals
+
+
+def test_coordinated_adaptive_tcp_bias_uses_proven_real_data_before_latency_spread_fallback() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive", traffic_bias="tcp"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 600_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 500_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {
+                "path-a": {"tx_bps": 600_000_000},
+                "path-b": {"tx_bps": 500_000_000},
+            },
+            "path_latency": {
+                "path-a": {
+                    "tx_mean_us": 20_000,
+                    "tx_jitter_us": 4_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+                "path-b": {
+                    "tx_mean_us": 75_000,
+                    "tx_jitter_us": 18_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+            },
+            "path_pressure": {
+                "path-a": {"observed_packets": 50_000},
+                "path-b": {"observed_packets": 50_000},
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
+
+    assert candidate == "ordered_multipath_capacity_aware"
+    assert "ordered capacity aggregation" in reason
+    assert "latency_spread" in signals
+    assert "jitter_pressure" not in signals
+
+
+def test_coordinated_adaptive_tcp_bias_can_use_control_frames_as_probe_activity() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive", traffic_bias="tcp"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 600_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 500_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {
+                "path-a": {"tx_bps": 600_000_000},
+                "path-b": {"tx_bps": 500_000_000},
+            },
+            "path_latency": {
+                "path-a": {"tx_mean_us": 20_000, "source": "clock-synced-one-way", "confidence": "good"},
+                "path-b": {"tx_mean_us": 28_000, "source": "clock-synced-one-way", "confidence": "good"},
+            },
+            "path_control": {
+                "path-a": {"tx": {"frames": 32}, "rx": {"frames": 33}},
+                "path-b": {"tx": {"frames": 31}, "rx": {"frames": 34}},
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
+
+    assert telemetry.paths["path-a"].control_tx_frames == 32
+    assert telemetry.paths["path-b"].control_rx_frames == 34
+    assert candidate == "ordered_multipath_capacity_aware"
+    assert "ordered capacity aggregation" in reason
+    assert "capacity_confident" in signals
+
+
+def test_coordinated_adaptive_tcp_bias_rejects_control_probe_activity_below_floor() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive", traffic_bias="tcp"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 600_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 500_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {
+                "path-a": {"tx_bps": 600_000_000},
+                "path-b": {"tx_bps": 500_000_000},
+            },
+            "path_latency": {
+                "path-a": {"tx_mean_us": 20_000, "source": "clock-synced-one-way", "confidence": "good"},
+                "path-b": {"tx_mean_us": 28_000, "source": "clock-synced-one-way", "confidence": "good"},
+            },
+            "path_control": {
+                "path-a": {"tx": {"frames": 4}, "rx": {"frames": 4}},
+                "path-b": {"tx": {"frames": 4}, "rx": {"frames": 4}},
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, _signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
+
+    assert candidate == "single_best_path"
+    assert "best path" in reason
 
 
 def test_coordinated_adaptive_tcp_bias_rejects_ordered_multipath_under_jitter() -> None:
@@ -1233,7 +1556,7 @@ def test_coordinated_adaptive_tcp_bias_prefers_best_path_for_skewed_jittery_link
     assert "skewed path capacity" in reason
 
 
-def test_coordinated_adaptive_tcp_bias_uses_reorder_ratio_not_lifetime_total() -> None:
+def test_coordinated_adaptive_tcp_bias_allows_low_ratio_reorder_history() -> None:
     config = GatherlinkConfig(
         schema_version=1,
         node="local",
@@ -1273,8 +1596,8 @@ def test_coordinated_adaptive_tcp_bias_uses_reorder_ratio_not_lifetime_total() -
 
     candidate, reason, _signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
 
-    assert candidate == "single_best_path"
-    assert "best path" in reason
+    assert candidate == "ordered_multipath_capacity_aware"
+    assert "ordered capacity aggregation" in reason
 
 
 def test_coordinated_adaptive_tcp_bias_requires_real_data_latency_for_ordered_promotion() -> None:
@@ -1331,6 +1654,98 @@ def test_coordinated_adaptive_tcp_known_good_fallback_is_single_best_for_skewed_
     assert fallback == "single_best_path"
 
 
+def test_coordinated_adaptive_tcp_bias_uses_ordered_escape_when_best_path_is_overloaded() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive", traffic_bias="tcp"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 800_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 150_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820", traffic_class="tcp_ordered")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {"path-a": {"tx_bps": 800_000_000}, "path-b": {"tx_bps": 150_000_000}},
+            "path_latency": {
+                "path-a": {
+                    "tx_mean_us": 20_000,
+                    "tx_jitter_us": 2_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+                "path-b": {
+                    "tx_mean_us": 60_000,
+                    "tx_jitter_us": 6_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+            },
+            "path_pressure": {
+                "path-a": {
+                    "observed_packets": 1_000_000,
+                    "scheduler_predicted_delivery_us": 900_000,
+                },
+                "path-b": {"observed_packets": 10_000},
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, _signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
+
+    assert candidate == "ordered_multipath_capacity_aware"
+    assert "pressure allows bounded ordered capacity escape" in reason
+
+
+def test_coordinated_adaptive_tcp_bias_keeps_single_best_when_escape_path_is_too_small() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive", traffic_bias="tcp"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 800_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 50_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820", traffic_class="tcp_ordered")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {"path-a": {"tx_bps": 800_000_000}, "path-b": {"tx_bps": 50_000_000}},
+            "path_latency": {
+                "path-a": {
+                    "tx_mean_us": 20_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+                "path-b": {
+                    "tx_mean_us": 60_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+            },
+            "path_pressure": {
+                "path-a": {
+                    "observed_packets": 1_000_000,
+                    "scheduler_predicted_delivery_us": 900_000,
+                },
+                "path-b": {"observed_packets": 10_000},
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, _signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
+
+    assert candidate == "single_best_path"
+    assert "skewed path capacity" in reason
+
+
 def test_coordinated_adaptive_tcp_bias_rejects_high_reorder_ratio() -> None:
     config = GatherlinkConfig(
         schema_version=1,
@@ -1366,6 +1781,54 @@ def test_coordinated_adaptive_tcp_bias_rejects_high_reorder_ratio() -> None:
     assert "reorder_pressure" in signals
 
 
+def test_coordinated_adaptive_tcp_bias_rejects_receiver_backlog_before_ordered_promotion() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive", traffic_bias="tcp"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 220_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 240_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820", traffic_class="tcp_ordered")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_capacity": {"path-a": {"tx_bps": 220_000_000}, "path-b": {"tx_bps": 240_000_000}},
+            "path_latency": {
+                "path-a": {
+                    "tx_mean_us": 20_000,
+                    "tx_jitter_us": 2_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+                "path-b": {
+                    "tx_mean_us": 22_000,
+                    "tx_jitter_us": 2_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+            },
+            "path_pressure": {
+                "path-a": {"observed_packets": 1_000_000},
+                "path-b": {
+                    "observed_packets": 1_000_000,
+                    "scheduler_predicted_delivery_us": 250_000,
+                    "reorder_buffer_packets": 3_000,
+                },
+            },
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, _signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
+
+    assert candidate == "single_best_path"
+    assert "best path" in reason
+
+
 def test_coordinated_adaptive_udp_bias_prefers_capacity_aggregation() -> None:
     config = GatherlinkConfig(
         schema_version=1,
@@ -1386,6 +1849,45 @@ def test_coordinated_adaptive_udp_bias_prefers_capacity_aggregation() -> None:
     assert candidate == "capacity_aware"
     assert "udp bias" in reason
     assert "capacity_hints" in signals
+
+
+def test_coordinated_adaptive_udp_bias_keeps_capacity_under_latency_uncertainty() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive", traffic_bias="udp"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 220_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 240_000_000}),
+        ],
+        services=[ServiceConfig(name="bulk", target="127.0.0.1:51820", traffic_class="udp_bulk")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_latency": {
+                "path-a": {
+                    "tx_mean_us": 20_000,
+                    "source": "clock-synced-one-way",
+                    "confidence": "good",
+                    "clock_error_us": 200_000,
+                },
+                "path-b": {
+                    "tx_mean_us": 2_000_000,
+                    "source": "data-traffic-one-way",
+                    "confidence": "good",
+                },
+            }
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, signals = choose_candidate_policy(config, telemetry, fallback="single_best_path")
+
+    assert candidate == "capacity_aware"
+    assert "udp bias" in reason
+    assert "tcp_ordered_latency_risk" in signals
 
 
 def test_coordinated_adaptive_auto_uses_udp_bulk_service_class_for_capacity() -> None:
@@ -1432,6 +1934,40 @@ def test_coordinated_adaptive_auto_keeps_mixed_services_on_bulk_capable_baseline
 
     assert candidate == "capacity_aware"
     assert "mixed service" in reason
+    assert "service_mixed_classes" in signals
+
+
+def test_coordinated_adaptive_mixed_services_use_flowlets_for_wireless_jitter() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="coordinated_adaptive"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 180_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 120_000_000}),
+        ],
+        services=[
+            ServiceConfig(name="stable", target="127.0.0.1:51820", traffic_class="tcp_ordered"),
+            ServiceConfig(name="fast", target="127.0.0.1:51821", traffic_class="udp_bulk"),
+        ],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_latency": {
+                "path-a": {"tx_mean_us": 45_000, "tx_jitter_us": 25_000},
+                "path-b": {"tx_mean_us": 150_000, "tx_jitter_us": 35_000},
+            }
+        },
+        default_path_ids={"path-a": 0, "path-b": 1},
+    )
+
+    candidate, reason, signals = choose_candidate_policy(config, telemetry, fallback="capacity_aware")
+
+    assert candidate == "flowlet_adaptive"
+    assert "flowlet" in reason
+    assert "jitter_pressure" in signals
     assert "service_mixed_classes" in signals
 
 
@@ -1890,6 +2426,198 @@ def test_ordered_multipath_capacity_aware_reduces_pressured_path_weight_and_cred
     assert scheduler.paths[1].max_in_flight_bytes < scheduler.paths[0].max_in_flight_bytes
 
 
+def test_ordered_multipath_receiver_feedback_drains_blocking_path() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath_capacity_aware"),
+        paths=[
+            PathConfig(
+                name="clean",
+                interface="gl-a",
+                scheduler={"tx_capacity_bps": 500_000_000, "latency_us": 20_000},
+            ),
+            PathConfig(
+                name="blocked",
+                interface="gl-b",
+                scheduler={"tx_capacity_bps": 500_000_000, "latency_us": 20_000},
+            ),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820", traffic_class="tcp_ordered")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_pressure": {
+                "clean": {"observed_packets": 50_000},
+                "blocked": {
+                    "observed_packets": 50_000,
+                    "receive_gaps": 2_000,
+                    "reorder_depth_packets": 4_096,
+                    "reorder_buffer_packets": 4_096,
+                    "reorder_buffer_oldest_age_us": 90_000,
+                },
+            }
+        },
+        default_path_ids={"clean": 0, "blocked": 1},
+    )
+
+    scheduler = compile_scheduler(config, telemetry=telemetry)
+
+    assert scheduler.mode == "ordered_multipath"
+    assert [path.state for path in scheduler.paths] == ["active", "drain"]
+    assert scheduler.paths[1].weight == 1
+
+
+def test_ordered_multipath_receiver_feedback_drains_moderate_gap_ratio_for_tcp() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath_capacity_aware"),
+        paths=[
+            PathConfig(name="clean", interface="gl-a", scheduler={"tx_capacity_bps": 500_000_000}),
+            PathConfig(name="reordering", interface="gl-b", scheduler={"tx_capacity_bps": 500_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820", traffic_class="tcp_ordered")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_pressure": {
+                "clean": {"observed_packets": 200_000, "receive_gaps": 100},
+                "reordering": {"observed_packets": 200_000, "receive_gaps": 1_500},
+            }
+        },
+        default_path_ids={"clean": 0, "reordering": 1},
+    )
+
+    scheduler = compile_scheduler(config, telemetry=telemetry)
+
+    assert [path.state for path in scheduler.paths] == ["active", "drain"]
+
+
+def test_ordered_multipath_receiver_feedback_drains_path_with_late_delivery_prediction() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath_capacity_aware"),
+        paths=[
+            PathConfig(
+                name="clean",
+                interface="gl-a",
+                scheduler={"tx_capacity_bps": 500_000_000, "latency_us": 20_000, "reorder_hold_us": 25_000},
+            ),
+            PathConfig(
+                name="late",
+                interface="gl-b",
+                scheduler={"tx_capacity_bps": 500_000_000, "latency_us": 20_000, "reorder_hold_us": 25_000},
+            ),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820", traffic_class="tcp_ordered")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_pressure": {
+                "clean": {"observed_packets": 200_000, "scheduler_predicted_delivery_us": 24_000},
+                "late": {
+                    "observed_packets": 200_000,
+                    "scheduler_in_flight_packets": 2_000,
+                    "scheduler_in_flight_bytes": 3_000_000,
+                    "scheduler_predicted_delivery_us": 120_000,
+                },
+            }
+        },
+        default_path_ids={"clean": 0, "late": 1},
+    )
+
+    scheduler = compile_scheduler(config, telemetry=telemetry)
+
+    assert [path.state for path in scheduler.paths] == ["active", "drain"]
+
+
+def test_ordered_multipath_receiver_feedback_reduces_credit_from_in_flight_pressure() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath_capacity_aware"),
+        paths=[
+            PathConfig(
+                name="clean",
+                interface="gl-a",
+                scheduler={"tx_capacity_bps": 500_000_000, "latency_us": 20_000},
+            ),
+            PathConfig(
+                name="pressured",
+                interface="gl-b",
+                scheduler={"tx_capacity_bps": 500_000_000, "latency_us": 20_000},
+            ),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820", traffic_class="tcp_ordered")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_pressure": {
+                "clean": {"observed_packets": 200_000},
+                "pressured": {
+                    "observed_packets": 200_000,
+                    "scheduler_in_flight_packets": 1_024,
+                    "scheduler_in_flight_bytes": 1_500_000,
+                    "scheduler_predicted_delivery_us": 50_000,
+                },
+            }
+        },
+        default_path_ids={"clean": 0, "pressured": 1},
+    )
+
+    scheduler = compile_scheduler(config, telemetry=telemetry)
+
+    assert scheduler.paths[1].state == "active"
+    assert scheduler.paths[1].max_in_flight_bytes < scheduler.paths[0].max_in_flight_bytes
+    assert scheduler.paths[1].weight < scheduler.paths[0].weight
+
+
+def test_ordered_multipath_receiver_feedback_keeps_least_bad_path_when_all_paths_block() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath"),
+        paths=[
+            PathConfig(name="less-bad", interface="gl-a", scheduler={"tx_capacity_bps": 300_000_000}),
+            PathConfig(name="worse", interface="gl-b", scheduler={"tx_capacity_bps": 300_000_000}),
+        ],
+        services=[ServiceConfig(name="wireguard", target="127.0.0.1:51820", traffic_class="tcp_ordered")],
+    )
+    telemetry = scheduler_metrics_from_control_metadata(
+        {
+            "path_pressure": {
+                "less-bad": {
+                    "observed_packets": 10_000,
+                    "receive_gaps": 300,
+                    "reorder_buffer_packets": 4_096,
+                },
+                "worse": {
+                    "observed_packets": 10_000,
+                    "receive_gaps": 900,
+                    "reorder_buffer_packets": 8_192,
+                },
+            }
+        },
+        default_path_ids={"less-bad": 0, "worse": 1},
+    )
+
+    scheduler = compile_scheduler(config, telemetry=telemetry)
+
+    assert [path.state for path in scheduler.paths] == ["active", "drain"]
+
+
 def test_ordered_multipath_capacity_aware_drains_paths_outside_fast_reorder_window() -> None:
     config = GatherlinkConfig(
         schema_version=1,
@@ -1946,7 +2674,7 @@ def test_single_best_path_drains_lower_capacity_paths_in_python() -> None:
     assert [path.weight for path in scheduler.paths] == [1, 700, 1]
 
 
-def test_single_best_path_uses_latency_tie_breaker() -> None:
+def test_single_best_path_keeps_configured_order_for_equal_capacity_paths() -> None:
     config = GatherlinkConfig(
         schema_version=1,
         node="local",
@@ -1970,7 +2698,7 @@ def test_single_best_path_uses_latency_tie_breaker() -> None:
 
     scheduler = compile_scheduler(config)
 
-    assert [path.state for path in scheduler.paths] == ["drain", "active"]
+    assert [path.state for path in scheduler.paths] == ["active", "drain"]
 
 
 def test_latency_guarded_capacity_is_python_policy_over_weighted_rust_primitives() -> None:
@@ -2180,6 +2908,25 @@ def test_scheduler_telemetry_carries_pressure_and_jitter_facts() -> None:
     assert metrics.socket_drain_quantum == 16
     assert metrics.stale_control_age_us == 60_000_000
     assert metrics.estimated_earliest_delivery_us(payload_bytes=1000) == 10_000
+
+
+def test_scheduler_telemetry_does_not_trust_warming_real_data_latency() -> None:
+    from gatherlink.scheduling.metrics import scheduler_metrics_from_control_metadata
+
+    snapshot = scheduler_metrics_from_control_metadata(
+        {
+            "path_latency": {
+                "path-a": {
+                    "source": "data-traffic-one-way",
+                    "confidence": "warming",
+                    "tx_mean_us": 1_000,
+                }
+            }
+        },
+        default_path_ids={"path-a": 1},
+    )
+
+    assert not snapshot.paths["path-a"].has_trusted_real_data_latency
 
 
 def test_scheduler_telemetry_ignores_invalid_pressure_values() -> None:

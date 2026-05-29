@@ -37,6 +37,7 @@ from gatherlink.scheduling.policies import (
     FLOWLET_ADAPTIVE_DEFAULT_MAX_HOLD_US,
     FLOWLET_ADAPTIVE_DEFAULT_PATH_RUN_DATAGRAMS,
 )
+from gatherlink.scheduling.service_intent import service_is_protected
 
 
 def _service_by_name(services: list[ServiceConfig]) -> dict[str, ServiceConfig]:
@@ -213,21 +214,87 @@ def compile_service_scheduler_primitives(
             service,
             effective_scheduler_mode=effective_scheduler_mode,
         ),
-        "scheduler_path_policy": service.scheduler_path_policy,
-        "scheduler_allowed_path_ids": _service_allowed_path_ids(config, service),
+        "scheduler_path_policy": _service_scheduler_path_policy(
+            service,
+            effective_scheduler_mode=effective_scheduler_mode,
+        ),
+        "scheduler_allowed_path_ids": _service_allowed_path_ids(
+            config,
+            service,
+            effective_scheduler_mode=effective_scheduler_mode,
+        ),
         "scheduler_path_weights": _service_path_weights(config, service),
     }
 
 
-def _service_allowed_path_ids(config: GatherlinkConfig, service: ServiceConfig) -> list[int]:
+def _service_allowed_path_ids(
+    config: GatherlinkConfig,
+    service: ServiceConfig,
+    *,
+    effective_scheduler_mode: SchedulerPolicy | None = None,
+) -> list[int]:
     """Compile service path-name eligibility into compact runtime path ids."""
     if not service.scheduler_allowed_paths:
+        if _service_scheduler_path_policy(service, effective_scheduler_mode=effective_scheduler_mode) == "single_best_path":
+            return [_default_single_best_path_id(config)]
         return []
     path_ids_by_name = {path.name: index for index, path in enumerate(config.paths)}
     missing = [name for name in service.scheduler_allowed_paths if name not in path_ids_by_name]
     if missing:
         raise ValueError(f"service {service.name!r} references unknown scheduler_allowed_paths: {', '.join(missing)}")
     return [path_ids_by_name[name] for name in service.scheduler_allowed_paths]
+
+
+def _service_scheduler_path_policy(
+    service: ServiceConfig,
+    *,
+    effective_scheduler_mode: SchedulerPolicy | None,
+) -> str:
+    """
+    Return the service-level path policy compiled for Rust.
+
+    Opaque protected services such as WireGuard carrying TCP are safer on one
+    path until Python has enough telemetry to choose a stronger service plan.
+    Keep that protection at the service boundary so global paths remain active
+    for control, probes, and other services.
+    """
+    if "scheduler_path_policy" in service.model_fields_set:
+        return service.scheduler_path_policy
+    protected_single_path_mode = effective_scheduler_mode in {
+        "ordered_multipath",
+        "ordered_multipath_capacity_aware",
+        "single_best_path",
+    }
+    if protected_single_path_mode and service_is_protected(service):
+        return "single_best_path"
+    return service.scheduler_path_policy
+
+
+def _default_single_best_path_id(config: GatherlinkConfig) -> int:
+    """
+    Choose the deterministic startup path for an auto-protected service.
+
+    Python owns the meaning of "best". Rust receives only the resulting path id
+    and executes that narrow primitive until Python hot-reapply has enough
+    telemetry to move or expand the service safely.
+    """
+    eligible = [
+        (index, path)
+        for index, path in enumerate(config.paths)
+        if path.scheduler.enabled and path.scheduler.state == "active"
+    ]
+    if not eligible:
+        eligible = list(enumerate(config.paths))
+    best_index, _best_path = min(
+        eligible,
+        key=lambda item: (
+            -(item[1].scheduler.tx_capacity_bps or 0),
+            item[1].scheduler.loss_ppm,
+            item[1].scheduler.latency_us if item[1].scheduler.latency_us is not None else 2**31 - 1,
+            item[0],
+        ),
+    )
+    return best_index
 
 
 def _service_path_weights(config: GatherlinkConfig, service: ServiceConfig) -> list[tuple[int, int]]:
@@ -449,7 +516,7 @@ def expand_config(config: GatherlinkConfig) -> RuntimeConfig:
         peer=config.peer,
         security=security,
         paths=_expand_paths(config, scheduler.paths, security),
-        services=_expand_services(config, service_ids),
+        services=_expand_services(config, service_ids, effective_scheduler_mode=config.scheduler.mode),
         scheduler=scheduler,
         helpers=_expand_helpers(config),
         metadata={

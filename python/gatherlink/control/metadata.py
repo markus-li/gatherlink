@@ -265,6 +265,7 @@ def record_control_metadata_received(
         + len(control_frame.path_capacity_bps)
         + len(control_frame.path_latency_us)
         + len(control_frame.path_latency_quality)
+        + len(control_frame.path_latency_stats)
         + len(control_frame.path_mtu)
         + len(control_frame.path_pressure)
         + (1 if control_frame.scheduler_status is not None else 0)
@@ -285,6 +286,9 @@ def record_control_metadata_received(
     merge_control_service_disables(control_metadata, control_frame.service_disables)
     merge_control_service_scheduler_policies(control_metadata, control_frame.service_scheduler_policies)
     merge_peer_scheduler_status(control_metadata, control_frame.scheduler_status)
+    record_control_path_latency(control_metadata, control_frame.path_latency_us, control_frame.path_metadata, {})
+    record_control_path_latency_quality(control_metadata, control_frame.path_latency_quality, control_frame.path_metadata, {})
+    record_control_path_latency_stats(control_metadata, control_frame.path_latency_stats, control_frame.path_metadata, {})
     record_control_path_mtu(control_metadata, control_frame.path_mtu, control_frame.path_metadata, {})
     record_control_path_pressure(control_metadata, control_frame.path_pressure, control_frame.path_metadata, {})
 
@@ -595,6 +599,30 @@ def record_control_path_latency_quality(
     merge_control_path_latency(control_metadata, named_latency)
 
 
+def record_control_path_latency_stats(
+    control_metadata: dict[str, object],
+    path_latency_stats: dict[int, tuple[int | None, int | None, int | None, int | None, int | None, int | None]],
+    learned_path_names_by_id: dict[int, str],
+    configured_path_names_by_id: dict[int, str],
+) -> None:
+    """Store peer-advertised latency confidence stats next to local-view latency values."""
+    named_latency: dict[str, dict[str, int | str | None]] = {}
+    for path_id, (rtt_us, clock_error_us, tx_jitter_us, rx_jitter_us, tx_p95_us, rx_p95_us) in path_latency_stats.items():
+        path_name = (
+            learned_path_names_by_id.get(path_id) or configured_path_names_by_id.get(path_id) or f"path-id:{path_id}"
+        )
+        named_latency[path_name] = {
+            "rtt_us": rtt_us,
+            "clock_error_us": clock_error_us,
+            "tx_jitter_us": rx_jitter_us,
+            "rx_jitter_us": tx_jitter_us,
+            "tx_p95_us": rx_p95_us,
+            "rx_p95_us": tx_p95_us,
+            "updated_at": datetime.now(UTC).isoformat(),
+        }
+    merge_control_path_latency(control_metadata, named_latency)
+
+
 def record_control_path_mtu(
     control_metadata: dict[str, object],
     path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]],
@@ -639,6 +667,7 @@ def record_control_path_pressure(
             int,
             int,
             int,
+            int,
         ],
     ],
     learned_path_names_by_id: dict[int, str],
@@ -664,6 +693,7 @@ def record_control_path_pressure(
             scheduler_predicted_delivery_us,
             reorder_buffer_packets,
             reorder_buffer_oldest_age_us,
+            observed_packets,
         ) = pressure
         named_pressure[path_name] = {
             "loss_ppm": loss_ppm,
@@ -679,6 +709,7 @@ def record_control_path_pressure(
             "scheduler_predicted_delivery_us": scheduler_predicted_delivery_us,
             "reorder_buffer_packets": reorder_buffer_packets,
             "reorder_buffer_oldest_age_us": reorder_buffer_oldest_age_us,
+            "observed_packets": observed_packets,
             "source": "peer",
             "updated_at": datetime.now(UTC).isoformat(),
         }
@@ -772,12 +803,35 @@ def latency_quality_by_path_id(
     return quality_by_id
 
 
+def latency_stats_by_path_id(
+    path_latency: dict[str, dict[str, int | str | None]],
+    path_ids: dict[str, int],
+) -> dict[int, tuple[int | None, int | None, int | None, int | None, int | None, int | None]]:
+    """Convert named latency confidence stats into path-id keyed control payloads."""
+    stats_by_id = {}
+    for path_name, latency in path_latency.items():
+        if path_name not in path_ids:
+            continue
+        values = (
+            int_or_none(latency.get("rtt_us")),
+            int_or_none(latency.get("clock_error_us")),
+            int_or_none(latency.get("tx_jitter_us")),
+            int_or_none(latency.get("rx_jitter_us")),
+            int_or_none(latency.get("tx_p95_us")),
+            int_or_none(latency.get("rx_p95_us")),
+        )
+        if any(value is not None for value in values):
+            stats_by_id[path_ids[path_name]] = values
+    return stats_by_id
+
+
 def pressure_by_path_id(
     path_pressure: dict[str, dict[str, int | str | None]],
     path_ids: dict[str, int],
 ) -> dict[
     int,
     tuple[
+        int,
         int,
         int,
         int,
@@ -812,6 +866,7 @@ def pressure_by_path_id(
             counter_int(pressure.get("scheduler_predicted_delivery_us")),
             counter_int(pressure.get("reorder_buffer_packets")),
             counter_int(pressure.get("reorder_buffer_oldest_age_us")),
+            counter_int(pressure.get("observed_packets")),
         )
     return pressure_by_id
 
@@ -946,6 +1001,7 @@ def merge_pressure_record(
             "scheduler_predicted_delivery_us",
             "reorder_buffer_packets",
             "reorder_buffer_oldest_age_us",
+            "observed_packets",
         }:
             continue
         merged[key] = value

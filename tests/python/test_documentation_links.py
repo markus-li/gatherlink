@@ -3,16 +3,42 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DOC_FILES = [REPO_ROOT / "README.md", *sorted((REPO_ROOT / "docs").rglob("*.md"))]
+PROJECT_MARKDOWN_FILES = [
+    REPO_ROOT / path
+    for path in subprocess.check_output(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "*.md"],
+        cwd=REPO_ROOT,
+        text=True,
+    ).splitlines()
+]
+README_FILES = sorted((REPO_ROOT / "docs").rglob("README.md"))
 
 LINK_RE = re.compile(r"(?<!!)\[[^\]]+\]\(([^)]+)\)")
 IMAGE_RE = re.compile(r"!\[[^\]]*\]\(([^)]+)\)")
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 HTML_ID_RE = re.compile(r"""<a\s+(?:[^>]*?\s+)?(?:id|name)=["']([^"']+)["']""", re.IGNORECASE)
+MARKDOWN_FILENAME_RE = re.compile(r"(?<![\w])([A-Za-z0-9_./-]+\.md)(?![\w])")
+
+# These are intentionally not links to committed documentation. Keep this list
+# narrow so real doc references cannot drift back into bare code spans.
+ALLOWED_LITERAL_MARKDOWN_REFERENCES: dict[str, tuple[re.Pattern[str], ...]] = {
+    "docs/benchmarks/hyperv-performance-history.md": (re.compile(r"`report\.md`"),),
+    "docs/labs/real-vm-acceptance.md": (
+        re.compile(r"`report\.md`"),
+        re.compile(r"`report\.json`"),
+    ),
+    "docs/operations/documentation-maintenance.md": (re.compile(r"`-full\.md`"),),
+    "docs/releases/v0.9.1.md": (re.compile(r"`report\.md`"),),
+    "docs/releases/v0.9.3.md": (re.compile(r"`\.gatherlink/[^`]+/report\.md`"),),
+    "docs/reports/v0.9-code-audit-followups.md": (re.compile(r"`\.gatherlink/[^`]+/report\.md`"),),
+    "tools/vm_acceptance/README.md": (re.compile(r"`report\.md`"),),
+}
 
 
 def _without_fenced_blocks(markdown: str) -> str:
@@ -81,6 +107,21 @@ def _resolve_local_target(source: Path, target: str) -> tuple[Path, str]:
     return resolved, unquote(fragment)
 
 
+def _markdown_link_spans(line: str) -> list[range]:
+    """Return ranges occupied by Markdown image/link expressions."""
+    spans: list[range] = []
+    for regex in (LINK_RE, IMAGE_RE):
+        for match in regex.finditer(line):
+            spans.append(range(match.start(), match.end()))
+    return spans
+
+
+def _is_allowed_literal_markdown_reference(source: Path, token: str, line: str) -> bool:
+    rel = source.relative_to(REPO_ROOT).as_posix()
+    allowed_patterns = ALLOWED_LITERAL_MARKDOWN_REFERENCES.get(rel, ())
+    return any(pattern.search(line) for pattern in allowed_patterns)
+
+
 def test_documentation_local_links_resolve() -> None:
     """Every local Markdown/image link should resolve when viewed on GitHub."""
     failures: list[str] = []
@@ -107,3 +148,38 @@ def test_documentation_local_links_resolve() -> None:
                         )
 
     assert failures == []
+
+
+def test_directory_readmes_link_markdown_files_directly() -> None:
+    """Directory indexes should use GitHub-clickable links for Markdown files."""
+    failures: list[str] = []
+    inline_markdown_filename = re.compile(r"(?<!\[)`[^`]+\.md`(?!\]\()")
+
+    for source in README_FILES:
+        stripped = _without_fenced_blocks(source.read_text(encoding="utf-8"))
+        for line_number, line in enumerate(stripped.splitlines(), start=1):
+            if inline_markdown_filename.search(line):
+                failures.append(f"{source.relative_to(REPO_ROOT)}:{line_number}: use a Markdown link, not a code span")
+
+    assert failures == []
+
+
+def test_markdown_document_references_are_links() -> None:
+    """References from one project Markdown file to another should be clickable links."""
+    failures: list[str] = []
+    checked_files = len(PROJECT_MARKDOWN_FILES)
+
+    for source in PROJECT_MARKDOWN_FILES:
+        stripped = _without_fenced_blocks(source.read_text(encoding="utf-8"))
+        for line_number, line in enumerate(stripped.splitlines(), start=1):
+            link_spans = _markdown_link_spans(line)
+            for match in MARKDOWN_FILENAME_RE.finditer(line):
+                token = match.group(1)
+                if any(match.start(1) in span for span in link_spans):
+                    continue
+                if _is_allowed_literal_markdown_reference(source, token, line):
+                    continue
+                failures.append(f"{source.relative_to(REPO_ROOT)}:{line_number}: " f"use a Markdown link for {token!r}")
+
+    print(f"checked {checked_files} project Markdown files for clickable .md references")
+    assert failures == [], f"checked {checked_files} project Markdown files"

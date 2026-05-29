@@ -125,18 +125,96 @@ def test_hyperv_five_path_scripts_share_path_validation() -> None:
     wireguard = (REPO_ROOT / "tools/hyperv/run_wireguard_onehop_speed.sh").read_text(encoding="utf-8")
     dual_wireguard = (REPO_ROOT / "tools/hyperv/run_dual_wireguard_gatherlink_speed.sh").read_text(encoding="utf-8")
     shaper = (REPO_ROOT / "tools/hyperv/apply_path_shape_profile.sh").read_text(encoding="utf-8")
+    rps = (REPO_ROOT / "tools/hyperv/apply_guest_rps.sh").read_text(encoding="utf-8")
     guest_paths = (REPO_ROOT / "tools/hyperv/configure_guest_path_interfaces.sh").read_text(encoding="utf-8")
+    probe = (REPO_ROOT / "tools/hyperv/vm_perf_probe.py").read_text(encoding="utf-8")
+    host_probe = (REPO_ROOT / "tools/hyperv/host_perf_probe.ps1").read_text(encoding="utf-8")
+    resolver = (REPO_ROOT / "tools/hyperv/resolve_gatherlink_vm.ps1").read_text(encoding="utf-8")
+    static_netplan = (REPO_ROOT / "tools/hyperv/write_static_management_netplan.py").read_text(encoding="utf-8")
 
     assert 'PERF_USER="${PERF_USER:-gatherlink}"' in common
     assert 'PERF_REMOTE_REPO="${PERF_REMOTE_REPO:-/home/gatherlink/src/gatherlink}"' in common
+    assert 'PERF_IPERF_UDP_PARALLEL="${PERF_IPERF_UDP_PARALLEL:-1}"' in common
+    assert 'PERF_UDP_PRESSURE_FLOWS="${PERF_UDP_PRESSURE_FLOWS:-1}"' in common
+    assert 'PERF_UDP_PRESSURE_WORKERS="${PERF_UDP_PRESSURE_WORKERS:-1}"' in common
+    assert 'PERF_UDP_PRESSURE_PORT_STRIDE="${PERF_UDP_PRESSURE_PORT_STRIDE:-16}"' in common
+    assert 'PERF_UDP_PRESSURE_SEND_BATCH="${PERF_UDP_PRESSURE_SEND_BATCH:-64}"' in common
+    assert 'PERF_UDP_PRESSURE_RECV_BATCH="${PERF_UDP_PRESSURE_RECV_BATCH:-128}"' in common
+    assert 'PERF_UDP_PRESSURE_RECV_BUFFER_SIZE="${PERF_UDP_PRESSURE_RECV_BUFFER_SIZE:-65535}"' in common
+    assert 'PERF_UDP_PRESSURE_RECV_TRUNCATE="${PERF_UDP_PRESSURE_RECV_TRUNCATE:-0}"' in common
+    assert 'PERF_UDP_PRESSURE_SINK_CPUSET="${PERF_UDP_PRESSURE_SINK_CPUSET:-}"' in common
+    assert 'PERF_UDP_PRESSURE_SEND_CPUSET="${PERF_UDP_PRESSURE_SEND_CPUSET:-}"' in common
+    assert 'PERF_UDP_PRESSURE_GSO_SEGMENTS="${PERF_UDP_PRESSURE_GSO_SEGMENTS:-1}"' in common
+    assert 'PERF_UDP_PRESSURE_FEEDBACK="${PERF_UDP_PRESSURE_FEEDBACK:-0}"' in common
+    assert 'PERF_UDP_PRESSURE_FEEDBACK_HEADROOM="${PERF_UDP_PRESSURE_FEEDBACK_HEADROOM:-1.02}"' in common
+    assert 'PERF_UDP_PRESSURE_FEEDBACK_INTERVAL_MS="${PERF_UDP_PRESSURE_FEEDBACK_INTERVAL_MS:-500}"' in common
+    assert 'PERF_UDP_PRESSURE_FEEDBACK_INITIAL_MBIT="${PERF_UDP_PRESSURE_FEEDBACK_INITIAL_MBIT:-0}"' in common
+    assert 'PERF_UDP_PRESSURE_FEEDBACK_MAX_MBIT="${PERF_UDP_PRESSURE_FEEDBACK_MAX_MBIT:-0}"' in common
+    assert 'PERF_UDP_PRESSURE_FEEDBACK_PROBE_STEP_MBIT="${PERF_UDP_PRESSURE_FEEDBACK_PROBE_STEP_MBIT:-250}"' in common
+    assert 'PERF_UDP_PRESSURE_FEEDBACK_GOOD_RATIO="${PERF_UDP_PRESSURE_FEEDBACK_GOOD_RATIO:-0.985}"' in common
+    assert 'PERF_UDP_PRESSURE_FEEDBACK_LOW_RATIO="${PERF_UDP_PRESSURE_FEEDBACK_LOW_RATIO:-0.75}"' in common
+    assert 'PERF_UDP_PRESSURE_FEEDBACK_BACKOFF_RATIO="${PERF_UDP_PRESSURE_FEEDBACK_BACKOFF_RATIO:-0.95}"' in common
+    assert 'PERF_COLLECT_NODE_PROBES="${PERF_COLLECT_NODE_PROBES:-0}"' in common
+    assert "-u -P ${PERF_IPERF_UDP_PARALLEL}" in common
+    assert "--flows ${PERF_UDP_PRESSURE_FLOWS}" in common
+    assert "--workers ${PERF_UDP_PRESSURE_WORKERS}" in common
+    assert "--send-batch ${PERF_UDP_PRESSURE_SEND_BATCH}" in common
+    assert "--udp-gso-segments ${PERF_UDP_PRESSURE_GSO_SEGMENTS}" in common
+    assert "--bind-port-stride ${PERF_UDP_PRESSURE_PORT_STRIDE}" in common
+    assert "--target-port-stride ${PERF_UDP_PRESSURE_PORT_STRIDE}" in common
+    assert "--recv-batch ${PERF_UDP_PRESSURE_RECV_BATCH}" in common
+    assert "--recv-buffer-size ${PERF_UDP_PRESSURE_RECV_BUFFER_SIZE}" in common
+    assert 'truncate_arg="--recv-truncate"' in common
+    assert "taskset -c ${PERF_UDP_PRESSURE_SINK_CPUSET}" in common
+    assert "taskset -c ${PERF_UDP_PRESSURE_SEND_CPUSET}" in common
+    assert "--feedback-target ${feedback_target}" in common
+    assert "--feedback-interval-ms ${PERF_UDP_PRESSURE_FEEDBACK_INTERVAL_MS}" in common
+    assert "--feedback-bind ${feedback_bind}" in common
+    assert "--feedback-initial-mbit ${PERF_UDP_PRESSURE_FEEDBACK_INITIAL_MBIT}" in common
+    assert "--feedback-max-mbit ${PERF_UDP_PRESSURE_FEEDBACK_MAX_MBIT}" in common
+    assert "--feedback-probe-step-mbit ${PERF_UDP_PRESSURE_FEEDBACK_PROBE_STEP_MBIT}" in common
+    assert "--feedback-good-ratio ${PERF_UDP_PRESSURE_FEEDBACK_GOOD_RATIO}" in common
+    assert "--feedback-low-ratio ${PERF_UDP_PRESSURE_FEEDBACK_LOW_RATIO}" in common
+    assert "--feedback-backoff-ratio ${PERF_UDP_PRESSURE_FEEDBACK_BACKOFF_RATIO}" in common
+    assert '"send_calls", "recv_calls", "max_send_batch", "max_recv_batch"' in common
     assert '"${PERF_USER}@${IP}"' in common
     assert "cd ${PERF_REMOTE_REPO}" in common
     assert 'allowed = {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}' in common
     assert "--active-paths must contain one or more of a,b,c,d,e" in common
     assert 'perf_path_indexes "${ACTIVE_PATHS}"' in raw_onehop
     assert 'perf_path_capacity_json "${ACTIVE_PATHS}" "${PATH_CAPACITY_MBITS}"' in raw_onehop
+    assert 'SERVICE_TRAFFIC_CLASS="unknown"' in raw_onehop
+    assert "--service-traffic-class CLASS" in raw_onehop
+    assert "'traffic_class': '${SERVICE_TRAFFIC_CLASS}'" in raw_onehop
     assert 'perf_path_indexes "${ACTIVE_PATHS}"' in private_lan
     assert 'perf_path_indexes "${ACTIVE_PATHS}"' in wireguard
+    assert "--udp-length BYTES" in wireguard
+    assert "--udp-payload-margin BYTES" in wireguard
+    assert 'if value == "auto":' in wireguard
+    assert "wg_mtu - 28 - margin" in wireguard
+    assert 'perf_start_node_probe "udp-pressure-node-a"' in wireguard
+    assert 'perf_fetch_node_probe "udp-pressure-node-a"' in wireguard
+    assert 'perf_start_node_probe "udp-pressure-node-a"' in private_lan
+    assert 'perf_fetch_node_probe "udp-pressure-node-a"' in private_lan
+    assert "--match udp-pressure" in common
+    assert "if pid not in cmdlines:" in probe
+    assert '"cpu_busy_percent_by_cpu": summarize_cpu_busy(start_cpu_map, end_cpu_map)' in probe
+    assert '"softirq_delta": delta_softirqs(end_softirqs, start_softirqs)' in probe
+    assert '"softnet_delta": delta_nested_counter_map(end_softnet, start_softnet)' in probe
+    assert r'"\Hyper-V Virtual Switch(*)\Bytes/sec"' in host_probe
+    assert r'"\Hyper-V Virtual Network Adapter(*)\Dropped Packets Incoming/sec"' in host_probe
+    assert r'"\Hyper-V Hypervisor Logical Processor(*)\% Total Run Time"' in host_probe
+    assert '[ValidateSet("minimal", "full")]' in host_probe
+    assert '$Profile = "minimal"' in host_probe
+    assert '-SampleInterval $IntervalSeconds -MaxSamples $samples' in host_probe
+    assert 'ToLowerInvariant() -ne "dynamic"' in resolver
+    assert "They are not proof that the guest currently owns the address" in resolver
+    assert "172.26.209.11" in static_netplan
+    assert "99-gatherlink-disable-network-regeneration.cfg" in static_netplan
+    assert "$((7800 + index * 100))" in private_lan
+    assert "$((7900 + index * 100))" in private_lan
+    assert "$((8200 + index * 100))" in wireguard
+    assert "$((8300 + index * 100))" in wireguard
     assert "kernel|userspace|gotatun|boringtun" in wireguard
     assert "command -v gotatun" in wireguard
     assert "command -v boringtun-cli" in wireguard
@@ -153,6 +231,10 @@ def test_hyperv_five_path_scripts_share_path_validation() -> None:
     assert "external-dual-lte-independent:b)" in shaper
     assert "external-duplication-mode:c)" in shaper
     assert "external-tcp-mode-relay:b)" in shaper
+    assert "rps_sock_flow_entries" in rps
+    assert "rps_cpus" in rps
+    assert "rps_flow_cnt" in rps
+    assert "This is benchmark/lab tuning only" in rps
     assert 'PERF_USER="${PERF_USER:-gatherlink}"' in shaper
     assert '"${PERF_USER}@${IP}"' in shaper
     assert "Usage: configure_guest_path_interfaces.sh --host-index 11|12|13" in guest_paths
@@ -366,6 +448,9 @@ def test_onehop_wireguard_probe_duration_tracks_benchmark_window() -> None:
     assert "benchmark_sections=1" in script
     assert "probe_duration=$((DURATION * benchmark_sections + 2))" in script
     assert "probe_duration=$((DURATION * benchmark_sections + 12))" not in script
+    assert "perf_step \"UDP Pressure\"" in script
+    assert "perf_start_udp_pressure_sink" in script
+    assert "perf_start_udp_pressure_client_background" in script
 
 
 def test_onehop_wireguard_keeps_setup_services_alive() -> None:
@@ -541,6 +626,17 @@ def test_dual_wireguard_runner_exposes_scheduler_traffic_bias() -> None:
     assert "- scheduler_traffic_bias: ${SCHEDULER_TRAFFIC_BIAS}" in script
 
 
+def test_onehop_wireguard_runner_marks_single_tunnel_as_order_sensitive() -> None:
+    script = (REPO_ROOT / "tools/hyperv/run_onehop_wireguard_gatherlink_speed.sh").read_text(encoding="utf-8")
+
+    assert 'SERVICE_TRAFFIC_CLASS="tcp_ordered"' in script
+    assert "--service-traffic-class CLASS" in script
+    assert '--service-traffic-class) SERVICE_TRAFFIC_CLASS="$2"; shift 2 ;;' in script
+    assert "--service-traffic-class \"${SERVICE_TRAFFIC_CLASS}\"" in script
+    assert "single WireGuard tunnel is opaque/order-sensitive" in script
+    assert "anti-replay loss" in script
+
+
 def test_dual_wireguard_runner_enables_scheduler_reapply_by_default() -> None:
     script = (REPO_ROOT / "tools/hyperv/run_dual_wireguard_gatherlink_speed.sh").read_text(encoding="utf-8")
 
@@ -607,6 +703,14 @@ def test_hyperv_iperf_tcp_extra_args_are_reported_and_used() -> None:
     assert "- iperf_tcp_server_args: ${PERF_IPERF_TCP_SERVER_ARGS:-[none]}" in runner
     assert "- iperf_tcp_client_args: ${PERF_IPERF_TCP_CLIENT_ARGS:-[none]}" in dual_runner
     assert "- iperf_tcp_server_args: ${PERF_IPERF_TCP_SERVER_ARGS:-[none]}" in dual_runner
+
+
+def test_hyperv_udp_summary_prefers_receiver_loss() -> None:
+    common = (REPO_ROOT / "tools/hyperv/perf_common.sh").read_text(encoding="utf-8")
+    receiver_loss_index = common.index('if "lost_percent" in received:')
+    sender_loss_index = common.index('elif "lost_percent" in sent:')
+
+    assert receiver_loss_index < sender_loss_index
 
 
 def test_onehop_speed_runners_can_enable_live_scheduler_reapply() -> None:

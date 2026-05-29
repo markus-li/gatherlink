@@ -6,11 +6,14 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 source "${SCRIPT_DIR}/vm_ip_cache.sh"
 
 PLINK="${PLINK:-/mnt/c/Progra~1/PuTTY/plink.exe}"
+TRANSPORT="${TRANSPORT:-plink}"
 BRANCH="$(cd "${REPO_ROOT}" && git rev-parse --abbrev-ref HEAD)"
 VM_A="gatherlink-vm-a"
 VM_B="gatherlink-vm-b"
 IP_A=""
 IP_B=""
+PORT_A=""
+PORT_B=""
 HOST_KEY_A=""
 HOST_KEY_B=""
 BUILD_RUST=0
@@ -30,8 +33,11 @@ Options:
   --inventory FILE     Optional env file with HYPERV_VM_* values.
   --ip-a IP            VM A management IP. If omitted, resolve via Hyper-V helper.
   --ip-b IP            VM B management IP. If omitted, resolve via Hyper-V helper.
+  --port-a PORT        Optional SSH port for VM A when using a shared portproxy IP.
+  --port-b PORT        Optional SSH port for VM B when using a shared portproxy IP.
   --host-key-a KEY     PuTTY host-key fingerprint for VM A.
   --host-key-b KEY     PuTTY host-key fingerprint for VM B.
+  --transport NAME     SSH transport: plink or ssh. Default plink.
   --branch NAME        Branch to push. Defaults current branch.
   --out DIR            Report directory.
   --build              Reinstall Python deps and rebuild PyO3 binding on VMs.
@@ -53,6 +59,8 @@ if [[ -n "${INVENTORY}" ]]; then
   VM_B="${HYPERV_VM_B:-${VM_B}}"
   IP_A="${HYPERV_VM_A_IP:-${IP_A}}"
   IP_B="${HYPERV_VM_B_IP:-${IP_B}}"
+  PORT_A="${HYPERV_VM_A_PORT:-${PORT_A}}"
+  PORT_B="${HYPERV_VM_B_PORT:-${PORT_B}}"
   HOST_KEY_A="${HYPERV_VM_A_HOST_KEY:-${HOST_KEY_A}}"
   HOST_KEY_B="${HYPERV_VM_B_HOST_KEY:-${HOST_KEY_B}}"
   BRANCH="${HYPERV_BRANCH:-${BRANCH}}"
@@ -63,8 +71,11 @@ while [[ $# -gt 0 ]]; do
     --inventory) INVENTORY="$2"; shift 2 ;;
     --ip-a) IP_A="$2"; shift 2 ;;
     --ip-b) IP_B="$2"; shift 2 ;;
+    --port-a) PORT_A="$2"; shift 2 ;;
+    --port-b) PORT_B="$2"; shift 2 ;;
     --host-key-a) HOST_KEY_A="$2"; shift 2 ;;
     --host-key-b) HOST_KEY_B="$2"; shift 2 ;;
+    --transport) TRANSPORT="$2"; shift 2 ;;
     --branch) BRANCH="$2"; shift 2 ;;
     --out) OUT_DIR="$2"; shift 2 ;;
     --build) BUILD_RUST=1; shift ;;
@@ -73,9 +84,15 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "${HOST_KEY_A}" ]] || { echo "--host-key-a is required" >&2; exit 2; }
-[[ -n "${HOST_KEY_B}" ]] || { echo "--host-key-b is required" >&2; exit 2; }
-[[ -x "${PLINK}" ]] || { echo "plink not found at ${PLINK}" >&2; exit 2; }
+case "${TRANSPORT}" in
+  plink)
+    [[ -n "${HOST_KEY_A}" ]] || { echo "--host-key-a is required" >&2; exit 2; }
+    [[ -n "${HOST_KEY_B}" ]] || { echo "--host-key-b is required" >&2; exit 2; }
+    [[ -x "${PLINK}" ]] || { echo "plink not found at ${PLINK}" >&2; exit 2; }
+    ;;
+  ssh) ;;
+  *) echo "--transport must be plink or ssh" >&2; exit 2 ;;
+esac
 
 mkdir -p "${OUT_DIR}"
 REPORT="${OUT_DIR}/report.md"
@@ -100,32 +117,56 @@ IP_B="$(hyperv_resolve_vm_ip "${REPO_ROOT}" "${SCRIPT_DIR}" "${VM_B}" "${IP_B}")
 remote() {
   local label="$1"
   local ip="$2"
-  local host_key="$3"
-  local command="$4"
-  log_cmd "${label}" "plink ${ip} ${command}"
-  "${PLINK}" -batch -agent -hostkey "${host_key}" -l gatherlink "${ip}" "${command}"
+  local port="$3"
+  local host_key="$4"
+  local command="$5"
+  local port_args=()
+  if [[ "${TRANSPORT}" == "ssh" ]]; then
+    if [[ -n "${port}" ]]; then
+      port_args=(-p "${port}")
+    fi
+    log_cmd "${label}" "ssh ${ip}${port:+:${port}} ${command}"
+    ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${port_args[@]}" "gatherlink@${ip}" "${command}"
+  else
+    if [[ -n "${port}" ]]; then
+      port_args=(-P "${port}")
+    fi
+    log_cmd "${label}" "plink ${ip}${port:+:${port}} ${command}"
+    "${PLINK}" -batch -agent -hostkey "${host_key}" "${port_args[@]}" -l gatherlink "${ip}" "${command}"
+  fi
 }
 
-remote_a() { remote "$1" "${IP_A}" "${HOST_KEY_A}" "$2"; }
-remote_b() { remote "$1" "${IP_B}" "${HOST_KEY_B}" "$2"; }
+remote_a() { remote "$1" "${IP_A}" "${PORT_A}" "${HOST_KEY_A}" "$2"; }
+remote_b() { remote "$1" "${IP_B}" "${PORT_B}" "${HOST_KEY_B}" "$2"; }
 
 sync_node() {
   local label="$1"
   local ip="$2"
-  local host_key="$3"
-  remote "${label}-prepare-repo" "${ip}" "${host_key}" \
+  local port="$3"
+  local host_key="$4"
+  local git_url="ssh://gatherlink@${ip}${port:+:${port}}/home/gatherlink/repos/gatherlink.git"
+  remote "${label}-prepare-repo" "${ip}" "${port}" "${host_key}" \
     "mkdir -p /home/gatherlink/repos && if [ ! -d /home/gatherlink/repos/gatherlink.git ]; then git init --bare /home/gatherlink/repos/gatherlink.git; fi && git --git-dir=/home/gatherlink/repos/gatherlink.git symbolic-ref HEAD refs/heads/${BRANCH} || true"
-  log_cmd "${label}-push" "git push ssh://gatherlink@${ip}/home/gatherlink/repos/gatherlink.git HEAD:${BRANCH}"
+  log_cmd "${label}-push" "git push ${git_url} HEAD:${BRANCH}"
   (
     cd "${REPO_ROOT}"
-    GIT_SSH_COMMAND="${PLINK} -batch -agent -hostkey ${host_key}" \
-      git push --force "ssh://gatherlink@${ip}/home/gatherlink/repos/gatherlink.git" "HEAD:refs/heads/${BRANCH}"
+    if [[ "${TRANSPORT}" == "ssh" ]]; then
+      GIT_SSH_COMMAND="ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new" \
+        git push --force "${git_url}" "HEAD:refs/heads/${BRANCH}"
+    else
+      local git_port_args=""
+      if [[ -n "${port}" ]]; then
+        git_port_args=" -P ${port}"
+      fi
+      GIT_SSH_COMMAND="${PLINK} -batch -agent -hostkey ${host_key}${git_port_args}" \
+        git push --force "ssh://gatherlink@${ip}/home/gatherlink/repos/gatherlink.git" "HEAD:refs/heads/${BRANCH}"
+    fi
   )
   local install_command=""
   if [[ "${BUILD_RUST}" -eq 1 ]]; then
     install_command=" && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt >/tmp/gatherlink-pip-install.log && .venv/bin/pip install -e . >>/tmp/gatherlink-pip-install.log && .venv/bin/maturin develop --manifest-path crates/pybindings/Cargo.toml --release >/tmp/gatherlink-maturin.log"
   fi
-  remote "${label}-checkout" "${ip}" "${host_key}" \
+  remote "${label}-checkout" "${ip}" "${port}" "${host_key}" \
     "mkdir -p /home/gatherlink/src && if [ ! -d /home/gatherlink/src/gatherlink/.git ]; then rm -rf /home/gatherlink/src/gatherlink && git clone /home/gatherlink/repos/gatherlink.git /home/gatherlink/src/gatherlink; fi && cd /home/gatherlink/src/gatherlink && git fetch origin && git reset --hard origin/${BRANCH}${install_command}"
 }
 
@@ -147,8 +188,8 @@ cat >"${REPORT}" <<REPORT
 REPORT
 
 step "Sync"
-sync_node "node-a" "${IP_A}" "${HOST_KEY_A}"
-sync_node "node-b" "${IP_B}" "${HOST_KEY_B}"
+sync_node "node-a" "${IP_A}" "${PORT_A}" "${HOST_KEY_A}"
+sync_node "node-b" "${IP_B}" "${PORT_B}" "${HOST_KEY_B}"
 record "source synced by Git to both VMs"
 
 step "Prepare Configs"

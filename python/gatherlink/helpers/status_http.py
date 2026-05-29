@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import secrets
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
+from hmac import compare_digest
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
@@ -18,6 +22,38 @@ from gatherlink.runtime.services import ServiceRegistry
 EXPERIMENTAL_REST_LABEL = "EXPERIMENTAL"
 DEFAULT_WRITE_WINDOW_SECONDS = 3600
 LOOPBACK_HOSTNAMES = frozenset({"localhost"})
+API_KEY_HASH_PREFIX = "sha256:"
+API_KEY_BYTES = 32
+
+
+def generate_status_http_api_key() -> str:
+    """Generate a high-entropy local REST API key for operator tooling."""
+    return secrets.token_urlsafe(API_KEY_BYTES)
+
+
+def hash_status_http_api_key(api_key: str) -> str:
+    """Return the stable stored representation of a status HTTP API key."""
+    key = api_key.strip()
+    if not key:
+        raise ValueError("status HTTP API key must not be empty")
+    return f"{API_KEY_HASH_PREFIX}{sha256(key.encode('utf-8')).hexdigest()}"
+
+
+def normalize_status_http_key_hashes(values: Iterable[str]) -> tuple[str, ...]:
+    """Normalize configured key hashes and fail closed on unsupported formats."""
+    hashes: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized:
+            continue
+        if not normalized.startswith(API_KEY_HASH_PREFIX) or len(normalized) != len(API_KEY_HASH_PREFIX) + 64:
+            raise ValueError("status HTTP API key hashes must use sha256:<64 hex chars>")
+        try:
+            int(normalized.removeprefix(API_KEY_HASH_PREFIX), 16)
+        except ValueError as exc:
+            raise ValueError("status HTTP API key hash must be hex encoded") from exc
+        hashes.append(normalized)
+    return tuple(dict.fromkeys(hashes))
 
 
 @dataclass(frozen=True)
@@ -35,6 +71,7 @@ class StatusHttpConfig:
     allow_non_loopback: bool = False
     write_window_seconds: int = DEFAULT_WRITE_WINDOW_SECONDS
     started_at: datetime | None = None
+    api_key_hashes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate bind policy and normalize helper timing."""
@@ -47,6 +84,10 @@ class StatusHttpConfig:
                 "status HTTP helper binds to loopback only by default; pass the explicit danger flag "
                 "to bind a non-loopback address"
             )
+        normalized_hashes = normalize_status_http_key_hashes(self.api_key_hashes)
+        if not normalized_hashes:
+            raise ValueError("status HTTP helper requires at least one API key hash")
+        object.__setattr__(self, "api_key_hashes", normalized_hashes)
         if self.started_at is not None:
             return
         object.__setattr__(self, "started_at", datetime.now(UTC))
@@ -82,6 +123,8 @@ def gather_status_payload(config: StatusHttpConfig, *, registry: ServiceRegistry
         "api": {
             "label": EXPERIMENTAL_REST_LABEL,
             "stability": "experimental",
+            "api_key_required": True,
+            "auth_schemes": ["Authorization: Bearer <key>", "X-Gatherlink-Api-Key: <key>"],
             "read_only_after": config.write_expires_at.isoformat(),
             "write_window_seconds": config.write_window_seconds,
             "writes_enabled": config.writes_enabled,
@@ -178,6 +221,8 @@ def build_status_http_server(
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
+            if not _authorize_request(self, config, diagnostics_bus=diagnostics_bus):
+                return
             payload = gather_status_payload(config, registry=service_registry)
             if self.path in {"/", "/text"}:
                 _write_response(self, "text/plain; charset=utf-8", render_status_text(payload).encode("utf-8"))
@@ -189,6 +234,8 @@ def build_status_http_server(
             self.send_error(HTTPStatus.NOT_FOUND, "unknown status endpoint")
 
         def do_POST(self) -> None:
+            if not _authorize_request(self, config, diagnostics_bus=diagnostics_bus):
+                return
             if not config.writes_enabled:
                 _publish_status_http_write_event(
                     diagnostics_bus,
@@ -197,7 +244,12 @@ def build_status_http_server(
                     message="experimental status HTTP write window expired",
                     path=self.path,
                 )
-                self.send_error(HTTPStatus.FORBIDDEN, "experimental write window expired")
+                _write_json_error(
+                    self,
+                    HTTPStatus.FORBIDDEN,
+                    code="write_window_expired",
+                    message="experimental write window expired",
+                )
                 return
             parsed = urlparse(self.path)
             prefix = "/v1/services/"
@@ -206,7 +258,12 @@ def build_status_http_server(
                 service_name = unquote(parsed.path[len(prefix) : -len(suffix)])
                 self._close_service(service_name)
                 return
-            self.send_error(HTTPStatus.NOT_FOUND, "unknown experimental write endpoint")
+            _write_json_error(
+                self,
+                HTTPStatus.NOT_FOUND,
+                code="unknown_endpoint",
+                message="unknown experimental write endpoint",
+            )
 
         def _close_service(self, service_name: str) -> None:
             try:
@@ -221,7 +278,7 @@ def build_status_http_server(
                     service=service_name,
                     error=str(exc),
                 )
-                self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                _write_json_error(self, HTTPStatus.BAD_REQUEST, code="service_close_failed", message=str(exc))
                 return
             body = json.dumps(
                 {
@@ -270,6 +327,60 @@ def _publish_status_http_write_event(
             details=details,
         )
     )
+
+
+def _authorize_request(
+    handler: BaseHTTPRequestHandler,
+    config: StatusHttpConfig,
+    *,
+    diagnostics_bus: DiagnosticsBus | None = None,
+) -> bool:
+    supplied = _extract_api_key(handler)
+    if supplied is None:
+        _publish_status_http_write_event(
+            diagnostics_bus,
+            code="helper.status_http.auth_failed",
+            severity="warning",
+            message="status HTTP request missing API key",
+            path=handler.path,
+            reason="missing",
+        )
+        _write_json_error(handler, HTTPStatus.UNAUTHORIZED, code="missing_api_key", message="missing API key")
+        return False
+    supplied_hash = hash_status_http_api_key(supplied)
+    if any(compare_digest(supplied_hash, expected) for expected in config.api_key_hashes):
+        return True
+    _publish_status_http_write_event(
+        diagnostics_bus,
+        code="helper.status_http.auth_failed",
+        severity="warning",
+        message="status HTTP request used an invalid API key",
+        path=handler.path,
+        reason="invalid",
+    )
+    _write_json_error(handler, HTTPStatus.UNAUTHORIZED, code="invalid_api_key", message="invalid API key")
+    return False
+
+
+def _extract_api_key(handler: BaseHTTPRequestHandler) -> str | None:
+    authorization = handler.headers.get("Authorization")
+    if authorization:
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer" and value.strip():
+            return value.strip()
+    header_key = handler.headers.get("X-Gatherlink-Api-Key")
+    if header_key and header_key.strip():
+        return header_key.strip()
+    return None
+
+
+def _write_json_error(handler: BaseHTTPRequestHandler, status: HTTPStatus, *, code: str, message: str) -> None:
+    body = json.dumps({"ok": False, "error": {"code": code, "message": message}}, sort_keys=True).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "application/json; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
 
 
 def _write_response(handler: BaseHTTPRequestHandler, content_type: str, body: bytes) -> None:

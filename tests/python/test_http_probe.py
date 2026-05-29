@@ -15,6 +15,7 @@ fetch_http = _HTTP_PROBE.fetch_http
 
 class _TextHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        self.server.last_authorization = self.headers.get("Authorization")  # type: ignore[attr-defined]
         payload = b"probe-ok"
         self.send_response(200)
         self.send_header("Content-Length", str(len(payload)))
@@ -39,3 +40,19 @@ def test_fetch_http_reads_response_body_from_direct_tcp_endpoint() -> None:
 
     _headers, _separator, body = response.partition(b"\r\n\r\n")
     assert body == b"probe-ok"
+
+
+def test_fetch_http_can_send_bearer_auth_header() -> None:
+    server = socketserver.TCPServer(("127.0.0.1", 0), _TextHandler)
+    server.last_authorization = None  # type: ignore[attr-defined]
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        fetch_http(target_host="127.0.0.1", target_port=port, timeout=2, bearer_token="probe-token")
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+    assert server.last_authorization == "Bearer probe-token"  # type: ignore[attr-defined]

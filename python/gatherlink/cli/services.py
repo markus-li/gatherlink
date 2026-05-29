@@ -1389,10 +1389,13 @@ def _path_latency_context(control_metadata: dict[str, object], path_name: str) -
         reason = str(latency.get("rejection_reason") or "sample")
         return f"src=reject reason={reason} tl={_latency_pair(latency, 'tx')} rl={_latency_pair(latency, 'rx')}"
     confidence = str(latency.get("confidence") or "-")
-    return (
+    context = (
         f"src={_short_latency_source(source)} conf={confidence} "
         f"tl={_latency_pair(latency, 'tx')} rl={_latency_pair(latency, 'rx')}"
     )
+    if latency.get("rejection_reason"):
+        context += f" rej={latency.get('rejection_reason')}"
+    return context
 
 
 def _short_latency_source(source: str) -> str:

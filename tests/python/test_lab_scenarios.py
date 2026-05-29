@@ -1321,6 +1321,7 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
         record_control_path_capacity,
         record_control_path_latency,
         record_control_path_latency_quality,
+        record_control_path_latency_stats,
         record_sink_time,
     )
     from gatherlink.protocol import (
@@ -1341,8 +1342,9 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
         path_capacity_bps={1: (3_000_000, None), 2: (None, 1_500_000)},
         path_latency_us={1: (12_000, 10_000, None, None), 2: (None, None, 14_000, 11_000)},
         path_latency_quality={1: ("data-traffic-one-way", "good"), 2: ("clock-synced-one-way", "warming")},
+        path_latency_stats={1: (18_000, 2_000, 800, 900, 13_500, 14_500), 2: (28_000, 4_000, 1_200, 1_300, 17_000, 18_000)},
         path_mtu={1: (1500, 1200, None, None), 2: (1400, 1200, None, None)},
-        path_pressure={1: (1200, 3, 4096, 2500, 1, 2, 3, 4, 5, 8192, 12_000, 6, 2500)},
+        path_pressure={1: (1200, 3, 4096, 2500, 1, 2, 3, 4, 5, 8192, 12_000, 6, 2500, 99)},
         scheduler_status=("coordinated_adaptive", "flowlet_adaptive", "adaptive"),
         data_transmit_samples=[(1, 2048, 16, 5_000_000)],
         path_clock_sync=[
@@ -1376,8 +1378,12 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
     assert frame.path_capacity_bps == {1: (3_000_000, None), 2: (None, 1_500_000)}
     assert frame.path_latency_us == {1: (12_000, 10_000, None, None), 2: (None, None, 14_000, 11_000)}
     assert frame.path_latency_quality == {1: ("data-traffic-one-way", "good"), 2: ("clock-synced-one-way", "warming")}
+    assert frame.path_latency_stats == {
+        1: (18_000, 2_000, 800, 900, 13_500, 14_500),
+        2: (28_000, 4_000, 1_200, 1_300, 17_000, 18_000),
+    }
     assert frame.path_mtu == {1: (1500, 1200, None, None), 2: (1400, 1200, None, None)}
-    assert frame.path_pressure == {1: (1200, 3, 4096, 2500, 1, 2, 3, 4, 5, 8192, 12_000, 6, 2500)}
+    assert frame.path_pressure == {1: (1200, 3, 4096, 2500, 1, 2, 3, 4, 5, 8192, 12_000, 6, 2500, 99)}
     assert frame.scheduler_status == ("coordinated_adaptive", "flowlet_adaptive", "adaptive")
     assert frame.data_transmit_samples == [(1, 2048, 16, 5_000_000)]
     assert frame.internal_clock_sync == [
@@ -1392,15 +1398,37 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
     record_control_metadata_sent(
         metadata,
         len(wire_frame),
-        message_count=19,
+        message_count=21,
         path_metadata=frame.path_metadata,
         path_capacity={
             "path-a": {"tx_bps": 3_000_000, "rx_bps": None, "source": "detected", "updated_at": None},
             "path-b": {"tx_bps": None, "rx_bps": 1_500_000, "source": "detected", "updated_at": None},
         },
         path_latency={
-            "path-a": {"tx_current_us": 12_000, "tx_mean_us": 10_000, "source": "reply-rtt-half", "updated_at": None},
-            "path-b": {"rx_current_us": 14_000, "rx_mean_us": 11_000, "source": "reply-rtt-half", "updated_at": None},
+            "path-a": {
+                "tx_current_us": 12_000,
+                "tx_mean_us": 10_000,
+                "source": "reply-rtt-half",
+                "rtt_us": 18_000,
+                "clock_error_us": 2_000,
+                "tx_jitter_us": 800,
+                "rx_jitter_us": 900,
+                "tx_p95_us": 13_500,
+                "rx_p95_us": 14_500,
+                "updated_at": None,
+            },
+            "path-b": {
+                "rx_current_us": 14_000,
+                "rx_mean_us": 11_000,
+                "source": "reply-rtt-half",
+                "rtt_us": 28_000,
+                "clock_error_us": 4_000,
+                "tx_jitter_us": 1_200,
+                "rx_jitter_us": 1_300,
+                "tx_p95_us": 17_000,
+                "rx_p95_us": 18_000,
+                "updated_at": None,
+            },
         },
         path_mtu={
             "path-a": {
@@ -1425,6 +1453,7 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
                 "scheduler_predicted_delivery_us": 12_000,
                 "reorder_buffer_packets": 6,
                 "reorder_buffer_oldest_age_us": 2500,
+                "observed_packets": 99,
                 "source": "local-path-stats",
             }
         },
@@ -1436,13 +1465,14 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
     record_control_path_capacity(metadata, frame.path_capacity_bps, {1: "path-a", 2: "path-b"}, {})
     record_control_path_latency(metadata, frame.path_latency_us, {1: "path-a", 2: "path-b"}, {})
     record_control_path_latency_quality(metadata, frame.path_latency_quality, {1: "path-a", 2: "path-b"}, {})
+    record_control_path_latency_stats(metadata, frame.path_latency_stats, {1: "path-a", 2: "path-b"}, {})
     record_sink_time(metadata, frame.sink_time, {1: "path-a"}, received_at_internal_us=1_010_000)
 
     assert metadata["sent"]["frames"] == 1
-    assert metadata["sent"]["messages"] == 19
+    assert metadata["sent"]["messages"] == 21
     assert metadata["sent"]["bytes"] == len(wire_frame)
     assert metadata["received"]["frames"] == 1
-    assert metadata["received"]["messages"] == 19
+    assert metadata["received"]["messages"] == 21
     assert metadata["received"]["bytes"] == len(wire_frame)
     assert metadata["path_control"]["path-a"]["tx"]["frames"] == 1
     assert metadata["path_control"]["path-b"]["rx"]["frames"] == 1
@@ -1477,12 +1507,23 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
     assert metadata["path_latency"]["path-a"]["rx_current_us"] == 12_000
     assert metadata["path_latency"]["path-a"]["source"] == "data-traffic-one-way"
     assert metadata["path_latency"]["path-a"]["confidence"] == "good"
+    assert metadata["path_latency"]["path-a"]["rtt_us"] == 18_000
+    assert metadata["path_latency"]["path-a"]["clock_error_us"] == 2_000
+    assert metadata["path_latency"]["path-a"]["tx_jitter_us"] == 900
+    assert metadata["path_latency"]["path-a"]["rx_jitter_us"] == 800
+    assert metadata["path_latency"]["path-a"]["tx_p95_us"] == 14_500
+    assert metadata["path_latency"]["path-a"]["rx_p95_us"] == 13_500
     assert metadata["path_latency"]["path-b"]["tx_current_us"] == 14_000
     assert metadata["path_latency"]["path-b"]["rx_current_us"] == 14_000
     assert metadata["path_latency"]["path-b"]["source"] == "clock-synced-one-way"
     assert metadata["path_latency"]["path-b"]["confidence"] == "warming"
+    assert metadata["path_latency"]["path-b"]["rtt_us"] == 28_000
+    assert metadata["path_latency"]["path-b"]["clock_error_us"] == 4_000
     scheduler_snapshot = scheduler_metrics_from_control_metadata(metadata, default_path_ids={"path-a": 1, "path-b": 2})
     assert scheduler_snapshot.paths["path-a"].has_trusted_real_data_latency
+    assert scheduler_snapshot.paths["path-a"].latency_clock_error_us == 2_000
+    assert scheduler_snapshot.paths["path-a"].tx_jitter_us == 900
+    assert scheduler_snapshot.paths["path-a"].rx_jitter_us == 800
     assert not scheduler_snapshot.paths["path-b"].has_trusted_real_data_latency
     assert metadata["path_mtu_count"] == 2
     assert metadata["path_mtu"]["path-a"]["tx_frame_mtu"] == 1200
@@ -1495,10 +1536,26 @@ def test_lab_control_frame_carries_path_metadata_for_sink_names() -> None:
     assert metadata["path_pressure"]["path-a"]["scheduler_in_flight_packets"] == 5
     assert metadata["path_pressure"]["path-a"]["scheduler_predicted_delivery_us"] == 12_000
     assert metadata["path_pressure"]["path-a"]["reorder_buffer_packets"] == 6
+    assert metadata["path_pressure"]["path-a"]["observed_packets"] == 99
     assert metadata["internal_clock"]["offset_us"] == 12
     assert metadata["sink_time"]["ntp_state"] == "synchronized"
     assert metadata["sink_time"]["path"] == "path-a"
     assert metadata["sink_time"]["sink_sent_unix_us"] == 1_776_000_000_000_000
+
+
+def test_control_payload_latency_stats_accept_zero_optional_metrics() -> None:
+    """Zero jitter/error metrics are valid early-window unknowns, not fatal payloads."""
+    from gatherlink.protocol import decode_control_payload, encode_control_payload
+
+    frame = decode_control_payload(
+        encode_control_payload(
+            {1: "path-a"},
+            path_latency_stats={1: (0, 0, 0, 1, 0, 2)},
+        )
+    )
+
+    assert frame is not None
+    assert frame.path_latency_stats == {1: (None, None, None, 1, None, 2)}
 
 
 def test_control_metadata_dispatch_handles_clock_sync_requests_and_responses(monkeypatch) -> None:
@@ -1904,8 +1961,8 @@ def test_path_latency_tracker_records_directional_samples_and_rejects_impossible
         clock_error_us=100,
     )
 
-    assert rejected["path-a"]["source"] == "rejected"
-    assert rejected["path-a"]["confidence"] == "rejected"
+    assert rejected["path-a"]["source"] == "clock-synced-one-way"
+    assert rejected["path-a"]["confidence"] == "good"
     assert rejected["path-a"]["rejection_reason"] == "impossible-rtt"
     assert tracker.dirty_snapshot()["path-a"]["tx_current_us"] == 3_000
 
@@ -1918,7 +1975,8 @@ def test_path_latency_tracker_records_directional_samples_and_rejects_impossible
         clock_error_us=500,
     )
 
-    assert one_way_rejected["path-a"]["source"] == "rejected"
+    assert one_way_rejected["path-a"]["source"] == "clock-synced-one-way"
+    assert one_way_rejected["path-a"]["confidence"] == "good"
     assert one_way_rejected["path-a"]["rejection_reason"] == "impossible-rtt"
     assert tracker.dirty_snapshot()["path-a"]["tx_current_us"] == 3_000
 
@@ -1929,9 +1987,23 @@ def test_path_latency_tracker_records_directional_samples_and_rejects_impossible
         confidence="warming",
     )
 
-    assert unreasonable["path-a"]["source"] == "rejected"
+    assert unreasonable["path-a"]["source"] == "clock-synced-one-way"
+    assert unreasonable["path-a"]["confidence"] == "good"
     assert unreasonable["path-a"]["rejection_reason"] == "unreasonable-sample"
     assert tracker.dirty_snapshot()["path-a"]["tx_current_us"] == 3_000
+
+    cold_tracker = PathLatencyTracker(["path-b"])
+    cold_rejected = cold_tracker.observe_directional(
+        "path-b",
+        tx_one_way_us=10_000,
+        rx_one_way_us=10_000,
+        rtt_us=8_000,
+        clock_error_us=100,
+    )
+
+    assert cold_rejected["path-b"]["source"] == "rejected"
+    assert cold_rejected["path-b"]["confidence"] == "rejected"
+    assert cold_rejected["path-b"]["rejection_reason"] == "impossible-rtt"
 
 
 def test_data_traffic_latency_tracker_matches_real_transmit_samples() -> None:
@@ -1959,6 +2031,7 @@ def test_data_traffic_latency_tracker_matches_real_transmit_samples() -> None:
     )
 
     assert changed["path-a"]["source"] == "data-traffic-one-way"
+    assert changed["path-a"]["confidence"] == "good"
     assert changed["path-a"]["tx_current_us"] == 2_000
 
     delayed_data_tracker = DataTrafficLatencyTracker({1: "path-a"})
@@ -1981,6 +2054,72 @@ def test_data_traffic_latency_tracker_matches_real_transmit_samples() -> None:
         clock_error_us=1_000,
     )
     assert delayed["path-a"]["tx_current_us"] == 2_000
+
+    authoritative_tracker = PathLatencyTracker(["path-a"])
+    authoritative_data_tracker = DataTrafficLatencyTracker({1: "path-a"})
+    authoritative_data_tracker.observe_local_samples(
+        {"rx": [{"path_id": 1, "sequence": 9000, "packet_count": 1, "observed_at_us": 9_001_500}]},
+        local_clock_offset_us=None,
+    )
+    authoritative_changed = authoritative_data_tracker.observe_peer_transmit_samples(
+        [(1, 9000, 1, 9_000_000)],
+        peer_scope=None,
+        local_clock_offset_us=None,
+        local_clock_is_authoritative=True,
+        latency_tracker=authoritative_tracker,
+        rtt_us=4_000,
+        clock_error_us=1_000,
+    )
+
+    assert authoritative_changed["path-a"]["confidence"] == "good"
+
+    warming_tracker = PathLatencyTracker(["path-a"])
+    warming_data_tracker = DataTrafficLatencyTracker({1: "path-a"})
+    warming_data_tracker.observe_local_samples(
+        {"rx": [{"path_id": 1, "sequence": 9100, "packet_count": 1, "observed_at_us": 9_101_500}]},
+        local_clock_offset_us=None,
+    )
+    warming_changed = warming_data_tracker.observe_peer_transmit_samples(
+        [(1, 9100, 1, 9_100_000)],
+        peer_scope=None,
+        local_clock_offset_us=None,
+        latency_tracker=warming_tracker,
+        rtt_us=4_000,
+        clock_error_us=1_000,
+    )
+
+    assert warming_changed["path-a"]["confidence"] == "warming"
+
+
+def test_path_latency_tracker_preserves_good_real_data_provenance() -> None:
+    from gatherlink.paths.telemetry import PathLatencyTracker
+
+    tracker = PathLatencyTracker(["path-a"])
+    real_data = tracker.observe_directional(
+        "path-a",
+        tx_one_way_us=2_000,
+        source="data-traffic-one-way",
+        confidence="good",
+        rtt_us=5_000,
+        clock_error_us=1_000,
+    )
+
+    assert real_data["path-a"]["source"] == "data-traffic-one-way"
+    assert real_data["path-a"]["confidence"] == "good"
+
+    clock_probe = tracker.observe_directional(
+        "path-a",
+        tx_one_way_us=2_500,
+        source="clock-synced-one-way",
+        confidence="good",
+        rtt_us=5_000,
+        clock_error_us=1_000,
+    )
+
+    assert clock_probe["path-a"]["source"] == "data-traffic-one-way"
+    assert clock_probe["path-a"]["confidence"] == "good"
+    assert clock_probe["path-a"]["latest_probe_source"] == "clock-synced-one-way"
+    assert clock_probe["path-a"]["tx_current_us"] == 2_500
 
 
 def test_lab_control_state_drains_real_data_timing_samples() -> None:
@@ -2084,7 +2223,8 @@ def test_clock_sync_observations_feed_path_latency_tracker() -> None:
         {"path_latency_rejections": [{"path": "path-a", "reason": "offset-outlier"}]},
     )
 
-    assert metadata["path_latency"]["path-a"]["source"] == "rejected"
+    assert metadata["path_latency"]["path-a"]["source"] == "clock-synced-one-way"
+    assert metadata["path_latency"]["path-a"]["confidence"] == "good"
     assert metadata["path_latency"]["path-a"]["rejection_reason"] == "offset-outlier"
     assert metadata["path_latency"]["path-a"]["tx_current_us"] == 1_500
 
@@ -2109,6 +2249,25 @@ def test_service_monitor_path_latency_context_names_source_and_rejections() -> N
             "path-a",
         )
         == "src=clock conf=good tl=1.5/2.0ms rl=1.7/2.2ms"
+    )
+    assert (
+        _path_latency_context(
+            {
+                "path_latency": {
+                    "path-a": {
+                        "tx_current_us": 1_500,
+                        "tx_mean_us": 2_000,
+                        "rx_current_us": 1_700,
+                        "rx_mean_us": 2_200,
+                        "source": "clock-synced-one-way",
+                        "confidence": "good",
+                        "rejection_reason": "offset-outlier",
+                    }
+                }
+            },
+            "path-a",
+        )
+        == "src=clock conf=good tl=1.5/2.0ms rl=1.7/2.2ms rej=offset-outlier"
     )
     assert (
         _path_latency_context(

@@ -1,5 +1,19 @@
 """Gatherlink config package."""
 
+from gatherlink.config.migration import (
+    ConfigMigrationRegistry,
+    ConfigMigrationResult,
+    ConfigMigrationStep,
+    migrate_config_dict,
+)
+
+__all__ = [
+    "ConfigMigrationRegistry",
+    "ConfigMigrationResult",
+    "ConfigMigrationStep",
+    "migrate_config_dict",
+]
+
 from gatherlink.config.expansion import expand_config
 from gatherlink.config.loader import load_config_dict
 from gatherlink.config.models import (

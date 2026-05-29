@@ -415,6 +415,7 @@ def run_core_service(
             )
             data_latency_changes = data_traffic_latency_tracker.promote_pending_peer_transmit_samples(
                 local_clock_offset_us=_current_clock_offset_us(decoded_control_metadata),
+                local_clock_is_authoritative=runtime_config.role == "server",
                 latency_tracker=path_latency_tracker,
                 rtt_us=_current_clock_rtt_us(decoded_control_metadata),
                 clock_error_us=_current_clock_error_us(decoded_control_metadata),
@@ -984,6 +985,7 @@ def _drain_python_reserved_services(
         clock_sync_responses=clock_sync_responses,
         path_latency_tracker=path_latency_tracker,
         data_traffic_latency_tracker=data_traffic_latency_tracker,
+        local_clock_is_authoritative=runtime_config.role == "server",
         extra_handlers=extra_handlers,
         logger=logger.warning,
     )

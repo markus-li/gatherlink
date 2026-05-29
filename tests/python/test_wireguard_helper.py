@@ -155,6 +155,12 @@ def test_wireguard_setup_generates_valid_split_multipath_configs() -> None:
     assert {service["name"] for service in client["services"]} == {"wireguard-stable", "wireguard-fast"}
     assert client["security"]["send_key"] == server["security"]["receive_key"]
     assert client["security"]["receive_key"] == server["security"]["send_key"]
+    assert any("doctor --config gatherlink-client.json" in step for step in setup.next_steps)
+    assert any("ping or curl" in step for step in setup.next_steps)
+    assert any("services status" in step for step in setup.next_steps)
+    assert any("services close" in step for step in setup.next_steps)
+    assert "Traffic check:" in setup.files["README.md"]
+    assert "Cleanup:" in setup.files["README.md"]
 
 
 def test_wireguard_setup_cli_writes_valid_local_files(tmp_path) -> None:

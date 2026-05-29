@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 from gatherlink.cli.main import app
+from gatherlink.cli.run import TCP_BIASED_DATAPLANE_BATCH_SIZE, _effective_batch_size
 from gatherlink.config import detect_config_format, load_config_dict, supported_schema_versions, validate_config_file
 from gatherlink.config.models import GatherlinkConfig
+from gatherlink.runtime.runner import DEFAULT_DATAPLANE_BATCH_SIZE
 from typer.testing import CliRunner
 
 EXAMPLES = Path("configs/examples")
@@ -123,6 +125,31 @@ def test_scheduler_accepts_traffic_bias_hint() -> None:
 
     assert config.scheduler.mode == "coordinated_adaptive"
     assert config.scheduler.traffic_bias == "tcp"
+
+
+def test_run_cli_uses_tcp_biased_default_batch_for_tcp_biased_configs() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        role="client",
+        peer="remote",
+        scheduler={"mode": "coordinated_adaptive", "traffic_bias": "tcp"},
+        services=[{"name": "wireguard", "target": "127.0.0.1:51820"}],
+    )
+
+    assert _effective_batch_size(config, None) == TCP_BIASED_DATAPLANE_BATCH_SIZE
+    assert _effective_batch_size(config, 256) == 256
+
+
+def test_run_cli_keeps_historical_default_batch_for_raw_udp_configs() -> None:
+    config = GatherlinkConfig(
+        schema_version=1,
+        role="client",
+        peer="remote",
+        scheduler={"mode": "coordinated_adaptive", "traffic_bias": "udp"},
+        services=[{"name": "udp-main", "target": "127.0.0.1:9999", "traffic_class": "udp_bulk"}],
+    )
+
+    assert _effective_batch_size(config, None) == DEFAULT_DATAPLANE_BATCH_SIZE
 
 
 def test_security_sessions_must_have_unique_local_receiver_indexes() -> None:

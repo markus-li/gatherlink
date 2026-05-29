@@ -1,6 +1,6 @@
 [project]
 name = "gatherlink"
-version = "0.9.3"
+version = "0.9.4"
 description = "Carrier-aware multipath UDP transport"
 license = { text = "AGPL-3.0-or-later" }
 requires-python = ">=3.12"

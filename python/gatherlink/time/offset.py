@@ -23,6 +23,10 @@ DEFAULT_CLOCK_SYNC_MEAN_WINDOW_SECONDS = 30.0
 CLOCK_SYNC_GOOD_MIN_SAMPLES = 3
 CLOCK_SYNC_MAX_OFFSET_JUMP_US = 250_000
 CLOCK_SYNC_ERROR_FLOOR_US = 1_000
+CLOCK_SYNC_MIN_DELAY_MARGIN_US = 2_000
+CLOCK_SYNC_MIN_DELAY_MARGIN_NUMERATOR = 5
+CLOCK_SYNC_MIN_DELAY_MARGIN_DENOMINATOR = 4
+CLOCK_SYNC_MIN_WEIGHT_JITTER_US = 1_000
 
 
 @dataclass(frozen=True)
@@ -178,16 +182,9 @@ class InternalClockSyncClient:
                 receive_us=message.receive_us,
                 transmit_us=message.transmit_us,
                 destination_us=destination_us,
-                offset_us=int(aggregate["offset_us"]),
+                offset_us=int(path_aggregate["offset_us"]),
             )
-            path_summaries[public_path_name] = {
-                "rtt_us": rtt_us,
-                "mean_rtt_us": int(path_aggregate["rtt_us"]),
-                "best_rtt_us": int(path_aggregate["best_rtt_us"]),
-                "error_budget_us": int(path_aggregate["error_budget_us"]),
-                "confidence": str(path_aggregate["confidence"]),
-                "samples": len(path_samples),
-            }
+            path_summaries = _path_sample_summaries(list(self._samples))
             path_latency_observations.append(
                 {
                     "path": public_path_name,
@@ -197,7 +194,7 @@ class InternalClockSyncClient:
                     "confidence": str(path_aggregate["confidence"]),
                     "rtt_us": rtt_us,
                     "clock_error_us": int(path_aggregate["error_budget_us"]),
-                    "offset_us": int(aggregate["offset_us"]),
+                    "offset_us": int(path_aggregate["offset_us"]),
                 }
             )
             update = {
@@ -206,15 +203,21 @@ class InternalClockSyncClient:
                 "mean_offset_us": aggregate["offset_us"],
                 "rtt_us": rtt_us,
                 "mean_rtt_us": aggregate["rtt_us"],
+                "base_rtt_us": aggregate["base_rtt_us"],
                 "best_rtt_us": aggregate["best_rtt_us"],
                 "error_budget_us": aggregate["error_budget_us"],
+                "uncertainty_us": aggregate["uncertainty_us"],
+                "drift_ppb": aggregate["drift_ppb"],
                 "confidence": aggregate["confidence"],
                 "samples": len(self._samples),
                 "path": public_path_name,
                 "path_samples": len(path_samples),
                 "path_mean_offset_us": path_aggregate["offset_us"],
                 "path_mean_rtt_us": path_aggregate["rtt_us"],
+                "path_base_rtt_us": path_aggregate["base_rtt_us"],
                 "path_error_budget_us": path_aggregate["error_budget_us"],
+                "path_uncertainty_us": path_aggregate["uncertainty_us"],
+                "path_drift_ppb": path_aggregate["drift_ppb"],
                 "path_confidence": path_aggregate["confidence"],
                 "path_summaries": dict(path_summaries),
                 "path_latency_observations": list(path_latency_observations),
@@ -270,28 +273,139 @@ def _sample_summary(samples: list[_ClockSyncSample]) -> dict[str, int | str]:
         return {
             "offset_us": 0,
             "rtt_us": 0,
+            "base_rtt_us": 0,
             "best_rtt_us": 0,
             "error_budget_us": 0,
+            "uncertainty_us": 0,
+            "drift_ppb": 0,
             "confidence": "warming",
         }
-    offsets = [sample.offset_us for sample in samples]
+    low_delay_samples = _low_delay_samples(samples)
+    offsets = [sample.offset_us for sample in low_delay_samples]
     rtts = [sample.rtt_us for sample in samples]
+    low_delay_rtts = [sample.rtt_us for sample in low_delay_samples]
     best_rtt_us = min(rtts)
+    base_rtt_us = best_rtt_us
     mean_rtt_us = int(sum(rtts) / len(rtts))
-    # Median offset is deliberately used for the compatibility field named "mean_offset_us"; the historical key
-    # remains stable while the estimator becomes robust against transient scheduling stalls.
-    offset_us = int(median(offsets))
-    error_budget_us = max(
-        CLOCK_SYNC_ERROR_FLOOR_US, best_rtt_us // 2, _mean_absolute_offset_jitter_us(offsets, offset_us)
+    # The compatibility field named "mean_offset_us" is now a weighted median.
+    # Lowest-delay samples and stable paths get the most influence, while the
+    # historical key stays stable for callers that already consume it.
+    offset_us = _weighted_median_offset_us(low_delay_samples)
+    offset_jitter_us = _mean_absolute_offset_jitter_us(offsets, offset_us)
+    path_spread_us = _path_offset_spread_us(low_delay_samples)
+    uncertainty_us = max(
+        CLOCK_SYNC_ERROR_FLOOR_US,
+        min(low_delay_rtts) // 2,
+        offset_jitter_us,
+        path_spread_us // 2,
     )
+    error_budget_us = uncertainty_us
+    drift_ppb = _drift_ppb(low_delay_samples)
     confidence = "good" if len(samples) >= CLOCK_SYNC_GOOD_MIN_SAMPLES else "warming"
     return {
         "offset_us": offset_us,
         "rtt_us": mean_rtt_us,
+        "base_rtt_us": base_rtt_us,
         "best_rtt_us": best_rtt_us,
         "error_budget_us": error_budget_us,
+        "uncertainty_us": uncertainty_us,
+        "drift_ppb": drift_ppb,
         "confidence": confidence,
     }
+
+
+def _path_sample_summaries(samples: list[_ClockSyncSample]) -> dict[str, dict[str, int | str]]:
+    """Summarize every path currently represented in the rolling clock window."""
+    summaries: dict[str, dict[str, int | str]] = {}
+    for path_name in sorted({sample.path_name for sample in samples}):
+        path_samples = [sample for sample in samples if sample.path_name == path_name]
+        path_aggregate = _sample_summary(path_samples)
+        summaries[path_name] = {
+            "mean_rtt_us": int(path_aggregate["rtt_us"]),
+            "base_rtt_us": int(path_aggregate["base_rtt_us"]),
+            "best_rtt_us": int(path_aggregate["best_rtt_us"]),
+            "error_budget_us": int(path_aggregate["error_budget_us"]),
+            "uncertainty_us": int(path_aggregate["uncertainty_us"]),
+            "drift_ppb": int(path_aggregate["drift_ppb"]),
+            "confidence": str(path_aggregate["confidence"]),
+            "samples": len(path_samples),
+        }
+    return summaries
+
+
+def _low_delay_samples(samples: list[_ClockSyncSample]) -> list[_ClockSyncSample]:
+    """Return samples closest to each path's minimum RTT, where queueing is least likely."""
+    base_by_path: dict[str, int] = {}
+    for sample in samples:
+        base_by_path[sample.path_name] = min(sample.rtt_us, base_by_path.get(sample.path_name, sample.rtt_us))
+    selected = [
+        sample
+        for sample in samples
+        if sample.rtt_us
+        <= max(
+            base_by_path[sample.path_name] + CLOCK_SYNC_MIN_DELAY_MARGIN_US,
+            base_by_path[sample.path_name]
+            * CLOCK_SYNC_MIN_DELAY_MARGIN_NUMERATOR
+            // CLOCK_SYNC_MIN_DELAY_MARGIN_DENOMINATOR,
+        )
+    ]
+    return selected or samples
+
+
+def _weighted_median_offset_us(samples: list[_ClockSyncSample]) -> int:
+    """Return a robust multi-path offset consensus weighted by delay and stability."""
+    weighted = sorted((sample.offset_us, _sample_weight(sample, samples)) for sample in samples)
+    total_weight = sum(weight for _offset, weight in weighted)
+    midpoint = max(1, total_weight // 2)
+    cumulative = 0
+    for offset_us, weight in weighted:
+        cumulative += weight
+        if cumulative >= midpoint:
+            return int(offset_us)
+    return int(weighted[-1][0])
+
+
+def _sample_weight(sample: _ClockSyncSample, samples: list[_ClockSyncSample]) -> int:
+    """Return a positive integer weight for one low-delay sample."""
+    path_samples = [item for item in samples if item.path_name == sample.path_name]
+    global_base_rtt_us = min(item.rtt_us for item in samples)
+    path_offsets = [item.offset_us for item in path_samples]
+    path_median_us = int(median(path_offsets))
+    path_jitter_us = max(CLOCK_SYNC_MIN_WEIGHT_JITTER_US, _mean_absolute_offset_jitter_us(path_offsets, path_median_us))
+    return max(1, global_base_rtt_us * 1_000_000 // max(sample.rtt_us, 1) // path_jitter_us)
+
+
+def _path_offset_spread_us(samples: list[_ClockSyncSample]) -> int:
+    """Return spread between per-path offset medians as an asymmetry confidence signal."""
+    medians = []
+    for path_name in sorted({sample.path_name for sample in samples}):
+        offsets = [sample.offset_us for sample in samples if sample.path_name == path_name]
+        if offsets:
+            medians.append(int(median(offsets)))
+    if len(medians) < 2:
+        return 0
+    return max(medians) - min(medians)
+
+
+def _drift_ppb(samples: list[_ClockSyncSample]) -> int:
+    """Estimate slow peer-clock frequency drift without mixing path-asymmetry offsets."""
+    path_drifts = []
+    for path_name in sorted({sample.path_name for sample in samples}):
+        path_samples = sorted(
+            (sample for sample in samples if sample.path_name == path_name),
+            key=lambda sample: sample.observed_at,
+        )
+        if len(path_samples) < 2:
+            continue
+        first = path_samples[0]
+        last = path_samples[-1]
+        elapsed_seconds = last.observed_at - first.observed_at
+        if elapsed_seconds <= 0:
+            continue
+        path_drifts.append(int((last.offset_us - first.offset_us) * 1_000 / elapsed_seconds))
+    if not path_drifts:
+        return 0
+    return int(median(path_drifts))
 
 
 def _mean_absolute_offset_jitter_us(samples: list[int], median_us: int) -> int:

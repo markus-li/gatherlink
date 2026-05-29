@@ -1304,7 +1304,7 @@ def _run_rust_lab_dataplane(config: LabScenarioConfig, *, role: str) -> None:
                 next_control_metadata_at = time.monotonic() + control_cadence.next_interval(traffic_total)
             did_work = _step_rust_lab_dataplane(dataplane)
             if did_work:
-                _drain_lab_data_timing_samples(dataplane, control_state)
+                _drain_lab_data_timing_samples(dataplane, control_state, role=role)
             if (
                 control_state.pending_data_transmit_samples
                 and time.monotonic() >= control_state.next_data_sample_control_at
@@ -1428,6 +1428,7 @@ def _drain_reserved_service_events(
         local_targets_by_service_id=local_targets_by_service_id,
         path_latency_tracker=control_state.path_latency_tracker,
         data_traffic_latency_tracker=control_state.data_traffic_latency_tracker,
+        local_clock_is_authoritative=role == "server",
         extra_handlers={
             _SERVICE_ID_REMOTE_STATUS: lambda event: _handle_lab_remote_status_event(
                 dataplane,
@@ -1443,7 +1444,7 @@ def _drain_reserved_service_events(
     return handled > 0
 
 
-def _drain_lab_data_timing_samples(dataplane, control_state: _LabControlState) -> None:
+def _drain_lab_data_timing_samples(dataplane, control_state: _LabControlState, *, role: str = "client") -> None:
     """Promote Rust timing facts into the same production control metadata used by services."""
     drain = getattr(dataplane, "drain_data_timing_samples", None)
     if not callable(drain):
@@ -1459,6 +1460,7 @@ def _drain_lab_data_timing_samples(dataplane, control_state: _LabControlState) -
     )
     changed = control_state.data_traffic_latency_tracker.promote_pending_peer_transmit_samples(
         local_clock_offset_us=_current_lab_clock_offset_us(control_state.control_metadata),
+        local_clock_is_authoritative=role == "server",
         latency_tracker=control_state.path_latency_tracker,
         rtt_us=_current_lab_clock_rtt_us(control_state.control_metadata),
         clock_error_us=_current_lab_clock_error_us(control_state.control_metadata),

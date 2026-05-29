@@ -47,18 +47,38 @@ impl CompiledScheduler {
 
     /// Select a path index for the next payload.
     pub fn select_path_index(&mut self, paths: &[CorePathConfig], payload_len: usize) -> Option<usize> {
+        self.select_path_index_where(paths, payload_len, |_| true)
+    }
+
+    /// Select a path index while applying a caller-owned eligibility predicate.
+    ///
+    /// Python may constrain a service to a proven path subset while still
+    /// asking Rust to execute the node scheduler. The predicate is only a
+    /// primitive eligibility check; service meaning and policy remain in
+    /// Python.
+    pub fn select_path_index_where(
+        &mut self,
+        paths: &[CorePathConfig],
+        payload_len: usize,
+        allowed: impl Fn(&CorePathConfig) -> bool,
+    ) -> Option<usize> {
         match self.mode {
             SchedulerMode::RoundRobin | SchedulerMode::WeightedRoundRobin | SchedulerMode::Adaptive => {
-                self.weighted.select_path_index(paths, payload_len)
+                self.weighted.select_path_index_where(paths, payload_len, allowed)
             }
-            SchedulerMode::LowestLatency => self.select_ranked(paths, payload_len, latency_score),
-            SchedulerMode::LossAware => self.select_ranked(paths, payload_len, loss_score),
-            SchedulerMode::CapacityAware => self.select_ranked(paths, payload_len, capacity_score),
-            SchedulerMode::LeastQueue => self.select_ranked(paths, payload_len, least_queue_score),
-            SchedulerMode::EarliestCompletionFirst => self.select_ranked(paths, payload_len, completion_score),
-            SchedulerMode::BlockingEstimation => self.select_ranked(paths, payload_len, blocking_estimation_score),
-            SchedulerMode::OrderedMultipath => self.ordered_multipath.select_path_index(paths, payload_len),
-            SchedulerMode::Balanced => self.select_ranked(paths, payload_len, balanced_score),
+            SchedulerMode::LowestLatency => self.select_ranked(paths, payload_len, latency_score, allowed),
+            SchedulerMode::LossAware => self.select_ranked(paths, payload_len, loss_score, allowed),
+            SchedulerMode::CapacityAware => self.select_ranked(paths, payload_len, capacity_score, allowed),
+            SchedulerMode::LeastQueue => self.select_ranked(paths, payload_len, least_queue_score, allowed),
+            SchedulerMode::EarliestCompletionFirst => self.select_ranked(paths, payload_len, completion_score, allowed),
+            SchedulerMode::BlockingEstimation => {
+                self.select_ranked(paths, payload_len, blocking_estimation_score, allowed)
+            }
+            SchedulerMode::OrderedMultipath => {
+                self.ordered_multipath
+                    .select_path_index_where(paths, payload_len, allowed)
+            }
+            SchedulerMode::Balanced => self.select_ranked(paths, payload_len, balanced_score, allowed),
         }
     }
 
@@ -92,11 +112,14 @@ impl CompiledScheduler {
         paths: &[CorePathConfig],
         payload_len: usize,
         score: fn(&CorePathConfig, usize) -> (u64, u64, u64),
+        allowed: impl Fn(&CorePathConfig) -> bool,
     ) -> Option<usize> {
         let whole_packet = paths
             .iter()
             .enumerate()
-            .filter(|(_index, path)| path.accepts_whole_packet() && payload_len <= path.max_data_payload())
+            .filter(|(_index, path)| {
+                allowed(path) && path.accepts_whole_packet() && payload_len <= path.max_data_payload()
+            })
             .min_by_key(|(index, path)| {
                 let (primary, secondary, tertiary) = score(path, payload_len);
                 (primary, secondary, tertiary, *index)
@@ -109,7 +132,7 @@ impl CompiledScheduler {
         paths
             .iter()
             .enumerate()
-            .filter(|(_index, path)| path.accepts_fragmented_packet())
+            .filter(|(_index, path)| allowed(path) && path.accepts_fragmented_packet())
             .min_by_key(|(index, path)| {
                 let (primary, secondary, tertiary) = score(path, payload_len);
                 (primary, secondary, tertiary, *index)
@@ -129,6 +152,7 @@ struct OrderedMultipathScheduler {
     path_available_at_us: Vec<u64>,
     in_flight: Vec<VecDeque<OrderedInFlightPacket>>,
     last_ordered_arrival_us: u64,
+    next_tie_start_index: usize,
 }
 
 impl OrderedMultipathScheduler {
@@ -138,10 +162,16 @@ impl OrderedMultipathScheduler {
             path_available_at_us: vec![0; path_count],
             in_flight: vec![VecDeque::new(); path_count],
             last_ordered_arrival_us: 0,
+            next_tie_start_index: 0,
         }
     }
 
-    fn select_path_index(&mut self, paths: &[CorePathConfig], payload_len: usize) -> Option<usize> {
+    fn select_path_index_where(
+        &mut self,
+        paths: &[CorePathConfig],
+        payload_len: usize,
+        allowed: impl Fn(&CorePathConfig) -> bool,
+    ) -> Option<usize> {
         if self.path_available_at_us.len() != paths.len() {
             self.path_available_at_us.resize(paths.len(), 0);
         }
@@ -151,9 +181,10 @@ impl OrderedMultipathScheduler {
 
         let now_us = self.now_us();
         self.drain_completed(now_us);
+        self.normalize_idle_timeline(now_us);
         let selected = self
-            .select_ordered_whole_packet(paths, payload_len, now_us)
-            .or_else(|| self.select_ordered_fragment_path(paths, payload_len, now_us))?;
+            .select_ordered_whole_packet(paths, payload_len, now_us, &allowed)
+            .or_else(|| self.select_ordered_fragment_path(paths, payload_len, now_us, &allowed))?;
         let prediction = self.predict(paths[selected].primitives(), payload_len, selected, now_us);
         self.apply_bounded_pacing_delay(paths[selected].primitives(), prediction.path_ready_us, now_us);
         self.path_available_at_us[selected] = prediction.path_available_after_send_us;
@@ -161,6 +192,11 @@ impl OrderedMultipathScheduler {
             predicted_arrival_us: prediction.predicted_arrival_us,
             bytes: payload_len,
         });
+        self.next_tie_start_index = if paths.is_empty() {
+            0
+        } else {
+            (selected + 1) % paths.len()
+        };
         self.last_ordered_arrival_us = self
             .last_ordered_arrival_us
             .saturating_add(1)
@@ -168,16 +204,25 @@ impl OrderedMultipathScheduler {
         Some(selected)
     }
 
-    fn select_ordered_whole_packet(&self, paths: &[CorePathConfig], payload_len: usize, now_us: u64) -> Option<usize> {
+    fn select_ordered_whole_packet(
+        &self,
+        paths: &[CorePathConfig],
+        payload_len: usize,
+        now_us: u64,
+        allowed: &impl Fn(&CorePathConfig) -> bool,
+    ) -> Option<usize> {
         let has_available_credit = paths.iter().enumerate().any(|(index, path)| {
-            path.accepts_whole_packet()
+            allowed(path)
+                && path.accepts_whole_packet()
                 && payload_len <= path.max_data_payload()
                 && self.in_flight_within_limits(path.primitives(), payload_len, index)
         });
         paths
             .iter()
             .enumerate()
-            .filter(|(_index, path)| path.accepts_whole_packet() && payload_len <= path.max_data_payload())
+            .filter(|(_index, path)| {
+                allowed(path) && path.accepts_whole_packet() && payload_len <= path.max_data_payload()
+            })
             .filter(|(index, path)| {
                 !has_available_credit || self.in_flight_within_limits(path.primitives(), payload_len, *index)
             })
@@ -185,14 +230,22 @@ impl OrderedMultipathScheduler {
             .map(|(index, _path)| index)
     }
 
-    fn select_ordered_fragment_path(&self, paths: &[CorePathConfig], payload_len: usize, now_us: u64) -> Option<usize> {
+    fn select_ordered_fragment_path(
+        &self,
+        paths: &[CorePathConfig],
+        payload_len: usize,
+        now_us: u64,
+        allowed: &impl Fn(&CorePathConfig) -> bool,
+    ) -> Option<usize> {
         let has_available_credit = paths.iter().enumerate().any(|(index, path)| {
-            path.accepts_fragmented_packet() && self.in_flight_within_limits(path.primitives(), payload_len, index)
+            allowed(path)
+                && path.accepts_fragmented_packet()
+                && self.in_flight_within_limits(path.primitives(), payload_len, index)
         });
         paths
             .iter()
             .enumerate()
-            .filter(|(_index, path)| path.accepts_fragmented_packet())
+            .filter(|(_index, path)| allowed(path) && path.accepts_fragmented_packet())
             .filter(|(index, path)| {
                 !has_available_credit || self.in_flight_within_limits(path.primitives(), payload_len, *index)
             })
@@ -200,7 +253,13 @@ impl OrderedMultipathScheduler {
             .map(|(index, _path)| index)
     }
 
-    fn ordered_score(&self, path: &CorePathConfig, payload_len: usize, index: usize, now_us: u64) -> (u64, u64, u64) {
+    fn ordered_score(
+        &self,
+        path: &CorePathConfig,
+        payload_len: usize,
+        index: usize,
+        now_us: u64,
+    ) -> (u64, u64, u64, u64, usize) {
         let prediction = self.predict(path.primitives(), payload_len, index, now_us);
         let reorder_hold_us = path.primitives().reorder_hold_us() as u64;
         let early_inside_hold_us = if self.last_ordered_arrival_us == 0 {
@@ -237,8 +296,17 @@ impl OrderedMultipathScheduler {
                 .saturating_add(in_flight_penalty_us)
                 .saturating_add(path.primitives().loss_ppm() as u64 * 100),
             prediction.path_available_after_send_us,
+            self.path_available_at_us.get(index).copied().unwrap_or(now_us),
             inverse_capacity(path),
+            self.tie_rotation_distance(index),
         )
+    }
+
+    fn tie_rotation_distance(&self, index: usize) -> usize {
+        if self.path_available_at_us.is_empty() {
+            return index;
+        }
+        (index + self.path_available_at_us.len() - self.next_tie_start_index) % self.path_available_at_us.len()
     }
 
     fn predict(
@@ -298,6 +366,26 @@ impl OrderedMultipathScheduler {
                 path_queue.pop_front();
             }
         }
+    }
+
+    fn normalize_idle_timeline(&mut self, now_us: u64) {
+        if self.in_flight.iter().any(|path_queue| !path_queue.is_empty()) {
+            return;
+        }
+        let Some(max_available_us) = self.path_available_at_us.iter().copied().max() else {
+            return;
+        };
+        if max_available_us >= now_us {
+            return;
+        }
+        let shift_us = now_us - max_available_us;
+        for available_at_us in &mut self.path_available_at_us {
+            *available_at_us = available_at_us.saturating_add(shift_us);
+        }
+        // With no packets in flight, the receiver cannot still be blocked by
+        // the previous ordered horizon. Reset it so sparse TCP-like bursts do
+        // not pin every later packet to the first equal path.
+        self.last_ordered_arrival_us = 0;
     }
 
     fn apply_bounded_pacing_delay(&self, primitives: PathSchedulerPrimitives, path_ready_us: u64, now_us: u64) {

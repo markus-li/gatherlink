@@ -290,3 +290,180 @@ def test_internal_clock_sync_reports_directional_latency_from_selected_offset(mo
     assert observation["rtt_us"] == 11_000
     assert observation["tx_one_way_us"] == 5_000
     assert observation["rx_one_way_us"] == 6_000
+
+
+def test_internal_clock_sync_uses_path_offset_for_path_latency(monkeypatch) -> None:
+    import gatherlink.time.offset as offset_module
+
+    client = InternalClockSyncClient(["path-a", "path-b"])
+    destination_times = iter(
+        [
+            1_020_000,
+            1_030_000,
+            1_040_000,
+            1_050_000,
+            1_060_000,
+            1_070_000,
+            1_081_000,
+        ]
+    )
+    monkeypatch.setattr(offset_module, "internal_monotonic_us", lambda: next(destination_times))
+
+    update = {}
+    # Establish path-a around 100 ms offset.
+    for exchange_id, origin_us in enumerate([1_000_000, 1_010_000, 1_020_000], start=1):
+        client._pending[exchange_id] = ("path-a", origin_us)
+        update = client.observe_control_frame(
+            [
+                InternalClockSyncMessage(
+                    exchange_id=exchange_id,
+                    path_id=1,
+                    mode=2,
+                    origin_us=origin_us,
+                    receive_us=origin_us + 105_000,
+                    transmit_us=origin_us + 115_000,
+                )
+            ],
+            path_names_by_id={1: "path-a", 2: "path-b"},
+        )
+
+    # Add path-b around 200 ms offset. Its directional latency must use the
+    # path-b offset, not the global median that is still biased by path-a.
+    for exchange_id, origin_us in enumerate([1_030_000, 1_040_000, 1_050_000], start=4):
+        client._pending[exchange_id] = ("path-b", origin_us)
+        update = client.observe_control_frame(
+            [
+                InternalClockSyncMessage(
+                    exchange_id=exchange_id,
+                    path_id=2,
+                    mode=2,
+                    origin_us=origin_us,
+                    receive_us=origin_us + 205_000,
+                    transmit_us=origin_us + 215_000,
+                )
+            ],
+            path_names_by_id={1: "path-a", 2: "path-b"},
+        )
+
+    assert update["mean_offset_us"] == 100_000
+    assert update["path_mean_offset_us"] == 200_000
+
+    client._pending[7] = ("path-b", 1_060_000)
+    update = client.observe_control_frame(
+        [
+            InternalClockSyncMessage(
+                exchange_id=7,
+                path_id=2,
+                mode=2,
+                origin_us=1_060_000,
+                receive_us=1_265_000,
+                transmit_us=1_275_000,
+            )
+        ],
+        path_names_by_id={1: "path-a", 2: "path-b"},
+    )
+
+    observation = update["path_latency_observations"][-1]
+    assert observation["path"] == "path-b"
+    assert observation["offset_us"] == 200_000
+    assert observation["tx_one_way_us"] == 5_000
+    assert observation["rx_one_way_us"] == 6_000
+
+
+def test_internal_clock_sync_prefers_low_delay_multipath_consensus(monkeypatch) -> None:
+    import gatherlink.time.offset as offset_module
+
+    client = InternalClockSyncClient(["path-a", "path-b", "path-c"])
+    destination_times = iter(
+        [
+            1_011_000,
+            1_021_000,
+            1_031_000,
+            1_081_000,
+            1_051_000,
+            1_061_000,
+            1_071_000,
+        ]
+    )
+    monkeypatch.setattr(offset_module, "internal_monotonic_us", lambda: next(destination_times))
+
+    update = {}
+    samples = [
+        (1, "path-a", 1, 1_000_000, 1_005_000, 1_015_000),
+        (2, "path-b", 2, 1_010_000, 1_016_000, 1_026_000),
+        (3, "path-c", 3, 1_020_000, 1_027_000, 1_037_000),
+        # Path-a sees a later high-RTT queued sample with a distorted offset.
+        # The consensus should keep using the minimum-delay path cluster.
+        (4, "path-a", 1, 1_030_000, 1_070_000, 1_080_000),
+        (5, "path-a", 1, 1_040_000, 1_045_000, 1_055_000),
+        (6, "path-b", 2, 1_050_000, 1_056_000, 1_066_000),
+        (7, "path-c", 3, 1_060_000, 1_067_000, 1_077_000),
+    ]
+    for exchange_id, path_name, path_id, origin_us, receive_us, transmit_us in samples:
+        client._pending[exchange_id] = (path_name, origin_us)
+        update = client.observe_control_frame(
+            [
+                InternalClockSyncMessage(
+                    exchange_id=exchange_id,
+                    path_id=path_id,
+                    mode=2,
+                    origin_us=origin_us,
+                    receive_us=receive_us,
+                    transmit_us=transmit_us,
+                )
+            ],
+            path_names_by_id={1: "path-a", 2: "path-b", 3: "path-c"},
+        )
+
+    assert update["confidence"] == "good"
+    assert 5_000 <= update["mean_offset_us"] <= 7_000
+    assert update["base_rtt_us"] == 1_000
+    assert update["uncertainty_us"] >= 1_000
+    assert "drift_ppb" in update
+    assert update["path_summaries"]["path-a"]["base_rtt_us"] == 1_000
+
+
+def test_internal_clock_sync_drift_is_path_local() -> None:
+    import gatherlink.time.offset as offset_module
+
+    samples = [
+        offset_module._ClockSyncSample(observed_at=1.0, path_name="path-a", offset_us=5_000, rtt_us=1_000),
+        offset_module._ClockSyncSample(observed_at=2.0, path_name="path-a", offset_us=5_000, rtt_us=1_000),
+        offset_module._ClockSyncSample(observed_at=3.0, path_name="path-b", offset_us=50_000, rtt_us=1_000),
+        offset_module._ClockSyncSample(observed_at=4.0, path_name="path-b", offset_us=50_000, rtt_us=1_000),
+    ]
+
+    summary = offset_module._sample_summary(samples)
+
+    assert summary["drift_ppb"] == 0
+
+
+def test_internal_clock_sync_remains_usable_with_one_path(monkeypatch) -> None:
+    import gatherlink.time.offset as offset_module
+
+    client = InternalClockSyncClient(["path-a"])
+    destination_times = iter([1_011_000, 1_021_000, 1_031_000])
+    monkeypatch.setattr(offset_module, "internal_monotonic_us", lambda: next(destination_times))
+
+    update = {}
+    for exchange_id, origin_us in enumerate([1_000_000, 1_010_000, 1_020_000], start=1):
+        client._pending[exchange_id] = ("path-a", origin_us)
+        update = client.observe_control_frame(
+            [
+                InternalClockSyncMessage(
+                    exchange_id=exchange_id,
+                    path_id=1,
+                    mode=2,
+                    origin_us=origin_us,
+                    receive_us=origin_us + 5_000,
+                    transmit_us=origin_us + 15_000,
+                )
+            ],
+            path_names_by_id={1: "path-a"},
+    )
+
+    assert update["confidence"] == "good"
+    assert update["mean_offset_us"] == 4_500
+    assert update["base_rtt_us"] == 1_000
+    assert update["uncertainty_us"] == 1_000
+    assert update["path_summaries"]["path-a"]["confidence"] == "good"

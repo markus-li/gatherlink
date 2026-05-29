@@ -12,21 +12,41 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, help="HTTP target as host:port.")
     parser.add_argument("--path", default="/text", help="HTTP path to request.")
+    parser.add_argument("--bearer-token", default=None, help="Optional HTTP Authorization bearer token.")
     parser.add_argument("--timeout", type=float, default=12.0)
     args = parser.parse_args()
 
     target_host, target_port = _parse_host_port(args.target)
-    response = fetch_http(target_host=target_host, target_port=target_port, path=args.path, timeout=args.timeout)
+    response = fetch_http(
+        target_host=target_host,
+        target_port=target_port,
+        path=args.path,
+        timeout=args.timeout,
+        bearer_token=args.bearer_token,
+    )
     _headers, _separator, body = response.partition(b"\r\n\r\n")
     print(body.decode("utf-8", errors="replace"))
     return 0
 
 
-def fetch_http(*, target_host: str, target_port: int, path: str = "/text", timeout: float = 12.0) -> bytes:
+def fetch_http(
+    *,
+    target_host: str,
+    target_port: int,
+    path: str = "/text",
+    timeout: float = 12.0,
+    bearer_token: str | None = None,
+) -> bytes:
     """Return one HTTP response fetched directly over TCP."""
     with socket.create_connection((target_host, target_port), timeout=timeout) as sock:
         sock.settimeout(timeout)
-        request = f"GET {path} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\nConnection: close\r\n\r\n"
+        auth_header = f"Authorization: Bearer {bearer_token}\r\n" if bearer_token is not None else ""
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {target_host}:{target_port}\r\n"
+            f"{auth_header}"
+            "Connection: close\r\n\r\n"
+        )
         sock.sendall(request.encode("ascii"))
         # The helper stream adapter treats TCP half-close as the signal that
         # request bytes are complete. Sending it here keeps one-shot probes from

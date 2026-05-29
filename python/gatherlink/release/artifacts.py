@@ -48,6 +48,8 @@ class ReleaseArtifactPlan:
     wiki_payload_dir: Path
     wheel_dir: Path
     rust_binary_dir: Path
+    debian_build_dir: Path
+    debian_package_name: str
 
 
 def plan_release_artifacts(version: str, output_dir: Path) -> ReleaseArtifactPlan:
@@ -61,6 +63,8 @@ def plan_release_artifacts(version: str, output_dir: Path) -> ReleaseArtifactPla
         wiki_payload_dir=output_dir / "wiki-user-docs",
         wheel_dir=output_dir / "python-wheel",
         rust_binary_dir=output_dir / "rust-binaries",
+        debian_build_dir=output_dir / "debian-package-root",
+        debian_package_name=f"gatherlink_{normalized}_amd64.deb",
     )
 
 
@@ -75,7 +79,14 @@ def build_release_artifacts(repo_root: Path, output_dir: Path, *, version: str) 
     wheels = _build_python_wheel(repo_root, plan.wheel_dir)
     _reject_version_mismatched_wheels(wheels, version=plan.version)
     rust_binaries = _build_rust_binaries(repo_root, plan.rust_binary_dir)
-    _write_checksums(output_dir / plan.checksum_name, [archive_path, *wheels, *rust_binaries])
+    debian_package = _build_debian_package(
+        repo_root,
+        plan.debian_build_dir,
+        output_dir / plan.debian_package_name,
+        version=plan.version,
+        rust_binaries=rust_binaries,
+    )
+    _write_checksums(output_dir / plan.checksum_name, [archive_path, *wheels, *rust_binaries, debian_package])
     _copy_user_docs(repo_root / "docs" / "user", plan.wiki_payload_dir)
     return plan
 
@@ -163,6 +174,133 @@ def _build_rust_binaries(repo_root: Path, binary_dir: Path) -> list[Path]:
     return sorted(binary_dir.iterdir())
 
 
+def _build_debian_package(
+    repo_root: Path,
+    package_root: Path,
+    package_path: Path,
+    *,
+    version: str,
+    rust_binaries: list[Path],
+) -> Path:
+    """Build a Debian-oriented package without starting services or changing networking."""
+    if package_root.exists():
+        shutil.rmtree(package_root)
+    package_root.mkdir(parents=True)
+
+    _write_debian_metadata(package_root, version=version)
+    _install_python_package_to_debian_root(repo_root, package_root)
+    _copy_debian_docs_and_examples(repo_root, package_root)
+    _copy_debian_rust_binaries(rust_binaries, package_root)
+    _write_debian_wrappers(package_root)
+    _remove_python_caches(package_root)
+    _reject_sensitive_paths([path.relative_to(package_root) for path in package_root.rglob("*") if path.is_file()])
+
+    package_path.parent.mkdir(parents=True, exist_ok=True)
+    if package_path.exists():
+        package_path.unlink()
+    subprocess.run(
+        ["dpkg-deb", "--root-owner-group", "--build", str(package_root), str(package_path)],
+        cwd=repo_root,
+        check=True,
+    )
+    return package_path
+
+
+def _write_debian_metadata(package_root: Path, *, version: str) -> None:
+    debian_dir = package_root / "DEBIAN"
+    debian_dir.mkdir(parents=True)
+    control = f"""Package: gatherlink
+Version: {version}
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: Gatherlink Maintainers
+Depends: python3
+Description: Debian-oriented Gatherlink operator package
+ Gatherlink is a Python-controlled, Rust-executed UDP multipath transport.
+ This package installs the CLI, docs, examples, and helper binaries without
+ auto-starting services or mutating network/firewall state.
+"""
+    (debian_dir / "control").write_text(control, encoding="utf-8")
+    for script_name in ("postinst", "prerm"):
+        script = debian_dir / script_name
+        script.write_text("#!/bin/sh\nset -e\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+
+
+def _install_python_package_to_debian_root(repo_root: Path, package_root: Path) -> None:
+    target = package_root / "usr" / "lib" / "gatherlink" / "python"
+    target.mkdir(parents=True)
+    build_dir = repo_root / "build"
+    had_build_dir = build_dir.exists()
+    try:
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--target",
+                str(target),
+                str(repo_root),
+            ],
+            cwd=repo_root,
+            check=True,
+        )
+    finally:
+        if build_dir.exists() and not had_build_dir:
+            shutil.rmtree(build_dir)
+
+
+def _copy_debian_docs_and_examples(repo_root: Path, package_root: Path) -> None:
+    doc_dir = package_root / "usr" / "share" / "doc" / "gatherlink"
+    doc_dir.mkdir(parents=True)
+    shutil.copy2(repo_root / "README.md", doc_dir / "README.md")
+    shutil.copytree(repo_root / "docs" / "user", doc_dir / "user", dirs_exist_ok=True)
+    example_dir = package_root / "usr" / "share" / "gatherlink" / "examples"
+    shutil.copytree(repo_root / "configs" / "examples", example_dir, dirs_exist_ok=True)
+
+
+def _copy_debian_rust_binaries(rust_binaries: list[Path], package_root: Path) -> None:
+    binary_dir = package_root / "usr" / "lib" / "gatherlink" / "bin"
+    binary_dir.mkdir(parents=True)
+    for binary in rust_binaries:
+        target = binary_dir / binary.name
+        shutil.copy2(binary, target)
+        target.chmod(0o755)
+
+
+def _write_debian_wrappers(package_root: Path) -> None:
+    bin_dir = package_root / "usr" / "bin"
+    bin_dir.mkdir(parents=True)
+    gatherlink = bin_dir / "gatherlink"
+    gatherlink.write_text(
+        "#!/bin/sh\n"
+        "set -e\n"
+        "export PYTHONPATH=\"/usr/lib/gatherlink/python${PYTHONPATH:+:$PYTHONPATH}\"\n"
+        "exec python3 -m gatherlink.cli.main \"$@\"\n",
+        encoding="utf-8",
+    )
+    gatherlink.chmod(0o755)
+    helper = bin_dir / "gatherlink-time-helper"
+    helper.write_text(
+        "#!/bin/sh\n"
+        "set -e\n"
+        "exec /usr/lib/gatherlink/bin/gatherlink-time-helper \"$@\"\n",
+        encoding="utf-8",
+    )
+    helper.chmod(0o755)
+
+
+def _remove_python_caches(root: Path) -> None:
+    """Keep release packages free of generated interpreter cache files."""
+    for cache_dir in root.rglob("__pycache__"):
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir)
+    for cache_file in root.rglob("*.pyc"):
+        cache_file.unlink()
+
+
 def _copy_user_docs(source: Path, target: Path) -> None:
     if target.exists():
         shutil.rmtree(target)
@@ -186,6 +324,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"checksums={plan.output_dir / plan.checksum_name}")
     print(f"wheel_dir={plan.wheel_dir}")
     print(f"rust_binary_dir={plan.rust_binary_dir}")
+    print(f"debian_package={plan.output_dir / plan.debian_package_name}")
     print(f"wiki_payload={plan.wiki_payload_dir}")
 
 

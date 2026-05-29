@@ -13,6 +13,7 @@ def main() -> int:
     parser.add_argument("--socks", required=True, help="SOCKS5 endpoint as host:port.")
     parser.add_argument("--target", required=True, help="HTTP target as host:port.")
     parser.add_argument("--path", default="/text", help="HTTP path to request.")
+    parser.add_argument("--bearer-token", default=None, help="Optional HTTP Authorization bearer token.")
     parser.add_argument("--timeout", type=float, default=12.0)
     args = parser.parse_args()
 
@@ -25,6 +26,7 @@ def main() -> int:
         target_port=target_port,
         path=args.path,
         timeout=args.timeout,
+        bearer_token=args.bearer_token,
     )
     _headers, _separator, body = response.partition(b"\r\n\r\n")
     print(body.decode("utf-8", errors="replace"))
@@ -39,6 +41,7 @@ def fetch_via_socks5(
     target_port: int,
     path: str = "/text",
     timeout: float = 12.0,
+    bearer_token: str | None = None,
 ) -> bytes:
     """Return one HTTP response fetched through a SOCKS5 CONNECT proxy."""
     with socket.create_connection((socks_host, socks_port), timeout=timeout) as sock:
@@ -50,7 +53,13 @@ def fetch_via_socks5(
         reply = sock.recv(10)
         if len(reply) < 2 or reply[1] != 0:
             raise RuntimeError(f"SOCKS5 CONNECT failed: {reply!r}")
-        request = f"GET {path} HTTP/1.1\r\nHost: {target_host}:{target_port}\r\nConnection: close\r\n\r\n"
+        auth_header = f"Authorization: Bearer {bearer_token}\r\n" if bearer_token is not None else ""
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {target_host}:{target_port}\r\n"
+            f"{auth_header}"
+            "Connection: close\r\n\r\n"
+        )
         sock.sendall(request.encode("ascii"))
         return _read_http_response(sock, timeout=timeout)
 

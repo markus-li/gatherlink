@@ -662,28 +662,31 @@ impl CoreDataplane {
             let frame_bytes_len = received.bytes.len();
             match decoded.kind {
                 FrameKind::Data => {
-                    if let Some(payload) = self.remote_fragments.push_or_payload(&decoded)? {
-                        if is_reserved_service_id(decoded.service_id) {
+                    let service_id = decoded.service_id;
+                    let path_id = decoded.path_id;
+                    let sequence = decoded.sequence;
+                    if let Some(payload) = self.remote_fragments.push_frame_or_payload(decoded)? {
+                        if is_reserved_service_id(service_id) {
                             self.observe_received_reserved_service_payload(
-                                decoded.service_id,
-                                decoded.path_id,
-                                decoded.sequence,
+                                service_id,
+                                path_id,
+                                sequence,
                                 payload,
                                 frame_bytes_len,
                                 peer_scope,
                             );
                         } else {
                             if let Some(observation) = self.observe_user_payload_first_seen(
-                                decoded.service_id,
-                                decoded.path_id,
-                                decoded.sequence,
+                                service_id,
+                                path_id,
+                                sequence,
                                 payload.len(),
                                 peer_scope,
                             ) {
                                 outcomes.push(self.emit_remote_payload(
-                                    decoded.service_id,
-                                    decoded.path_id,
-                                    decoded.sequence,
+                                    service_id,
+                                    path_id,
+                                    sequence,
                                     &payload,
                                     peer_scope,
                                     observation,
@@ -784,28 +787,27 @@ impl CoreDataplane {
         let frame_bytes_len = bytes.len();
         match decoded.kind {
             FrameKind::Data => {
-                if let Some(payload) = self.remote_fragments.push_or_payload(&decoded)? {
-                    if is_reserved_service_id(decoded.service_id) {
+                let service_id = decoded.service_id;
+                let path_id = decoded.path_id;
+                let sequence = decoded.sequence;
+                if let Some(payload) = self.remote_fragments.push_frame_or_payload(decoded)? {
+                    if is_reserved_service_id(service_id) {
                         self.flush_remote_emit_batch(pending_emit, summary)?;
                         self.observe_received_reserved_service_payload(
-                            decoded.service_id,
-                            decoded.path_id,
-                            decoded.sequence,
+                            service_id,
+                            path_id,
+                            sequence,
                             payload,
                             frame_bytes_len,
                             peer_scope,
                         );
-                    } else if let Some(observation) = self.observe_user_payload_first_seen(
-                        decoded.service_id,
-                        decoded.path_id,
-                        decoded.sequence,
-                        payload.len(),
-                        peer_scope,
-                    ) {
+                    } else if let Some(observation) =
+                        self.observe_user_payload_first_seen(service_id, path_id, sequence, payload.len(), peer_scope)
+                    {
                         self.queue_remote_payload_with_reorder(
-                            decoded.service_id,
-                            decoded.path_id,
-                            decoded.sequence,
+                            service_id,
+                            path_id,
+                            sequence,
                             payload,
                             peer_scope,
                             observation,
@@ -867,6 +869,19 @@ impl CoreDataplane {
         pending: &mut PendingRemoteEmitBatch,
         summary: &mut PacketBatchSummary,
     ) -> Result<(), DataplaneError> {
+        if self.reorder_hold_for_path(path_id).is_zero()
+            && self.try_emit_remote_batch_without_reorder(
+                service_id,
+                path_id,
+                base_sequence,
+                payloads,
+                peer_scope,
+                summary,
+            )?
+        {
+            return Ok(());
+        }
+
         self.ensure_service_enabled(service_id)?;
         for (index, payload) in payloads.iter().enumerate() {
             let sequence = base_sequence + index as u64;
@@ -886,6 +901,70 @@ impl CoreDataplane {
             }
         }
         Ok(())
+    }
+
+    fn try_emit_remote_batch_without_reorder(
+        &mut self,
+        service_id: ServiceId,
+        path_id: u16,
+        base_sequence: u64,
+        payloads: &[Vec<u8>],
+        peer_scope: Option<u32>,
+        summary: &mut PacketBatchSummary,
+    ) -> Result<bool, DataplaneError> {
+        let service_index = self
+            .services
+            .iter()
+            .position(|service| service.config().service_id() == service_id)
+            .ok_or(DataplaneError::UnknownServiceId(service_id))?;
+        self.ensure_service_enabled(service_id)?;
+
+        let return_mode = self.services[service_index].config().return_mode();
+        if matches!(return_mode, ServiceReturnMode::PeerScopedSource) && peer_scope.is_some() {
+            return Ok(false);
+        }
+
+        let target = match return_mode {
+            ServiceReturnMode::Fixed | ServiceReturnMode::PeerScopedSource => {
+                self.services[service_index].config().target()
+            }
+            ServiceReturnMode::LearnedSingleSource => self
+                .learned_sources
+                .get(&service_id)
+                .copied()
+                .unwrap_or_else(|| self.services[service_index].config().target()),
+        };
+        let service_name = self.services[service_index].config().name().to_owned();
+        let mut slices = Vec::with_capacity(payloads.len());
+        let mut emitted_meta = Vec::with_capacity(payloads.len());
+
+        for (index, payload) in payloads.iter().enumerate() {
+            let sequence = base_sequence + index as u64;
+            if let Some(observation) =
+                self.observe_user_payload_first_seen(service_id, path_id, sequence, payload.len(), peer_scope)
+            {
+                slices.push(payload.as_slice());
+                emitted_meta.push((sequence, payload.len(), observation));
+            }
+        }
+
+        if slices.is_empty() {
+            return Ok(true);
+        }
+
+        let emitted_count = self.services[service_index].emit_many_to(&slices, target)?;
+        for (sequence, payload_len, observation) in emitted_meta.into_iter().take(emitted_count) {
+            self.metrics.record_receive_for_service(
+                &service_name,
+                service_id,
+                path_id,
+                sequence,
+                payload_len,
+                observation,
+            );
+            summary.record(payload_len);
+        }
+        Ok(true)
     }
 
     fn queue_remote_payload_with_reorder(
@@ -1919,7 +1998,15 @@ impl CoreDataplane {
             ServicePathPolicy::Inherit if scheduler.allowed_path_ids().is_empty() => {
                 Ok(self.select_path(payload_len)?.clone())
             }
-            ServicePathPolicy::Inherit => self.select_single_best_service_path(payload_len, scheduler),
+            ServicePathPolicy::Inherit => {
+                let path_index = self
+                    .scheduler
+                    .select_path_index_where(&self.paths, payload_len, |path| {
+                        scheduler.allows_path_id(path.path_id())
+                    })
+                    .ok_or(DataplaneError::NoPathAvailable)?;
+                Ok(self.paths[path_index].clone())
+            }
             ServicePathPolicy::SingleBestPath => self.select_single_best_service_path(payload_len, scheduler),
             ServicePathPolicy::WeightedRoundRobin => {
                 self.select_weighted_service_path(service_id, payload_len, scheduler)

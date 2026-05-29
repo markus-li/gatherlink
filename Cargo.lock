@@ -181,7 +181,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "gatherlink-crypto"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "gatherlink-dataplane"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "gatherlink-crypto",
  "gatherlink-protocol",
@@ -202,11 +202,11 @@ dependencies = [
 
 [[package]]
 name = "gatherlink-protocol"
-version = "0.9.3"
+version = "0.9.4"
 
 [[package]]
 name = "gatherlink-pybindings"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "gatherlink-dataplane",
  "gatherlink-protocol",
@@ -215,7 +215,7 @@ dependencies = [
 
 [[package]]
 name = "gatherlink-time-helper"
-version = "0.9.3"
+version = "0.9.4"
 dependencies = [
  "libc",
 ]

@@ -36,6 +36,12 @@ from gatherlink.secrets.provisioning import load_verified_topology_bundle
 
 app = typer.Typer(help="Plan and run Gatherlink runtime services.")
 
+# VM tuning showed that opaque TCP over WireGuard-over-Gatherlink is sensitive
+# to Python drain batch size, but the current best clean three-path result uses
+# the normal runner default. Keep this named TCP-biased constant as CLI policy
+# so future evidence can move it without changing Rust packet semantics.
+TCP_BIASED_DATAPLANE_BATCH_SIZE = DEFAULT_DATAPLANE_BATCH_SIZE
+
 
 def _render_error(exc: ConfigValidationError) -> None:
     """Render config errors for runtime commands without stack traces."""
@@ -88,6 +94,17 @@ def _load_live_rekey_context(
     )
 
 
+def _effective_batch_size(config, requested_batch_size: int | None) -> int:
+    """Return the runner batch size after applying Python-owned CLI policy."""
+    if requested_batch_size is not None:
+        return requested_batch_size
+    if getattr(config.scheduler, "traffic_bias", "auto") == "tcp":
+        return TCP_BIASED_DATAPLANE_BATCH_SIZE
+    if any(service.traffic_class == "tcp_ordered" for service in config.services):
+        return TCP_BIASED_DATAPLANE_BATCH_SIZE
+    return DEFAULT_DATAPLANE_BATCH_SIZE
+
+
 @app.command("plan")
 def plan(path: Path) -> None:
     """Print the userland UDP startup plan for a config file."""
@@ -106,9 +123,12 @@ def service(
         None,
         help="Stop after this many runner loop iterations; intended for smoke tests.",
     ),
-    batch_size: int = typer.Option(
-        DEFAULT_DATAPLANE_BATCH_SIZE,
-        help="Maximum UDP datagrams to drain per service step.",
+    batch_size: int | None = typer.Option(
+        None,
+        help=(
+            "Maximum UDP datagrams to drain per service step. Defaults to 128 "
+            "for TCP-biased configs and 512 otherwise."
+        ),
     ),
     diagnostics_jsonl: Path | None = typer.Option(
         None,
@@ -158,6 +178,7 @@ def service(
     try:
         source_config = validate_config_file(path)
         runtime_config = expand_config(source_config)
+        effective_batch_size = _effective_batch_size(source_config, batch_size)
         live_rekey_context = _load_live_rekey_context(
             runtime_config,
             local_identity=rekey_local_identity,
@@ -203,7 +224,7 @@ def service(
         result = run_core_service(
             runtime_config,
             max_iterations=max_iterations,
-            batch_size=batch_size,
+            batch_size=effective_batch_size,
             diagnostics_bus=diagnostics_bus,
             stop_event=runner_state.stop_event if runner_state is not None else None,
             runner_state=runner_state,
@@ -403,9 +424,12 @@ def relay_start(
 def start(
     path: Path,
     name: str | None = typer.Option(None, "--name", help="Override the managed service name."),
-    batch_size: int = typer.Option(
-        DEFAULT_DATAPLANE_BATCH_SIZE,
-        help="Maximum UDP datagrams to drain per service step.",
+    batch_size: int | None = typer.Option(
+        None,
+        help=(
+            "Maximum UDP datagrams to drain per service step. Defaults to 128 "
+            "for TCP-biased configs and 512 otherwise."
+        ),
     ),
     diagnostics_jsonl: Path | None = typer.Option(
         None, help="Append structured diagnostics events to this JSONL file."
@@ -438,9 +462,11 @@ def start(
 ) -> None:
     """Start a process-managed Rust-backed core service in the background."""
     try:
-        runtime_config = expand_config(validate_config_file(path))
+        source_config = validate_config_file(path)
+        runtime_config = expand_config(source_config)
     except ConfigValidationError as exc:
         _render_error(exc)
+    effective_batch_size = _effective_batch_size(source_config, batch_size)
     service_record_name = name or service_name("core", runtime_config.node)
     registry = ServiceRegistry()
     with suppress(ValueError):
@@ -463,7 +489,7 @@ def start(
         "service",
         str(path),
         "--batch-size",
-        str(batch_size),
+        str(effective_batch_size),
         "--diagnostics-jsonl",
         str(diagnostics_path),
         "--service-name",

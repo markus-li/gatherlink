@@ -75,6 +75,7 @@ def main() -> int:
         "passed": False,
         "steps": [],
     }
+    status_api_key = secrets.token_urlsafe(24)
     process_env = os.environ.copy()
     # Unix-domain socket paths are short on Linux, so keep the registry outside
     # deeply nested pytest/report paths.
@@ -97,6 +98,8 @@ def main() -> int:
                     f"127.0.0.1:{acceptance_ports.status_http}",
                     "--write-window-seconds",
                     "0",
+                    "--api-key",
+                    status_api_key,
                 ],
                 env=process_env,
             )
@@ -200,6 +203,7 @@ def main() -> int:
             target_port=acceptance_ports.status_http,
             path="/text",
             timeout=args.timeout,
+            bearer_token=status_api_key,
         )
         headers, _, body = response.partition(b"\r\n\r\n")
         body_text = body.decode("utf-8")

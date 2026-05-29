@@ -20,6 +20,7 @@ SECURITY_MODE="authenticated"
 ACTIVE_PATHS="a,b,c"
 SCHEDULER_MODE="coordinated_adaptive"
 SCHEDULER_TRAFFIC_BIAS="auto"
+SERVICE_TRAFFIC_CLASS="tcp_ordered"
 PATH_CAPACITY_MBITS=""
 FLOWLET_IDLE_US=0
 FLOWLET_MAX_HOLD_US=0
@@ -59,6 +60,9 @@ Options:
   --scheduler-mode MODE    Python-selected Gatherlink scheduler. Default coordinated_adaptive.
   --scheduler-traffic-bias BIAS
                           Bias coordinated_adaptive toward auto, tcp, or udp. Default auto.
+  --service-traffic-class CLASS
+                          Traffic class for the generated Gatherlink service. Default tcp_ordered because a
+                          single WireGuard tunnel is opaque/order-sensitive even when it carries UDP.
   --path-capacity-mbits SPEC
                           Static per-path scheduler hints, for example a:300,b:500,c:700.
                           If omitted, the raw Gatherlink runner uses its default path hints.
@@ -94,6 +98,7 @@ while [[ $# -gt 0 ]]; do
     --active-paths) ACTIVE_PATHS="$2"; shift 2 ;;
     --scheduler-mode) SCHEDULER_MODE="$2"; shift 2 ;;
     --scheduler-traffic-bias) SCHEDULER_TRAFFIC_BIAS="$2"; shift 2 ;;
+    --service-traffic-class) SERVICE_TRAFFIC_CLASS="$2"; shift 2 ;;
     --path-capacity-mbits) PATH_CAPACITY_MBITS="$2"; shift 2 ;;
     --flowlet-idle-us) FLOWLET_IDLE_US="$2"; shift 2 ;;
     --flowlet-max-hold-us) FLOWLET_MAX_HOLD_US="$2"; shift 2 ;;
@@ -115,6 +120,24 @@ if [[ "${RUN_TCP}" -eq 0 && "${RUN_UDP}" -eq 0 ]]; then
   echo "at least one benchmark mode must be enabled" >&2
   exit 2
 fi
+
+udp_rate_mbit() {
+  python3 - "$UDP_RATE" <<'PY'
+import sys
+
+value = sys.argv[1].strip()
+suffix = value[-1:].lower()
+number = value[:-1] if suffix.isalpha() else value
+rate = float(number)
+if suffix == "k":
+    rate /= 1000
+elif suffix == "g":
+    rate *= 1000
+elif suffix.isalpha() and suffix != "m":
+    raise SystemExit(f"unsupported UDP rate suffix: {value}")
+print(rate)
+PY
+}
 
 perf_init_defaults
 REPORT="${OUT_DIR}/report.md"
@@ -139,6 +162,10 @@ perf_record "- security_mode: ${SECURITY_MODE}"
 perf_record "- active_paths: ${ACTIVE_PATHS}"
 perf_record "- scheduler_mode: ${SCHEDULER_MODE}"
 perf_record "- scheduler_traffic_bias: ${SCHEDULER_TRAFFIC_BIAS}"
+perf_record "- service_traffic_class: ${SERVICE_TRAFFIC_CLASS}"
+if [[ "${SCHEDULER_TRAFFIC_BIAS}" == "udp" && "${SERVICE_TRAFFIC_CLASS}" == "tcp_ordered" ]]; then
+  perf_record "- scheduler_warning: udp bias can stripe an opaque WireGuard tunnel and trigger WireGuard anti-replay loss"
+fi
 perf_record "- iperf_tcp_client_args: ${PERF_IPERF_TCP_CLIENT_ARGS:-[none]}"
 perf_record "- iperf_tcp_server_args: ${PERF_IPERF_TCP_SERVER_ARGS:-[none]}"
 perf_record "- path_capacity_mbits: ${PATH_CAPACITY_MBITS:-raw-runner-default}"
@@ -189,6 +216,7 @@ fi
   --active-paths "${ACTIVE_PATHS}" \
   --scheduler-mode "${SCHEDULER_MODE}" \
   --scheduler-traffic-bias "${SCHEDULER_TRAFFIC_BIAS}" \
+  --service-traffic-class "${SERVICE_TRAFFIC_CLASS}" \
   "${path_capacity_arg[@]}" \
   --flowlet-idle-us "${FLOWLET_IDLE_US}" \
   --flowlet-max-hold-us "${FLOWLET_MAX_HOLD_US}" \
@@ -207,6 +235,10 @@ perf_remote_a "sudo ip link del wg-go-a 2>/dev/null || true; sudo ip link add wg
 perf_remote_b "sudo ip link del wg-go-b 2>/dev/null || true; sudo ip link add wg-go-b type wireguard; sudo ip addr add 10.204.0.2/24 dev wg-go-b; sudo wg set wg-go-b listen-port 19092 private-key /home/gatherlink/wg-perf.key peer '${WG_A_PUB}' allowed-ips 10.204.0.1/32 endpoint 127.0.0.1:55180 persistent-keepalive 5; sudo ip link set wg-go-b mtu ${WG_MTU} up"
 sleep 3
 perf_remote_b "ping -c 3 -W 1 10.204.0.1" | tee "${OUT_DIR}/wg-ping.txt"
+if [[ "${RUN_UDP}" -eq 1 ]]; then
+  perf_compile_udp_pressure "${PORT_A}"
+  perf_compile_udp_pressure "${PORT_B}"
+fi
 
 perf_step "Benchmarks"
 benchmark_sections=$((RUN_TCP + RUN_UDP))
@@ -235,6 +267,25 @@ elif [[ "${RUN_TCP}" -eq 1 ]]; then
 fi
 if [[ "${RUN_MIXED}" -eq 0 && "${RUN_UDP}" -eq 1 ]]; then
   perf_run_iperf_udp "wg-over-gl-onehop-udp" "${PORT_A}" "${PORT_B}" "10.204.0.1" "10.204.0.1" 7802 "${UDP_RATE}" "${UDP_LENGTH}" "${DURATION}"
+  perf_step "UDP Pressure"
+  pressure_mbit="$(udp_rate_mbit)"
+  perf_start_udp_pressure_sink \
+    "wg-over-gl-onehop-udp-pressure" \
+    "${PORT_A}" \
+    "10.204.0.1:8300" \
+    "${DURATION}" \
+    "10.204.0.2:8400"
+  sleep 1
+  perf_start_udp_pressure_client_background \
+    "wg-over-gl-onehop-udp-pressure" \
+    "${PORT_B}" \
+    "10.204.0.1:8300" \
+    "${DURATION}" \
+    "${UDP_LENGTH}" \
+    "${pressure_mbit}" \
+    "10.204.0.2:8400"
+  sleep $((DURATION + 3))
+  perf_fetch_udp_pressure_background "wg-over-gl-onehop-udp-pressure" "${PORT_A}" "${PORT_B}"
 fi
 perf_remote_a "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services status gl-onehop.vm.node-a" >"${OUT_DIR}/status-node-a.json" || true
 perf_remote_b "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink services status gl-onehop.vm.node-b" >"${OUT_DIR}/status-node-b.json" || true

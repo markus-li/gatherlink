@@ -3,7 +3,8 @@
   "node": "client",
   "peer": "relay",
   "scheduler": {
-    "mode": "coordinated_adaptive"
+    "mode": "coordinated_adaptive",
+    "traffic_bias": "tcp"
   },
   "paths": [
     {
@@ -21,6 +22,7 @@
       "listen": "127.0.0.1:55180",
       "target": "127.0.0.1:51820",
       "priority": "high",
+      "traffic_class": "tcp_ordered",
       "scheduler_poll_batch_packets": 128,
       "scheduler_flowlet_idle_us": 50000,
       "scheduler_flowlet_max_hold_us": 60000000
@@ -29,7 +31,8 @@
       "name": "wireguard-fast",
       "listen": "127.0.0.1:55181",
       "target": "127.0.0.1:51821",
-      "priority": "bulk"
+      "priority": "bulk",
+      "traffic_class": "udp_bulk"
     }
   ],
   "helpers": {

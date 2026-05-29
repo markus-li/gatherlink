@@ -633,6 +633,48 @@ fn ordered_multipath_does_not_starve_idle_fast_path_after_wall_clock_progress() 
 }
 
 #[test]
+fn ordered_multipath_rotates_equal_paths_after_idle_gaps() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths_and_scheduler(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            path_with_limits_and_mtu(10, 1443, 5_000_000_000, 1_000, 0, 2_000, 128, 256_000),
+            path_with_limits_and_mtu(20, 1443, 5_000_000_000, 1_000, 0, 2_000, 128, 256_000),
+            path_with_limits_and_mtu(30, 1443, 5_000_000_000, 1_000, 0, 2_000, 128, 256_000),
+        ],
+        SchedulerConfig::new(SchedulerMode::OrderedMultipath),
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+    let mut selected = Vec::new();
+
+    for index in 0..12 {
+        sender.send_to(&vec![index as u8; 1200], service_addr).unwrap();
+        selected.push(dataplane.forward_one_for_service("udp-main").unwrap().path_id);
+        let mut buffer = [0_u8; 1400];
+        target.recv_from(&mut buffer).unwrap();
+        std::thread::sleep(Duration::from_millis(3));
+    }
+
+    let path_a = selected.iter().filter(|path_id| **path_id == 10).count();
+    let path_b = selected.iter().filter(|path_id| **path_id == 20).count();
+    let path_c = selected.iter().filter(|path_id| **path_id == 30).count();
+
+    assert!(
+        path_a > 0 && path_b > 0 && path_c > 0,
+        "equal clean paths should all get a chance after idle gaps: {path_a}/{path_b}/{path_c}"
+    );
+}
+
+#[test]
 fn balanced_scheduler_uses_capacity_latency_and_loss() {
     let selected = forward_with_mode(
         SchedulerMode::Balanced,

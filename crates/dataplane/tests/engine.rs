@@ -440,6 +440,97 @@ fn service_single_best_path_policy_overrides_node_round_robin() {
 }
 
 #[test]
+fn service_single_best_allowed_paths_pin_even_when_another_path_has_more_capacity() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new_with_scheduler_primitives(
+                10,
+                1200,
+                true,
+                PathSchedulerState::Active,
+                1,
+                PathSchedulerPrimitives::new(Some(100_000_000), None, Some(5_000), 0, 0, 0, 0, 0, 0, 0, 0),
+            )
+            .unwrap(),
+            CorePathConfig::new_with_scheduler_primitives(
+                20,
+                1200,
+                true,
+                PathSchedulerState::Active,
+                10,
+                PathSchedulerPrimitives::new(Some(900_000_000), None, Some(5_000), 0, 0, 0, 0, 0, 0, 0, 0),
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    dataplane.set_service_scheduler(
+        256,
+        ServiceSchedulerConfig::new_with_path_policy(1, 0, 0, 0, 0, ServicePathPolicy::SingleBestPath)
+            .with_allowed_path_ids(vec![10]),
+    );
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+
+    let mut outcomes = Vec::new();
+    for payload in [b"a".as_slice(), b"bb".as_slice(), b"ccc".as_slice()] {
+        sender.send_to(payload, service_addr).unwrap();
+        outcomes.push(dataplane.forward_one_for_service("udp-main").unwrap());
+    }
+
+    assert!(outcomes.iter().all(|outcome| outcome.path_id == 10));
+}
+
+#[test]
+fn service_inherit_allowed_paths_constrain_node_scheduler_without_forcing_single_best() {
+    let target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+    let config = CoreRuntimeConfig::new_with_paths_and_scheduler(
+        vec![UdpServiceConfig::new(
+            "udp-main",
+            Some("127.0.0.1:0".parse().unwrap()),
+            target.local_addr().unwrap(),
+        )
+        .unwrap()],
+        vec![
+            CorePathConfig::new_with_scheduler(10, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+            CorePathConfig::new_with_scheduler(20, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+            CorePathConfig::new_with_scheduler(30, 1200, true, PathSchedulerState::Active, 1).unwrap(),
+        ],
+        SchedulerConfig::new(SchedulerMode::WeightedRoundRobin),
+    )
+    .unwrap();
+    let mut dataplane = CoreDataplane::bind(config).unwrap();
+    dataplane.set_service_scheduler(
+        256,
+        ServiceSchedulerConfig::new_with_path_policy(1, 0, 0, 0, 0, ServicePathPolicy::Inherit)
+            .with_allowed_path_ids(vec![10, 20]),
+    );
+    let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let service_addr = dataplane.service("udp-main").unwrap().local_addr().unwrap();
+
+    let mut outcomes = Vec::new();
+    for payload in [b"a".as_slice(), b"bb".as_slice(), b"ccc".as_slice(), b"dddd".as_slice()] {
+        sender.send_to(payload, service_addr).unwrap();
+        outcomes.push(dataplane.forward_one_for_service("udp-main").unwrap());
+    }
+
+    assert_eq!(
+        outcomes.iter().map(|outcome| outcome.path_id).collect::<Vec<_>>(),
+        vec![10, 20, 10, 20],
+    );
+}
+
+#[test]
 fn service_weighted_policy_has_independent_cursor() {
     let target = UdpSocket::bind("127.0.0.1:0").unwrap();
     target.set_read_timeout(Some(Duration::from_millis(500))).unwrap();

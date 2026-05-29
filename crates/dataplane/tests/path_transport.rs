@@ -586,6 +586,58 @@ fn summary_path_receive_emits_batched_payloads_to_udp_target() {
 }
 
 #[test]
+fn summary_path_receive_skips_duplicate_payloads_in_batched_fast_path() {
+    let server_path_addr = reserve_loopback_addr();
+    let remote_target = UdpSocket::bind("127.0.0.1:0").unwrap();
+    remote_target
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .unwrap();
+
+    let server_config = CoreRuntimeConfig::new_with_paths(
+        vec![service("udp-main", remote_target.local_addr().unwrap())],
+        vec![path_bind_only(7, server_path_addr)],
+    )
+    .unwrap();
+    let mut server = CoreDataplane::bind(server_config).unwrap();
+    let path_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let batch_payloads = vec![
+        b"batch-fast-a".to_vec(),
+        b"batch-fast-b".to_vec(),
+        b"batch-fast-c".to_vec(),
+    ];
+    let batch = Frame::batch(256, 7, 100, &batch_payloads).unwrap().encode().unwrap();
+
+    path_sender.send_to(&batch, server_path_addr).unwrap();
+    path_sender.send_to(&batch, server_path_addr).unwrap();
+
+    let first = receive_paths_summary_with_retry(&mut server, 8);
+    assert_eq!(first.packets, 3);
+    assert_eq!(
+        first.bytes,
+        b"batch-fast-a".len() + b"batch-fast-b".len() + b"batch-fast-c".len()
+    );
+    let second = server.receive_available_from_paths_summary(8).unwrap();
+    assert_eq!(second.packets, 0);
+
+    let mut received_payloads = Vec::new();
+    for _ in 0..3 {
+        let mut buffer = vec![0_u8; 64];
+        let (length, _source) = recv_with_retry(&remote_target, &mut buffer);
+        received_payloads.push(buffer[..length].to_vec());
+    }
+    assert_eq!(
+        received_payloads,
+        vec![
+            b"batch-fast-a".to_vec(),
+            b"batch-fast-b".to_vec(),
+            b"batch-fast-c".to_vec()
+        ]
+    );
+
+    wait_for_duplicate_counters(&mut server, "udp-main", 0, 3);
+}
+
+#[test]
 fn receiver_reorder_buffer_releases_oldest_when_hold_work_is_bounded() {
     let path_bind = reserve_loopback_addr();
     let target = UdpSocket::bind("127.0.0.1:0").unwrap();

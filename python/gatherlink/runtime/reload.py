@@ -163,8 +163,16 @@ def scheduler_decision_event_from_status(
         "configured_mode": config.scheduler.mode,
         "congestion_policy": config.scheduler.congestion_policy,
         "selected_path": selected,
-        "paths": [_path_decision_details(score, runtime_paths_by_name.get(score.path_name)) for score in ranked_scores],
+        "paths": [
+            _path_decision_details(
+                score,
+                runtime_paths_by_name.get(score.path_name),
+                telemetry.paths.get(score.path_name),
+            )
+            for score in ranked_scores
+        ],
         "service_traffic": service_traffic_summary_from_status(runtime_config.services, status).export_dict(),
+        "service_path_outcomes": _service_path_outcome_ledger(runtime_config, status, telemetry),
     }
     congestion = _congestion_decision_details(config, runtime_config, telemetry)
     if congestion:
@@ -174,6 +182,7 @@ def scheduler_decision_event_from_status(
         details["coordinator_recent"] = scheduler_coordinator.recent_decisions()[-4:]
     if service_path_allocator is not None and service_path_allocator.last_decision is not None:
         details["service_path_allocator"] = service_path_allocator.last_decision.export_dict()
+    details["promotion_trace"] = _scheduler_promotion_trace(details)
     return DiagnosticEvent.scheduler_decision(node=runtime_config.node, details=details)
 
 
@@ -407,6 +416,7 @@ def _selected_path(scores: list[PathScore]) -> str | None:
 def _path_decision_details(
     score: PathScore,
     runtime_scheduler: RuntimePathSchedulerConfig | None,
+    metrics: PathSchedulerMetrics | None = None,
 ) -> dict[str, object]:
     """Merge Python score reasons with the Rust primitive values currently in force."""
     details = score.export_dict()
@@ -428,7 +438,164 @@ def _path_decision_details(
                 "pacing_budget_bps": runtime_scheduler.pacing_budget_bps,
             }
         )
+    if metrics is not None:
+        details.update(
+            {
+                "observed_in_flight_packets": metrics.scheduler_in_flight_packets,
+                "observed_in_flight_bytes": metrics.scheduler_in_flight_bytes,
+                "estimated_earliest_delivery_us": metrics.estimated_earliest_delivery_us(),
+                "receiver_reorder_buffer_packets": metrics.reorder_buffer_packets,
+                "receiver_reorder_buffer_oldest_age_us": metrics.reorder_buffer_oldest_age_us,
+                "receiver_blocking_pressure_packets": _receiver_blocking_pressure_packets(metrics),
+                "ack_control_tx_frames": metrics.control_tx_frames,
+                "ack_control_rx_frames": metrics.control_rx_frames,
+                "ack_control_return_quality": _ack_control_return_quality(metrics),
+                "last_tx_gap_us": metrics.last_tx_gap_us,
+                "last_rx_gap_us": metrics.last_rx_gap_us,
+            }
+        )
     return details
+
+
+def _service_path_outcome_ledger(
+    runtime_config: RuntimeConfig,
+    status: dict[str, object],
+    telemetry: SchedulerTelemetrySnapshot,
+) -> list[dict[str, object]]:
+    """
+    Return per-service/per-path outcome facts for scheduler diagnostics.
+
+    This is intentionally a Python-owned interpretation layer. Rust reports
+    service/path counters and path telemetry; Python correlates those facts with
+    configured service intent so the scheduler and operator can see why a
+    service was held, promoted, or kept conservative.
+    """
+    service_stats = status.get("service_stats")
+    service_path_stats = status.get("service_path_stats")
+    if not isinstance(service_stats, dict):
+        service_stats = {}
+    if not isinstance(service_path_stats, dict):
+        service_path_stats = {}
+    rows: list[dict[str, object]] = []
+    for service in runtime_config.services:
+        service_counters = service_stats.get(service.name)
+        path_rows = service_path_stats.get(service.name)
+        if not isinstance(service_counters, dict):
+            service_counters = {}
+        if not isinstance(path_rows, dict):
+            path_rows = {}
+        rows.append(
+            {
+                "service": service.name,
+                "traffic_class": service.traffic_class,
+                "priority": service.priority,
+                "path_policy": service.scheduler_path_policy,
+                "allowed_path_ids": list(service.scheduler_allowed_path_ids),
+                "path_weights": [list(weight) for weight in service.scheduler_path_weights],
+                "tx_packets": _int_or_zero(service_counters.get("tx_packets")),
+                "tx_bytes": _int_or_zero(service_counters.get("tx_bytes")),
+                "rx_packets": _int_or_zero(service_counters.get("rx_packets")),
+                "rx_bytes": _int_or_zero(service_counters.get("rx_bytes")),
+                "paths": [
+                    _service_path_outcome_row(path_name, raw_counters, telemetry)
+                    for path_name, raw_counters in sorted(path_rows.items())
+                    if isinstance(path_name, str) and isinstance(raw_counters, dict)
+                ],
+            }
+        )
+    return rows
+
+
+def _service_path_outcome_row(
+    path_name: str,
+    counters: dict[object, object],
+    telemetry: SchedulerTelemetrySnapshot,
+) -> dict[str, object]:
+    """Return one service/path ledger row with both counter and scheduler facts."""
+    metrics = telemetry.paths.get(path_name)
+    row: dict[str, object] = {
+        "path": path_name,
+        "tx_packets": _int_or_zero(counters.get("tx_packets")),
+        "tx_bytes": _int_or_zero(counters.get("tx_bytes")),
+        "rx_packets": _int_or_zero(counters.get("rx_packets")),
+        "rx_bytes": _int_or_zero(counters.get("rx_bytes")),
+        "expected_duplicate_packets": _int_or_zero(counters.get("expected_duplicate_packets")),
+        "unexpected_duplicate_packets": _int_or_zero(counters.get("unexpected_duplicate_packets")),
+        "send_failures": _int_or_zero(counters.get("send_failed_packets")),
+        "fanout_failures": _int_or_zero(counters.get("fanout_failed_packets")),
+    }
+    if metrics is not None:
+        row.update(
+            {
+                "loss_ppm": metrics.loss_ppm,
+                "receiver_blocking_pressure_packets": _receiver_blocking_pressure_packets(metrics),
+                "queue_depth_packets": metrics.queue_depth_packets,
+                "reorder_buffer_packets": metrics.reorder_buffer_packets,
+                "in_flight_packets": metrics.scheduler_in_flight_packets,
+                "in_flight_bytes": metrics.scheduler_in_flight_bytes,
+                "estimated_earliest_delivery_us": metrics.estimated_earliest_delivery_us(),
+                "ack_control_return_quality": _ack_control_return_quality(metrics),
+                "latency_source": metrics.latency_source,
+                "latency_confidence": metrics.latency_confidence,
+            }
+        )
+    return row
+
+
+def _receiver_blocking_pressure_packets(metrics: PathSchedulerMetrics) -> int:
+    """Return receiver-side head-of-line pressure without inventing reliability semantics."""
+    return (
+        metrics.queue_depth_packets
+        + metrics.reorder_buffer_packets
+        + metrics.receive_gaps
+        + metrics.scheduler_in_flight_packets
+    )
+
+
+def _ack_control_return_quality(metrics: PathSchedulerMetrics) -> str:
+    """Summarize whether control/ACK-like feedback is usable on this path."""
+    if metrics.control_tx_frames <= 0 and metrics.control_rx_frames <= 0:
+        return "not_reported"
+    if metrics.control_tx_frames > 0 and metrics.control_rx_frames <= 0:
+        return "tx_only"
+    if metrics.control_rx_frames > 0 and metrics.control_tx_frames <= 0:
+        return "rx_only"
+    if metrics.last_rx_gap_us and metrics.last_rx_gap_us >= 120_000_000:
+        return "stale_rx"
+    return "bidirectional"
+
+
+def _scheduler_promotion_trace(details: dict[str, object]) -> dict[str, object]:
+    """
+    Build a compact, stable trace of why Python did or did not promote a service.
+
+    The trace is intentionally derived from already-exported scheduler facts so
+    it can be emitted through diagnostics, REST, or monitor paths without
+    creating another policy source.
+    """
+    coordinator = details.get("coordinator")
+    allocator = details.get("service_path_allocator")
+    trace: dict[str, object] = {
+        "node_mode": details.get("mode"),
+        "configured_mode": details.get("configured_mode"),
+    }
+    if isinstance(coordinator, dict):
+        trace.update(
+            {
+                "candidate_mode": coordinator.get("candidate_mode"),
+                "effective_mode": coordinator.get("effective_mode"),
+                "switched": bool(coordinator.get("switched")),
+                "blocked_by": coordinator.get("blocked_by"),
+                "reason": coordinator.get("reason"),
+                "signals": list(coordinator.get("signals", [])) if isinstance(coordinator.get("signals"), list) else [],
+            }
+        )
+    else:
+        trace["reason"] = "coordinator_not_active"
+    if isinstance(allocator, dict):
+        trace["service_allocator_reason"] = allocator.get("reason")
+        trace["service_allocator_changed"] = bool(allocator.get("changed"))
+    return trace
 
 
 def _congestion_decision_details(

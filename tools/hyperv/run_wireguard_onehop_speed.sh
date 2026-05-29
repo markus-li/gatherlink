@@ -11,6 +11,7 @@ DURATION=20
 PARALLEL=6
 UDP_RATE="1000M"
 UDP_LENGTH=1200
+UDP_PAYLOAD_MARGIN=0
 LINK_MTU=1500
 WG_MTU=1360
 IMPLEMENTATION="kernel"
@@ -36,7 +37,10 @@ Options:
   --duration SECONDS   iperf duration. Default 20.
   --parallel N         TCP parallel streams. Default 6.
   --udp-rate RATE      UDP offered rate per path. Default 1000M.
-  --udp-length BYTES   UDP block size. Default 1200.
+  --udp-length BYTES   UDP block size, or auto to derive from WG MTU. Default 1200.
+  --udp-payload-margin BYTES
+                        Extra bytes to subtract when --udp-length auto is used.
+                        Use this for smaller paths or extra encapsulation overhead.
   --link-mtu BYTES     Linux path interface MTU on VM A and VM B. Default 1500.
   --wg-mtu BYTES       WireGuard interface MTU. Default 1360.
   --active-paths LIST  Comma-separated path letters. Default a,b,c; supports a,b,c,d,e.
@@ -58,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --parallel) PARALLEL="$2"; shift 2 ;;
     --udp-rate) UDP_RATE="$2"; shift 2 ;;
     --udp-length) UDP_LENGTH="$2"; shift 2 ;;
+    --udp-payload-margin) UDP_PAYLOAD_MARGIN="$2"; shift 2 ;;
     --link-mtu) LINK_MTU="$2"; shift 2 ;;
     --wg-mtu) WG_MTU="$2"; shift 2 ;;
     --active-paths) ACTIVE_PATHS="$2"; shift 2 ;;
@@ -76,6 +81,30 @@ case "${IMPLEMENTATION}" in
 esac
 
 perf_init_defaults
+
+resolve_udp_length() {
+  python3 - "$UDP_LENGTH" "$WG_MTU" "$UDP_PAYLOAD_MARGIN" <<'PY'
+import sys
+
+value = sys.argv[1]
+wg_mtu = int(sys.argv[2])
+margin = int(sys.argv[3])
+if margin < 0:
+    raise SystemExit("--udp-payload-margin must be zero or greater")
+if value == "auto":
+    # UDP payload carried inside the WireGuard interface. IPv4 UDP overhead is
+    # 20 byte IP header plus 8 byte UDP header; explicit margin covers extra
+    # lab or transport overhead when the path is tighter than the WG MTU says.
+    resolved = wg_mtu - 28 - margin
+else:
+    resolved = int(value)
+if resolved <= 0:
+    raise SystemExit("resolved UDP payload length must be greater than zero")
+print(resolved)
+PY
+}
+
+UDP_LENGTH="$(resolve_udp_length)"
 REPORT="${OUT_DIR}/report.md"
 : >"${REPORT}"
 trap perf_cleanup_all EXIT
@@ -165,6 +194,7 @@ perf_record "- duration_seconds: ${DURATION}"
 perf_record "- tcp_parallel: ${PARALLEL}"
 perf_record "- udp_rate: ${UDP_RATE}"
 perf_record "- udp_length: ${UDP_LENGTH}"
+perf_record "- udp_payload_margin: ${UDP_PAYLOAD_MARGIN}"
 perf_record "- link_mtu: ${LINK_MTU}"
 perf_record "- wg_mtu: ${WG_MTU}"
 perf_record "- active_paths: ${ACTIVE_PATHS}"
@@ -255,20 +285,40 @@ pressure_mbit="$(udp_rate_mbit)"
 if [[ "${UDP_PRESSURE_UNBOUNDED}" -eq 1 ]]; then
   pressure_mbit=""
 fi
+if [[ "${PERF_COLLECT_NODE_PROBES}" -eq 1 ]]; then
+  perf_start_node_probe "udp-pressure-node-a" "${PORT_A}" "$((DURATION + 5))"
+  perf_start_node_probe "udp-pressure-node-b" "${PORT_B}" "$((DURATION + 5))"
+fi
 for index in $(path_indexes); do
   label="wg-${IMPLEMENTATION}-path-${index}-udp-pressure-simultaneous"
-  perf_start_udp_pressure_sink "${label}" "${PORT_A}" "10.204.${index}.2:$((8200 + index))" "${DURATION}"
+  perf_start_udp_pressure_sink \
+    "${label}" \
+    "${PORT_A}" \
+    "10.204.${index}.2:$((8200 + index * 100))" \
+    "${DURATION}" \
+    "10.204.${index}.1:$((8300 + index * 100))"
 done
 sleep 1
 for index in $(path_indexes); do
   label="wg-${IMPLEMENTATION}-path-${index}-udp-pressure-simultaneous"
-  perf_start_udp_pressure_client_background "${label}" "${PORT_B}" "10.204.${index}.2:$((8200 + index))" "${DURATION}" "${UDP_LENGTH}" "${pressure_mbit}"
+  perf_start_udp_pressure_client_background \
+    "${label}" \
+    "${PORT_B}" \
+    "10.204.${index}.2:$((8200 + index * 100))" \
+    "${DURATION}" \
+    "${UDP_LENGTH}" \
+    "${pressure_mbit}" \
+    "10.204.${index}.1:$((8300 + index * 100))"
 done
 sleep "$((DURATION + 3))"
 for index in $(path_indexes); do
   label="wg-${IMPLEMENTATION}-path-${index}-udp-pressure-simultaneous"
   perf_fetch_udp_pressure_background "${label}" "${PORT_A}" "${PORT_B}"
 done
+if [[ "${PERF_COLLECT_NODE_PROBES}" -eq 1 ]]; then
+  perf_fetch_node_probe "udp-pressure-node-a" "${PORT_A}"
+  perf_fetch_node_probe "udp-pressure-node-b" "${PORT_B}"
+fi
 
 perf_step "Summary"
 perf_summarize_iperf_jsons | tee -a "${REPORT}"

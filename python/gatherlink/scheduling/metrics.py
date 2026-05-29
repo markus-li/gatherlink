@@ -51,6 +51,8 @@ class PathSchedulerMetrics(GatherlinkBaseModel):
     socket_receive_buffer_bytes: int = Field(default=0, ge=0)
     socket_send_buffer_bytes: int = Field(default=0, ge=0)
     socket_drain_quantum: int = Field(default=0, ge=0)
+    control_tx_frames: int = Field(default=0, ge=0)
+    control_rx_frames: int = Field(default=0, ge=0)
     stale_control_age_us: int = Field(default=0, ge=0)
     last_tx_at_us: int = Field(default=0, ge=0)
     last_rx_at_us: int = Field(default=0, ge=0)
@@ -73,8 +75,8 @@ class PathSchedulerMetrics(GatherlinkBaseModel):
 
     @property
     def has_trusted_real_data_latency(self) -> bool:
-        """Return whether latency came from matched real payload traffic."""
-        return self.latency_source == "data-traffic-one-way" and self.latency_confidence in {"good", "warming"}
+        """Return whether matched real-payload latency is good enough for promotion policy."""
+        return self.latency_source == "data-traffic-one-way" and self.latency_confidence == "good"
 
     def estimated_earliest_delivery_us(self, *, payload_bytes: int = 0) -> int | None:
         """
@@ -171,6 +173,9 @@ def scheduler_metrics_from_control_metadata(
         latency = {}
     if not isinstance(pressure, dict):
         pressure = {}
+    path_control = control_metadata.get("path_control")
+    if not isinstance(path_control, dict):
+        path_control = {}
 
     path_names = set(default_path_ids)
     path_names.update(str(name) for name in capacity.keys())
@@ -188,6 +193,15 @@ def scheduler_metrics_from_control_metadata(
             latency_record = {}
         if not isinstance(pressure_record, dict):
             pressure_record = {}
+        path_control_record = path_control.get(path_name)
+        if not isinstance(path_control_record, dict):
+            path_control_record = {}
+        control_tx = path_control_record.get("tx")
+        control_rx = path_control_record.get("rx")
+        if not isinstance(control_tx, dict):
+            control_tx = {}
+        if not isinstance(control_rx, dict):
+            control_rx = {}
 
         metrics[path_name] = PathSchedulerMetrics(
             path_name=path_name,
@@ -222,6 +236,8 @@ def scheduler_metrics_from_control_metadata(
             socket_receive_buffer_bytes=_optional_int(pressure_record.get("socket_receive_buffer_bytes")) or 0,
             socket_send_buffer_bytes=_optional_int(pressure_record.get("socket_send_buffer_bytes")) or 0,
             socket_drain_quantum=_optional_int(pressure_record.get("socket_drain_quantum")) or 0,
+            control_tx_frames=_optional_int(control_tx.get("frames")) or 0,
+            control_rx_frames=_optional_int(control_rx.get("frames")) or 0,
             stale_control_age_us=_optional_int(pressure_record.get("stale_control_age_us")) or 0,
             last_tx_at_us=_optional_int(pressure_record.get("last_tx_at_us")) or 0,
             last_rx_at_us=_optional_int(pressure_record.get("last_rx_at_us")) or 0,

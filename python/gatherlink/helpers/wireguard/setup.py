@@ -242,10 +242,15 @@ def generate_wireguard_setup(request: WireGuardSetupRequest) -> GeneratedWireGua
     next_steps = [
         "gatherlink config validate gatherlink-server.json",
         "gatherlink config validate gatherlink-client.json",
+        "gatherlink doctor --config gatherlink-server.json",
+        "gatherlink doctor --config gatherlink-client.json",
         "gatherlink helpers wireguard-plan gatherlink-client.json",
         "start the Gatherlink server before the client",
         "start WireGuard with your normal wg/wg-quick tooling",
+        "send a ping or curl over the WireGuard interface after WireGuard is up",
+        "check gatherlink services status core.wg-server core.wg-client",
         "watch gatherlink services monitor core.wg-server core.wg-client",
+        "stop with gatherlink services close core.wg-client core.wg-server",
     ]
     return GeneratedWireGuardSetup(request=request, files=files, warnings=warnings, next_steps=next_steps)
 
@@ -495,14 +500,32 @@ Start shape:
 ```bash
 gatherlink config validate gatherlink-server.json
 gatherlink config validate gatherlink-client.json
+gatherlink doctor --config gatherlink-server.json
+gatherlink doctor --config gatherlink-client.json
+gatherlink helpers wireguard-plan gatherlink-client.json
 gatherlink run start gatherlink-server.json --name core.wg-server --scheduler-reapply-interval 5
 gatherlink run start gatherlink-client.json --name core.wg-client --scheduler-reapply-interval 5
-gatherlink helpers wireguard-plan gatherlink-client.json
+gatherlink services status core.wg-server core.wg-client
 gatherlink services monitor core.wg-server core.wg-client --once
 ```
 
 WireGuard still owns keys, interfaces, routes, and firewall policy. Replace
 placeholder WireGuard keys before running `wg-quick`.
+
+Traffic check:
+
+```bash
+# After replacing WireGuard keys and starting WireGuard, send normal traffic
+# through the WireGuard interface, for example ping or curl to a routed test host.
+ping -c 3 <wireguard-reachable-address>
+curl http://<wireguard-reachable-test-host>/
+```
+
+Cleanup:
+
+```bash
+gatherlink services close core.wg-client core.wg-server
+```
 """
 
 

@@ -212,6 +212,115 @@ def test_hot_reapply_scheduler_from_status_updates_service_scheduler_primitives(
     ]
 
 
+def test_hot_reapply_coordinated_tcp_fallback_applies_allowed_service_path_id() -> None:
+    config = _config().model_copy(
+        update={
+            "scheduler": SchedulerConfig(mode="coordinated_adaptive", traffic_bias="tcp"),
+            "paths": [
+                PathConfig(
+                    name="path-a",
+                    interface="lo",
+                    scheduler=PathSchedulerConfig(mtu=1200, tx_capacity_bps=500_000_000),
+                ),
+                PathConfig(
+                    name="path-b",
+                    interface="lo",
+                    scheduler=PathSchedulerConfig(mtu=1200, tx_capacity_bps=900_000_000),
+                ),
+            ],
+            "services": [
+                ServiceConfig(
+                    name="wireguard",
+                    listen="127.0.0.1:0",
+                    target="127.0.0.1:51820",
+                    traffic_class="tcp_ordered",
+                )
+            ],
+        }
+    )
+    runtime = expand_config(config)
+    stale_service = runtime.services[0].model_copy(
+        update={
+            "scheduler_path_policy": "inherit",
+            "scheduler_allowed_path_ids": [],
+            "scheduler_path_weights": [],
+        }
+    )
+    runtime = runtime.model_copy(update={"services": [stale_service]})
+    coordinator = SchedulerPolicyCoordinator(
+        minimum_dwell_packets=1,
+        minimum_dwell_seconds=0.0,
+        required_confidence_windows=1,
+        now=lambda: 30.0,
+    )
+    service_calls = []
+
+    class Dataplane:
+        def set_service_scheduler(
+            self,
+            service_id,
+            fanout,
+            fanout_below_bytes,
+            flowlet_idle_us,
+            flowlet_max_hold_us,
+            path_run_datagrams,
+            path_policy="inherit",
+            allowed_path_ids=None,
+            path_weights=None,
+        ):
+            service_calls.append(
+                (
+                    service_id,
+                    fanout,
+                    fanout_below_bytes,
+                    flowlet_idle_us,
+                    flowlet_max_hold_us,
+                    path_run_datagrams,
+                    path_policy,
+                    allowed_path_ids or [],
+                    path_weights or [],
+                )
+            )
+
+    updated = hot_reapply_scheduler_from_status(
+        Dataplane(),
+        config,
+        runtime,
+        {
+            "control_metadata": {
+                "path_capacity": {
+                    "path-a": {"tx_bps": 500_000_000},
+                    "path-b": {"tx_bps": 900_000_000},
+                }
+            },
+            "path_stats": {
+                "path-a": {"packets": 10_000, "missed_packets": 0, "qdisc_dropped_packets": 0},
+                "path-b": {"packets": 10_000, "missed_packets": 0, "qdisc_dropped_packets": 0},
+            },
+        },
+        reapply=lambda _dataplane, _runtime_config: None,
+        scheduler_coordinator=coordinator,
+    )
+
+    assert coordinator.last_decision is not None
+    assert coordinator.last_decision.effective_mode == "single_best_path"
+    assert updated.services[0].scheduler_path_policy == "single_best_path"
+    assert updated.services[0].scheduler_allowed_path_ids == [1]
+    assert service_calls == [
+        (
+            updated.services[0].service_id,
+            1,
+            0,
+            0,
+            0,
+            0,
+            "single_best_path",
+            [1],
+            [],
+        )
+    ]
+
+
 def test_recompile_runtime_from_status_preserves_explicit_service_scheduler_primitives() -> None:
     config = _config().model_copy(
         update={
@@ -529,6 +638,78 @@ def test_scheduler_decision_event_from_status_explains_path_health() -> None:
     path_b = next(path for path in event.details["paths"] if path["path"] == "path-b")
     assert path_b["health"] == "degraded"
     assert "send_failures" in path_b["reasons"]
+
+
+def test_scheduler_decision_event_includes_service_path_outcome_ledger() -> None:
+    config = _config()
+    runtime = expand_config(config)
+
+    event = scheduler_decision_event_from_status(
+        config,
+        runtime,
+        {
+            "control_metadata": {
+                "path_control": {
+                    "path-a": {
+                        "tx": {"frames": 12},
+                        "rx": {"frames": 10},
+                    }
+                },
+                "path_latency": {
+                    "path-a": {
+                        "tx_mean_us": 10_000,
+                        "source": "data-traffic-one-way",
+                        "confidence": "good",
+                    }
+                },
+                "path_pressure": {
+                    "path-a": {
+                        "queue_depth_packets": 2,
+                        "receive_gaps": 3,
+                        "reorder_buffer_packets": 4,
+                        "scheduler_in_flight_packets": 5,
+                        "scheduler_in_flight_bytes": 6000,
+                    }
+                },
+            },
+            "service_stats": {
+                "udp-main": {
+                    "tx_packets": 11,
+                    "tx_bytes": 1200,
+                    "rx_packets": 9,
+                    "rx_bytes": 900,
+                }
+            },
+            "service_path_stats": {
+                "udp-main": {
+                    "path-a": {
+                        "tx_packets": 7,
+                        "tx_bytes": 700,
+                        "rx_packets": 6,
+                        "rx_bytes": 600,
+                        "expected_duplicate_packets": 1,
+                    }
+                }
+            },
+        },
+    )
+
+    ledger = event.details["service_path_outcomes"][0]
+    assert ledger["service"] == "udp-main"
+    assert ledger["tx_packets"] == 11
+    assert ledger["path_policy"] == runtime.services[0].scheduler_path_policy
+    path_row = ledger["paths"][0]
+    assert path_row["path"] == "path-a"
+    assert path_row["tx_packets"] == 7
+    assert path_row["expected_duplicate_packets"] == 1
+    assert path_row["receiver_blocking_pressure_packets"] == 14
+    assert path_row["ack_control_return_quality"] == "bidirectional"
+
+    path_details = next(path for path in event.details["paths"] if path["path"] == "path-a")
+    assert path_details["observed_in_flight_packets"] == 5
+    assert path_details["receiver_blocking_pressure_packets"] == 14
+    assert path_details["estimated_earliest_delivery_us"] is not None
+    assert event.details["promotion_trace"]["reason"] == "coordinator_not_active"
 
 
 def test_scheduler_decision_event_explains_congestion_fairness_backoff() -> None:

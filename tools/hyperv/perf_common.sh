@@ -22,6 +22,26 @@ perf_init_defaults() {
   PARALLEL="${PARALLEL:-6}"
   UDP_RATE="${UDP_RATE:-1000M}"
   UDP_LENGTH="${UDP_LENGTH:-1200}"
+  PERF_UDP_PRESSURE_FLOWS="${PERF_UDP_PRESSURE_FLOWS:-1}"
+  PERF_UDP_PRESSURE_WORKERS="${PERF_UDP_PRESSURE_WORKERS:-1}"
+  PERF_UDP_PRESSURE_PORT_STRIDE="${PERF_UDP_PRESSURE_PORT_STRIDE:-16}"
+  PERF_UDP_PRESSURE_SEND_BATCH="${PERF_UDP_PRESSURE_SEND_BATCH:-64}"
+  PERF_UDP_PRESSURE_RECV_BATCH="${PERF_UDP_PRESSURE_RECV_BATCH:-128}"
+  PERF_UDP_PRESSURE_RECV_BUFFER_SIZE="${PERF_UDP_PRESSURE_RECV_BUFFER_SIZE:-65535}"
+  PERF_UDP_PRESSURE_RECV_TRUNCATE="${PERF_UDP_PRESSURE_RECV_TRUNCATE:-0}"
+  PERF_UDP_PRESSURE_SINK_CPUSET="${PERF_UDP_PRESSURE_SINK_CPUSET:-}"
+  PERF_UDP_PRESSURE_SEND_CPUSET="${PERF_UDP_PRESSURE_SEND_CPUSET:-}"
+  PERF_UDP_PRESSURE_GSO_SEGMENTS="${PERF_UDP_PRESSURE_GSO_SEGMENTS:-1}"
+  PERF_UDP_PRESSURE_FEEDBACK="${PERF_UDP_PRESSURE_FEEDBACK:-0}"
+  PERF_UDP_PRESSURE_FEEDBACK_HEADROOM="${PERF_UDP_PRESSURE_FEEDBACK_HEADROOM:-1.02}"
+  PERF_UDP_PRESSURE_FEEDBACK_INTERVAL_MS="${PERF_UDP_PRESSURE_FEEDBACK_INTERVAL_MS:-500}"
+  PERF_UDP_PRESSURE_FEEDBACK_INITIAL_MBIT="${PERF_UDP_PRESSURE_FEEDBACK_INITIAL_MBIT:-0}"
+  PERF_UDP_PRESSURE_FEEDBACK_MAX_MBIT="${PERF_UDP_PRESSURE_FEEDBACK_MAX_MBIT:-0}"
+  PERF_UDP_PRESSURE_FEEDBACK_PROBE_STEP_MBIT="${PERF_UDP_PRESSURE_FEEDBACK_PROBE_STEP_MBIT:-250}"
+  PERF_UDP_PRESSURE_FEEDBACK_GOOD_RATIO="${PERF_UDP_PRESSURE_FEEDBACK_GOOD_RATIO:-0.985}"
+  PERF_UDP_PRESSURE_FEEDBACK_LOW_RATIO="${PERF_UDP_PRESSURE_FEEDBACK_LOW_RATIO:-0.75}"
+  PERF_UDP_PRESSURE_FEEDBACK_BACKOFF_RATIO="${PERF_UDP_PRESSURE_FEEDBACK_BACKOFF_RATIO:-0.95}"
+  PERF_COLLECT_NODE_PROBES="${PERF_COLLECT_NODE_PROBES:-0}"
   PERF_KEEP_RUNNING="${PERF_KEEP_RUNNING:-0}"
   PERF_APPLY_KERNEL_TUNING="${PERF_APPLY_KERNEL_TUNING:-1}"
   PERF_SSH_RSA_COMPAT="${PERF_SSH_RSA_COMPAT:-1}"
@@ -30,6 +50,7 @@ perf_init_defaults() {
   PERF_REMOTE_REPO="${PERF_REMOTE_REPO:-/home/gatherlink/src/gatherlink}"
   PERF_IPERF_TCP_CLIENT_ARGS="${PERF_IPERF_TCP_CLIENT_ARGS:-}"
   PERF_IPERF_TCP_SERVER_ARGS="${PERF_IPERF_TCP_SERVER_ARGS:-}"
+  PERF_IPERF_UDP_PARALLEL="${PERF_IPERF_UDP_PARALLEL:-1}"
   OUT_DIR="${OUT_DIR:-${REPO_ROOT}/.gatherlink/hyperv-performance/$(date -u +%Y%m%dT%H%M%SZ)}"
   REPORT="${REPORT:-${OUT_DIR}/report.md}"
   REPORT_JSON="${REPORT_JSON:-${OUT_DIR}/report.json}"
@@ -188,7 +209,7 @@ perf_start_node_probe() {
   local label="$1"
   local port="$2"
   local seconds="$3"
-  perf_remote "${port}" "cd ${PERF_REMOTE_REPO} && rm -f /tmp/${label}.perf.json && setsid -f .venv/bin/python tools/hyperv/vm_perf_probe.py --duration ${seconds} --interval 0.5 --out /tmp/${label}.perf.json --match gatherlink --match python --match iperf3 --match wireguard-go --match gotatun --match boringtun-cli --netdev path-a --netdev path-b --netdev path-c --netdev path-d --netdev path-e >/tmp/${label}.perf.log 2>&1 < /dev/null"
+  perf_remote "${port}" "cd ${PERF_REMOTE_REPO} && rm -f /tmp/${label}.perf.json && setsid -f .venv/bin/python tools/hyperv/vm_perf_probe.py --duration ${seconds} --interval 0.5 --out /tmp/${label}.perf.json --match gatherlink --match udp-pressure --match python --match iperf3 --match wireguard-go --match gotatun --match boringtun-cli --netdev path-a --netdev path-b --netdev path-c --netdev path-d --netdev path-e >/tmp/${label}.perf.log 2>&1 < /dev/null"
 }
 
 perf_fetch_node_probe() {
@@ -288,7 +309,7 @@ perf_start_iperf_udp_client_background() {
   local length="$6"
   local seconds="$7"
 
-  perf_remote "${client_port}" "rm -f /tmp/${label}.json /tmp/${label}.stderr /tmp/${label}.pid; setsid -f sh -c 'iperf3 -c ${target_addr} -p ${port_number} -u -b ${rate} -l ${length} -t ${seconds} --json >/tmp/${label}.json 2>/tmp/${label}.stderr' >/dev/null 2>&1; echo \$! >/tmp/${label}.pid"
+  perf_remote "${client_port}" "rm -f /tmp/${label}.json /tmp/${label}.stderr /tmp/${label}.pid; setsid -f sh -c 'iperf3 -c ${target_addr} -p ${port_number} -u -P ${PERF_IPERF_UDP_PARALLEL} -b ${rate} -l ${length} -t ${seconds} --json >/tmp/${label}.json 2>/tmp/${label}.stderr' >/dev/null 2>&1; echo \$! >/tmp/${label}.pid"
 }
 
 perf_fetch_iperf_udp_background() {
@@ -331,8 +352,21 @@ perf_start_udp_pressure_sink() {
   local server_port="$2"
   local bind_addr="$3"
   local duration="$4"
+  local feedback_target="${5:-}"
 
-  perf_remote "${server_port}" "rm -f /tmp/${label}.json /tmp/${label}.progress /tmp/${label}.stderr /tmp/${label}.pid; nohup /tmp/gatherlink-udp-pressure sink --bind ${bind_addr} --duration $((duration + 10)) --idle-after-first 2 --out /tmp/${label}.progress >/tmp/${label}.json 2>/tmp/${label}.stderr < /dev/null & echo \$! >/tmp/${label}.pid"
+  local feedback_arg=""
+  if [[ "${PERF_UDP_PRESSURE_FEEDBACK}" -eq 1 && -n "${feedback_target}" ]]; then
+    feedback_arg="--feedback-target ${feedback_target} --feedback-interval-ms ${PERF_UDP_PRESSURE_FEEDBACK_INTERVAL_MS}"
+  fi
+  local truncate_arg=""
+  if [[ "${PERF_UDP_PRESSURE_RECV_TRUNCATE}" -eq 1 ]]; then
+    truncate_arg="--recv-truncate"
+  fi
+  local taskset_arg=""
+  if [[ -n "${PERF_UDP_PRESSURE_SINK_CPUSET}" ]]; then
+    taskset_arg="taskset -c ${PERF_UDP_PRESSURE_SINK_CPUSET}"
+  fi
+  perf_remote "${server_port}" "rm -f /tmp/${label}.json /tmp/${label}.progress /tmp/${label}.stderr /tmp/${label}.pid; nohup ${taskset_arg} /tmp/gatherlink-udp-pressure sink --bind ${bind_addr} --duration $((duration + 10)) --idle-after-first 2 --out /tmp/${label}.progress --workers ${PERF_UDP_PRESSURE_WORKERS} --bind-port-stride ${PERF_UDP_PRESSURE_PORT_STRIDE} --recv-batch ${PERF_UDP_PRESSURE_RECV_BATCH} --recv-buffer-size ${PERF_UDP_PRESSURE_RECV_BUFFER_SIZE} ${truncate_arg} ${feedback_arg} >/tmp/${label}.json 2>/tmp/${label}.stderr < /dev/null & echo \$! >/tmp/${label}.pid"
 }
 
 perf_start_udp_pressure_client_background() {
@@ -342,12 +376,21 @@ perf_start_udp_pressure_client_background() {
   local duration="$4"
   local payload_size="$5"
   local target_mbit="$6"
+  local feedback_bind="${7:-}"
 
   local rate_arg=""
   if [[ -n "${target_mbit}" ]]; then
     rate_arg="--target-mbit ${target_mbit}"
   fi
-  perf_remote "${client_port}" "rm -f /tmp/${label}.json /tmp/${label}.stderr /tmp/${label}.pid; setsid -f sh -c '/tmp/gatherlink-udp-pressure send --target ${target_addr} --duration ${duration} --payload-size ${payload_size} ${rate_arg} >/tmp/${label}.json 2>/tmp/${label}.stderr' >/dev/null 2>&1; echo \$! >/tmp/${label}.pid"
+  local feedback_arg=""
+  if [[ "${PERF_UDP_PRESSURE_FEEDBACK}" -eq 1 && -n "${feedback_bind}" ]]; then
+    feedback_arg="--feedback-bind ${feedback_bind} --feedback-headroom ${PERF_UDP_PRESSURE_FEEDBACK_HEADROOM} --feedback-initial-mbit ${PERF_UDP_PRESSURE_FEEDBACK_INITIAL_MBIT} --feedback-max-mbit ${PERF_UDP_PRESSURE_FEEDBACK_MAX_MBIT} --feedback-probe-step-mbit ${PERF_UDP_PRESSURE_FEEDBACK_PROBE_STEP_MBIT} --feedback-good-ratio ${PERF_UDP_PRESSURE_FEEDBACK_GOOD_RATIO} --feedback-low-ratio ${PERF_UDP_PRESSURE_FEEDBACK_LOW_RATIO} --feedback-backoff-ratio ${PERF_UDP_PRESSURE_FEEDBACK_BACKOFF_RATIO}"
+  fi
+  local taskset_arg=""
+  if [[ -n "${PERF_UDP_PRESSURE_SEND_CPUSET}" ]]; then
+    taskset_arg="taskset -c ${PERF_UDP_PRESSURE_SEND_CPUSET}"
+  fi
+  perf_remote "${client_port}" "rm -f /tmp/${label}.json /tmp/${label}.stderr /tmp/${label}.pid; setsid -f sh -c '${taskset_arg} /tmp/gatherlink-udp-pressure send --target ${target_addr} --duration ${duration} --payload-size ${payload_size} ${rate_arg} --flows ${PERF_UDP_PRESSURE_FLOWS} --target-port-stride ${PERF_UDP_PRESSURE_PORT_STRIDE} --send-batch ${PERF_UDP_PRESSURE_SEND_BATCH} --udp-gso-segments ${PERF_UDP_PRESSURE_GSO_SEGMENTS} ${feedback_arg} >/tmp/${label}.json 2>/tmp/${label}.stderr' >/dev/null 2>&1; echo \$! >/tmp/${label}.pid"
 }
 
 perf_fetch_udp_pressure_background() {
@@ -355,6 +398,8 @@ perf_fetch_udp_pressure_background() {
   local server_port="$2"
   local client_port="$3"
 
+  perf_wait_remote_file "${client_port}" "/tmp/${label}.json" 20 || true
+  perf_wait_remote_file "${server_port}" "/tmp/${label}.json" 20 || true
   perf_remote "${client_port}" "cat /tmp/${label}.json 2>/dev/null || true" >"${OUT_DIR}/${label}-generator.json" || true
   perf_remote "${client_port}" "cat /tmp/${label}.stderr 2>/dev/null || true" >"${OUT_DIR}/${label}-generator.stderr" || true
   perf_remote "${server_port}" "cat /tmp/${label}.json 2>/dev/null || cat /tmp/${label}.progress 2>/dev/null || true" >"${OUT_DIR}/${label}-sink.json" || true
@@ -392,16 +437,18 @@ for path in sorted(out_dir.glob("*.json")):
         continue
     if "bits_per_second" in data and "packets" in data:
         bps = float(data.get("bits_per_second") or 0)
-        results.append(
-            {
-                "name": path.stem,
-                "bits_per_second": bps,
-                "mbit_per_second": bps / 1_000_000,
-                "packets": int(data.get("packets") or 0),
-                "bytes": int(data.get("bytes") or 0),
-                "complete": bool(data.get("complete", False)),
-            }
-        )
+        result = {
+            "name": path.stem,
+            "bits_per_second": bps,
+            "mbit_per_second": bps / 1_000_000,
+            "packets": int(data.get("packets") or 0),
+            "bytes": int(data.get("bytes") or 0),
+            "complete": bool(data.get("complete", False)),
+        }
+        for key in ("send_calls", "recv_calls", "max_send_batch", "max_recv_batch"):
+            if key in data:
+                result[key] = int(data.get(key) or 0)
+        results.append(result)
         continue
     end = data.get("end", {})
     if not isinstance(end, dict) or not end:
@@ -416,7 +463,7 @@ for path in sorted(out_dir.glob("*.json")):
     }
     if "lost_percent" in received:
         result["lost_percent"] = float(received["lost_percent"])
-    if "lost_percent" in sent:
+    elif "lost_percent" in sent:
         result["lost_percent"] = float(sent["lost_percent"])
     if "retransmits" in sent:
         result["retransmits"] = int(sent["retransmits"])

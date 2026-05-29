@@ -81,6 +81,11 @@ class PathLatencyTracker:
             existing.update(_observe_direction(path_samples["tx"], "tx", tx_one_way_us, now))
         if rx_one_way_us is not None:
             existing.update(_observe_direction(path_samples["rx"], "rx", rx_one_way_us, now))
+        source, confidence = _preserve_stronger_latency_provenance(
+            existing,
+            source=source,
+            confidence=confidence,
+        )
         existing.update(
             {
                 "source": source,
@@ -111,7 +116,24 @@ class PathLatencyTracker:
         lets operators and schedulers distinguish "no data" from "bad data was
         seen and ignored" without letting impossible samples steer path policy.
         """
+        now = time.monotonic()
+        path_samples = self._samples.setdefault(path_name, {"tx": deque(), "rx": deque()})
+        _prune_direction(path_samples["tx"], now)
+        _prune_direction(path_samples["rx"], now)
         existing = dict(self._latency.get(path_name, {}))
+        has_fresh_latency = bool(path_samples["tx"] or path_samples["rx"])
+        if has_fresh_latency and existing.get("source") not in {None, "rejected"}:
+            existing.update(
+                {
+                    "rejection_reason": reason,
+                    "rejection_rtt_us": rtt_us,
+                    "rejection_clock_error_us": clock_error_us,
+                    "rejection_updated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+            self._latency[path_name] = existing
+            self._dirty.add(path_name)
+            return {path_name: dict(existing)}
         existing.update(
             {
                 "source": source,
@@ -199,6 +221,7 @@ class DataTrafficLatencyTracker:
         *,
         peer_scope: int | None,
         local_clock_offset_us: int | None,
+        local_clock_is_authoritative: bool = False,
         latency_tracker: PathLatencyTracker,
         rtt_us: int | None,
         clock_error_us: int | None,
@@ -219,6 +242,7 @@ class DataTrafficLatencyTracker:
                     peer_tx_us=peer_tx_us,
                     latency_tracker=latency_tracker,
                     local_clock_offset_us=local_clock_offset_us,
+                    local_clock_is_authoritative=local_clock_is_authoritative,
                     rtt_us=rtt_us,
                     clock_error_us=clock_error_us,
                 )
@@ -229,6 +253,7 @@ class DataTrafficLatencyTracker:
         self,
         *,
         local_clock_offset_us: int | None,
+        local_clock_is_authoritative: bool = False,
         latency_tracker: PathLatencyTracker,
         rtt_us: int | None,
         clock_error_us: int | None,
@@ -244,6 +269,7 @@ class DataTrafficLatencyTracker:
                     peer_tx_us=peer_tx_us,
                     latency_tracker=latency_tracker,
                     local_clock_offset_us=local_clock_offset_us,
+                    local_clock_is_authoritative=local_clock_is_authoritative,
                     rtt_us=rtt_us,
                     clock_error_us=clock_error_us,
                 )
@@ -263,6 +289,7 @@ class DataTrafficLatencyTracker:
         peer_tx_us: int,
         latency_tracker: PathLatencyTracker,
         local_clock_offset_us: int | None,
+        local_clock_is_authoritative: bool,
         rtt_us: int | None,
         clock_error_us: int | None,
     ) -> dict[str, dict[str, int | str | None]]:
@@ -270,7 +297,7 @@ class DataTrafficLatencyTracker:
         local_rx_us, _sampled_at = self._rx_samples[key]
         one_way_us = local_rx_us - peer_tx_us
         path_name = self._path_names_by_id.get(path_id, f"path-id:{path_id}")
-        confidence = "good" if local_clock_offset_us is not None else "warming"
+        confidence = "good" if local_clock_offset_us is not None or local_clock_is_authoritative else "warming"
         return latency_tracker.observe_directional(
             path_name,
             tx_one_way_us=one_way_us,
@@ -301,8 +328,7 @@ def _observe_direction(
 ) -> dict[str, int]:
     """Update one directional latency window and return status fields."""
     samples.append((now, one_way_us))
-    while samples and now - samples[0][0] > PATH_LATENCY_MEAN_WINDOW_SECONDS:
-        samples.popleft()
+    _prune_direction(samples, now)
     observed = [sample for _sample_at, sample in samples]
     mean_us = int(sum(observed) / max(len(observed), 1))
     jitter_us = _mean_absolute_jitter_us(observed, mean_us)
@@ -313,6 +339,34 @@ def _observe_direction(
         f"{direction}_jitter_us": jitter_us,
         f"{direction}_p95_us": p95_us,
     }
+
+
+def _prune_direction(samples: deque[tuple[float, int]], now: float) -> None:
+    """Drop stale directional latency samples from a rolling window."""
+    while samples and now - samples[0][0] > PATH_LATENCY_MEAN_WINDOW_SECONDS:
+        samples.popleft()
+
+
+def _preserve_stronger_latency_provenance(
+    existing: dict[str, int | str | None],
+    *,
+    source: str,
+    confidence: str,
+) -> tuple[str, str]:
+    """
+    Keep stronger real-data provenance when weaker probes arrive later.
+
+    Clock-sync probes are useful for bootstrap and stats, but matched payload
+    timing is the proof Python wants for TCP-like ordered promotion. Do not let
+    a later control probe silently relabel a fresh real-data row as merely
+    clock-derived.
+    """
+    if existing.get("source") == "data-traffic-one-way" and existing.get("confidence") == "good":
+        if source != "data-traffic-one-way":
+            existing["latest_probe_source"] = source
+            existing["latest_probe_confidence"] = confidence
+            return "data-traffic-one-way", "good"
+    return source, confidence
 
 
 def _parse_timing_sample(sample: object) -> tuple[int, int, int, int, int | None] | None:

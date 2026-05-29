@@ -35,6 +35,7 @@ def drain_reserved_service_events(
     clock_sync_responses: list[InternalClockSyncMessage] | None = None,
     path_latency_tracker: PathLatencyTracker | None = None,
     data_traffic_latency_tracker: DataTrafficLatencyTracker | None = None,
+    local_clock_is_authoritative: bool = False,
     extra_handlers: dict[int, Callable[[ReservedServicePayload], bool]] | None = None,
     logger: Callable[[str], None] | None = None,
 ) -> int:
@@ -72,6 +73,7 @@ def drain_reserved_service_events(
                 clock_sync_responses=clock_sync_responses,
                 path_latency_tracker=path_latency_tracker,
                 data_traffic_latency_tracker=data_traffic_latency_tracker,
+                local_clock_is_authoritative=local_clock_is_authoritative,
                 logger=logger,
             ):
                 handled += 1
@@ -90,6 +92,7 @@ def handle_control_metadata_event(
     clock_sync_responses: list[InternalClockSyncMessage] | None = None,
     path_latency_tracker: PathLatencyTracker | None = None,
     data_traffic_latency_tracker: DataTrafficLatencyTracker | None = None,
+    local_clock_is_authoritative: bool = False,
     logger: Callable[[str], None] | None = None,
 ) -> bool:
     """Decode and apply one control-metadata payload into the shared status shape."""
@@ -123,6 +126,12 @@ def handle_control_metadata_event(
     control_metadata_helpers.record_control_path_latency_quality(
         control_metadata,
         control_frame.path_latency_quality,
+        control_frame.path_metadata,
+        path_names_by_id,
+    )
+    control_metadata_helpers.record_control_path_latency_stats(
+        control_metadata,
+        control_frame.path_latency_stats,
         control_frame.path_metadata,
         path_names_by_id,
     )
@@ -161,6 +170,7 @@ def handle_control_metadata_event(
             control_frame.data_transmit_samples,
             peer_scope=event.peer_scope,
             local_clock_offset_us=_current_clock_offset_us(control_metadata),
+            local_clock_is_authoritative=local_clock_is_authoritative,
             latency_tracker=path_latency_tracker,
             rtt_us=_current_clock_rtt_us(control_metadata),
             clock_error_us=_current_clock_error_us(control_metadata),
@@ -306,6 +316,7 @@ def note_control_metadata_sent(
             + len(frame.path_capacity_bps)
             + len(frame.path_latency_us)
             + len(frame.path_latency_quality)
+            + len(frame.path_latency_stats)
             + len(frame.path_mtu)
             + len(frame.path_pressure)
             + (1 if frame.scheduler_status is not None else 0)

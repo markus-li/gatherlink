@@ -106,6 +106,7 @@ def announce_control_metadata(
         "path_capacity_bps": control_metadata_helpers.capacity_by_path_id(path_capacity, path_ids),
         "path_latency_us": control_metadata_helpers.latency_by_path_id(path_latency, path_ids),
         "path_latency_quality": control_metadata_helpers.latency_quality_by_path_id(path_latency, path_ids),
+        "path_latency_stats": control_metadata_helpers.latency_stats_by_path_id(path_latency, path_ids),
         "path_mtu": control_metadata_helpers.mtu_by_path_id(path_mtu, path_ids),
         "path_pressure": control_metadata_helpers.pressure_by_path_id(path_pressure, path_ids),
         "scheduler_status": scheduler_status,

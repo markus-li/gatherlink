@@ -65,6 +65,28 @@ impl FragmentReassembly {
         }
         Ok(result)
     }
+
+    /// Consume a decoded frame and move its payload when no fragment reassembly is needed.
+    ///
+    /// TODO(perf): Keep owned-frame receive paths on this method. The borrowed
+    /// variant remains useful for older tests and adapters, but production
+    /// receive already owns the decoded frame after AEAD/open and should not
+    /// clone every unfragmented WireGuard-sized payload before UDP emit.
+    pub(crate) fn push_frame_or_payload(&mut self, frame: Frame) -> Result<Option<Vec<u8>>, DataplaneError> {
+        let Some(fragment) = frame.fragment_info()? else {
+            return Ok(Some(frame.payload));
+        };
+
+        let buffer = self
+            .datagrams
+            .entry(fragment.datagram_id)
+            .or_insert_with(|| FragmentBuffer::new(fragment));
+        let result = buffer.push(fragment, frame.payload)?;
+        if result.is_some() {
+            self.datagrams.remove(&fragment.datagram_id);
+        }
+        Ok(result)
+    }
 }
 
 #[derive(Debug)]

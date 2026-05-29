@@ -289,6 +289,137 @@ def test_per_service_path_policy_expands_to_runtime_primitive() -> None:
     runtime = expand_config(config)
 
     assert runtime.services[0].scheduler_path_policy == "single_best_path"
+    assert runtime.services[0].scheduler_allowed_path_ids == [0]
+
+
+def test_ordered_mode_protects_tcp_ordered_service_with_single_best_path_policy() -> None:
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, SchedulerConfig, ServiceConfig
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath_capacity_aware"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 500_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 500_000_000}),
+        ],
+        services=[
+            ServiceConfig(
+                name="wireguard",
+                target="127.0.0.1:51820",
+                traffic_class="tcp_ordered",
+            )
+        ],
+    )
+
+    runtime = expand_config(config)
+
+    assert [path.scheduler.state for path in runtime.paths] == ["active", "active"]
+    assert runtime.services[0].scheduler_path_policy == "single_best_path"
+    assert runtime.services[0].scheduler_allowed_path_ids == [0]
+
+
+def test_explicit_inherit_allows_tcp_ordered_service_to_try_ordered_policy() -> None:
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, SchedulerConfig, ServiceConfig
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath_capacity_aware"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 500_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 500_000_000}),
+        ],
+        services=[
+            ServiceConfig(
+                name="wireguard",
+                target="127.0.0.1:51820",
+                traffic_class="tcp_ordered",
+                scheduler_path_policy="inherit",
+            )
+        ],
+    )
+
+    runtime = expand_config(config)
+
+    assert [path.scheduler.state for path in runtime.paths] == ["active", "active"]
+    assert runtime.services[0].scheduler_path_policy == "inherit"
+    assert runtime.services[0].scheduler_allowed_path_ids == []
+
+
+def test_coordinated_tcp_fallback_protects_service_with_allowed_path_id() -> None:
+    from gatherlink.config.expansion import compile_service_scheduler_primitives
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, ServiceConfig
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 500_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 900_000_000}),
+        ],
+        services=[
+            ServiceConfig(
+                name="wireguard",
+                target="127.0.0.1:51820",
+                traffic_class="tcp_ordered",
+            )
+        ],
+    )
+
+    primitives = compile_service_scheduler_primitives(
+        config,
+        config.services[0],
+        effective_scheduler_mode="single_best_path",
+    )
+
+    assert primitives["scheduler_path_policy"] == "single_best_path"
+    assert primitives["scheduler_allowed_path_ids"] == [1]
+
+
+def test_single_best_protected_service_picks_best_startup_path_id() -> None:
+    from gatherlink.config.expansion import compile_service_scheduler_primitives
+    from gatherlink.config.models import GatherlinkConfig, PathConfig, SchedulerConfig, ServiceConfig
+
+    config = GatherlinkConfig(
+        schema_version=1,
+        node="local",
+        role="client",
+        peer="remote",
+        scheduler=SchedulerConfig(mode="ordered_multipath"),
+        paths=[
+            PathConfig(name="path-a", interface="gl-a", scheduler={"tx_capacity_bps": 500_000_000}),
+            PathConfig(name="path-b", interface="gl-b", scheduler={"tx_capacity_bps": 900_000_000}),
+            PathConfig(name="path-c", interface="gl-c", scheduler={"tx_capacity_bps": 700_000_000}),
+        ],
+        services=[
+            ServiceConfig(
+                name="wireguard",
+                target="127.0.0.1:51820",
+                traffic_class="tcp_ordered",
+            )
+        ],
+    )
+
+    primitives = compile_service_scheduler_primitives(
+        config,
+        config.services[0],
+        effective_scheduler_mode="single_best_path",
+    )
+
+    assert primitives["scheduler_path_policy"] == "single_best_path"
+    assert primitives["scheduler_allowed_path_ids"] == [1]
+    assert compile_service_scheduler_primitives(
+        config,
+        config.services[0],
+        effective_scheduler_mode="single_best_path",
+    )["scheduler_allowed_path_ids"] == [1]
 
 
 def test_per_service_allowed_paths_expand_to_runtime_path_ids() -> None:

@@ -27,6 +27,14 @@ SERVICE_PATH_QUEUE_PRESSURE_PACKETS = 512
 SERVICE_PATH_STALE_CONTROL_US = 120_000_000
 SERVICE_PATH_MIN_WEIGHT = 1
 SERVICE_PATH_MAX_WEIGHT = 65_535
+ORDERED_PROTECTED_PROMOTION_HIGH_WATERMARK = 0.92
+ORDERED_PROTECTED_MIN_OBSERVED_PACKETS = 1_000
+ORDERED_PROTECTED_MAX_LOSS_PPM = 10_000
+ORDERED_PROTECTED_MAX_QUEUE_PACKETS = 64
+ORDERED_PROTECTED_MAX_REORDER_PACKETS = 128
+ORDERED_PROTECTED_MAX_REORDER_PPM = 5_000
+ORDERED_PROTECTED_MAX_CLOCK_ERROR_US = 75_000
+ORDERED_PROTECTED_MAX_JITTER_US = 75_000
 
 
 @dataclass(frozen=True)
@@ -166,6 +174,7 @@ class ServicePathAllocator:
                 degraded=service.name in degraded_services,
                 path_by_id=path_by_id,
                 reserved_bulk_bps=reserved_bulk_bps,
+                node_scheduler_mode=interim_scheduler_mode(runtime_config),
                 now=now,
             )
             plans.append(plan)
@@ -240,12 +249,12 @@ class ServicePathAllocator:
             ]
             if current_ids:
                 reserved.add(
-                    _best_path(
+                    _best_protected_path(
                         [path for path in healthy_paths if path.scheduler.path_id in current_ids], telemetry
                     ).scheduler.path_id
                 )
                 continue
-            reserved.add(_best_path(healthy_paths, telemetry).scheduler.path_id)
+            reserved.add(_best_protected_path(healthy_paths, telemetry).scheduler.path_id)
         return reserved
 
     def _plan_for_service(
@@ -259,11 +268,20 @@ class ServicePathAllocator:
         degraded: bool,
         path_by_id: dict[int, RuntimePathConfig],
         reserved_bulk_bps: dict[int, int],
+        node_scheduler_mode: str,
         now: float,
     ) -> ServicePathPlan:
         """Compile one service path plan from priority, pressure, and path health."""
         if service_is_protected(service):
-            return self._protected_service_plan(service, healthy_paths, telemetry, degraded, now)
+            return self._protected_service_plan(
+                service,
+                healthy_paths,
+                telemetry,
+                degraded,
+                sample,
+                node_scheduler_mode,
+                now,
+            )
         if service_is_bulk(service):
             return self._bulk_service_plan(
                 service,
@@ -283,16 +301,29 @@ class ServicePathAllocator:
         healthy_paths: list[RuntimePathConfig],
         telemetry: SchedulerTelemetrySnapshot,
         degraded: bool,
+        sample: ServicePathRateSample | None,
+        node_scheduler_mode: str,
         now: float,
     ) -> ServicePathPlan:
         """Keep TCP-like/protected services sticky, but fail over when needed."""
         current = [path for path in healthy_paths if path.scheduler.path_id in service.scheduler_allowed_path_ids]
-        chosen = _best_path(current or healthy_paths, telemetry)
+        chosen = _best_protected_path(current or healthy_paths, telemetry)
+        chosen = _demand_aware_protected_path(chosen, healthy_paths, telemetry, sample)
+        promoted = _ordered_protected_promotion_plan(
+            service,
+            healthy_paths,
+            chosen,
+            telemetry,
+            sample,
+            node_scheduler_mode=node_scheduler_mode,
+        )
+        if promoted is not None:
+            return self._dwell_or_plan(service, promoted, now)
         reason = (
             f"{service.name}: protected service outcome degraded but path counters are still healthy; holding "
             f"{chosen.name}"
             if degraded and current
-            else f"{service.name}: protected service uses healthy best path {chosen.name}"
+            else f"{service.name}: protected service uses low-latency healthy path {chosen.name}"
         )
         plan = ServicePathPlan(
             service=service.name,
@@ -427,6 +458,94 @@ def _metric_is_unhealthy(metric: PathSchedulerMetrics) -> bool:
     )
 
 
+def interim_scheduler_mode(runtime_config: RuntimeConfig) -> str:
+    """Return the currently compiled node scheduler mode."""
+    return runtime_config.scheduler.mode
+
+
+def _ordered_protected_promotion_plan(
+    service: RuntimeServiceConfig,
+    healthy_paths: list[RuntimePathConfig],
+    chosen: RuntimePathConfig,
+    telemetry: SchedulerTelemetrySnapshot,
+    sample: ServicePathRateSample | None,
+    *,
+    node_scheduler_mode: str,
+) -> ServicePathPlan | None:
+    """
+    Release a protected service to ordered node scheduling after strong proof.
+
+    This is the first safe promotion step for opaque WireGuard/TCP services.
+    Python checks demand and path proof; Rust only sees the existing `inherit`
+    service policy and the node's already-compiled ordered scheduler.
+    """
+    if node_scheduler_mode != "ordered_multipath":
+        return None
+    if sample is None:
+        return None
+    if len(healthy_paths) < 2:
+        return None
+    chosen_capacity_bps = _path_capacity_bps(chosen)
+    demand_bps = int(sample.tx_bytes_per_second * 8 * SERVICE_PATH_HEADROOM)
+    if demand_bps <= int(chosen_capacity_bps * ORDERED_PROTECTED_PROMOTION_HIGH_WATERMARK):
+        return None
+    if not _ordered_protected_path_is_proven(chosen, telemetry):
+        return None
+    proven_paths = [path for path in healthy_paths if _ordered_protected_path_is_proven(path, telemetry)]
+    if len(proven_paths) < 2:
+        return None
+    promoted_paths = _smallest_capacity_set(proven_paths, demand_bps)
+    if len(promoted_paths) < 2:
+        return None
+    promoted_capacity_bps = sum(_path_capacity_bps(path) for path in promoted_paths)
+    if promoted_capacity_bps < demand_bps:
+        return None
+    return ServicePathPlan(
+        service=service.name,
+        path_policy="inherit",
+        allowed_path_ids=tuple(path.scheduler.path_id for path in promoted_paths),
+        path_weights=tuple((path.scheduler.path_id, _path_weight(path)) for path in promoted_paths),
+        reason=(
+            f"{service.name}: protected service demand {demand_bps}bps exceeded "
+            f"{chosen.name} capacity and ordered path subset has clean proof"
+        ),
+    )
+
+
+def _ordered_protected_path_is_proven(
+    path: RuntimePathConfig,
+    telemetry: SchedulerTelemetrySnapshot,
+) -> bool:
+    """Return whether one healthy path has enough proof for ordered TCP promotion."""
+    metric = telemetry.paths.get(path.name)
+    if metric is None:
+        return False
+    if metric.observed_packets < ORDERED_PROTECTED_MIN_OBSERVED_PACKETS:
+        return False
+    if metric.loss_ppm > ORDERED_PROTECTED_MAX_LOSS_PPM:
+        return False
+    if metric.local_drops or metric.send_failures:
+        return False
+    if metric.queue_depth_packets > ORDERED_PROTECTED_MAX_QUEUE_PACKETS:
+        return False
+    if metric.reorder_depth_packets > ORDERED_PROTECTED_MAX_REORDER_PACKETS:
+        return False
+    if metric.observed_packets > 0:
+        reorder_ppm = metric.reorder_depth_packets * 1_000_000 // metric.observed_packets
+        if reorder_ppm > ORDERED_PROTECTED_MAX_REORDER_PPM:
+            return False
+    if _path_jitter_us(path, telemetry) > ORDERED_PROTECTED_MAX_JITTER_US:
+        return False
+    if metric.has_trusted_real_data_latency:
+        return True
+    return (
+        metric.latency_source == "clock-synced-one-way"
+        and metric.latency_confidence == "good"
+        and metric.latency_clock_error_us is not None
+        and metric.latency_clock_error_us <= ORDERED_PROTECTED_MAX_CLOCK_ERROR_US
+    )
+
+
 def _smallest_capacity_set(
     paths: list[RuntimePathConfig],
     target_bps: int,
@@ -485,6 +604,56 @@ def _best_path(paths: list[RuntimePathConfig], telemetry: SchedulerTelemetrySnap
     )[0]
 
 
+def _best_protected_path(paths: list[RuntimePathConfig], telemetry: SchedulerTelemetrySnapshot) -> RuntimePathConfig:
+    """
+    Return the best path for TCP-like/protected services.
+
+    Bulk service allocation wants the largest pipe first. A protected opaque
+    tunnel, such as the stable WireGuard service, usually prefers predictable
+    delivery: low latency, low jitter, low loss, and no queue pressure. Capacity
+    is still useful, but only after the path looks stable enough for TCP.
+    """
+    return sorted(
+        paths,
+        key=lambda path: (
+            _path_latency_us(path, telemetry),
+            _path_jitter_us(path, telemetry),
+            _path_loss_ppm(path, telemetry),
+            _path_queue_pressure(path, telemetry),
+            -_path_capacity_bps(path),
+            path.name,
+        ),
+    )[0]
+
+
+def _demand_aware_protected_path(
+    chosen: RuntimePathConfig,
+    healthy_paths: list[RuntimePathConfig],
+    telemetry: SchedulerTelemetrySnapshot,
+    sample: ServicePathRateSample | None,
+) -> RuntimePathConfig:
+    """
+    Prefer one sufficient path before promoting opaque TCP-like traffic.
+
+    For protected services, one stable path remains the safest plan when it can
+    cover observed load. Only when no single healthy path has enough capacity
+    should ordered multipath promotion be considered.
+    """
+    if sample is None:
+        return chosen
+    demand_bps = int(sample.tx_bytes_per_second * 8 * SERVICE_PATH_HEADROOM)
+    if demand_bps <= int(_path_capacity_bps(chosen) * ORDERED_PROTECTED_PROMOTION_HIGH_WATERMARK):
+        return chosen
+    sufficient_paths = [
+        path
+        for path in healthy_paths
+        if demand_bps <= int(_path_capacity_bps(path) * ORDERED_PROTECTED_PROMOTION_HIGH_WATERMARK)
+    ]
+    if not sufficient_paths:
+        return chosen
+    return _best_protected_path(sufficient_paths, telemetry)
+
+
 def _path_capacity_bps(path: RuntimePathConfig) -> int:
     """Return configured/detected capacity with a safe nonzero fallback."""
     return int(path.scheduler.tx_capacity_bps or path.scheduler.rx_capacity_bps or 1)
@@ -498,6 +667,31 @@ def _path_latency_us(path: RuntimePathConfig, telemetry: SchedulerTelemetrySnaps
     if path.scheduler.latency_us is not None:
         return path.scheduler.latency_us
     return 1_000_000_000
+
+
+def _path_jitter_us(path: RuntimePathConfig, telemetry: SchedulerTelemetrySnapshot) -> int:
+    """Return a conservative jitter value for protected-service path choice."""
+    metric = telemetry.paths.get(path.name)
+    if metric is None:
+        return 0
+    values = [value for value in (metric.tx_jitter_us, metric.rx_jitter_us) if value is not None]
+    return max(values) if values else 0
+
+
+def _path_loss_ppm(path: RuntimePathConfig, telemetry: SchedulerTelemetrySnapshot) -> int:
+    """Return live path loss or the configured path hint."""
+    metric = telemetry.paths.get(path.name)
+    if metric is not None:
+        return metric.loss_ppm
+    return path.scheduler.loss_ppm
+
+
+def _path_queue_pressure(path: RuntimePathConfig, telemetry: SchedulerTelemetrySnapshot) -> int:
+    """Return a compact queue pressure score for protected-service path choice."""
+    metric = telemetry.paths.get(path.name)
+    if metric is None:
+        return 0
+    return metric.queue_depth_packets + metric.scheduler_in_flight_packets + metric.reorder_buffer_packets
 
 
 def _path_weight(path: RuntimePathConfig) -> int:

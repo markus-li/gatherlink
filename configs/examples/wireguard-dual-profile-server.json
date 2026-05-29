@@ -8,6 +8,7 @@
       "target": "127.0.0.1:51820",
       "return_mode": "peer-scoped-source",
       "priority": "high",
+      "traffic_class": "tcp_ordered",
       "scheduler_poll_batch_packets": 128,
       "scheduler_flowlet_idle_us": 50000,
       "scheduler_flowlet_max_hold_us": 60000000
@@ -16,7 +17,8 @@
       "name": "wireguard-fast",
       "target": "127.0.0.1:51821",
       "return_mode": "peer-scoped-source",
-      "priority": "bulk"
+      "priority": "bulk",
+      "traffic_class": "udp_bulk"
     }
   ],
   "security": {

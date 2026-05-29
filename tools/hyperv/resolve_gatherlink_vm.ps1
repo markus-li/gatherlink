@@ -24,12 +24,19 @@ function Find-IpByMac {
     param([string] $MacAddress)
 
     $escaped = [regex]::Escape($MacAddress)
-    $line = arp -a | Select-String -Pattern $escaped -CaseSensitive:$false | Select-Object -First 1
-    if (-not $line) {
-        return $null
-    }
+    $lines = arp -a | Select-String -Pattern $escaped -CaseSensitive:$false
+    foreach ($line in $lines) {
+        if ($line.Line -notmatch "^\s*(\d+\.\d+\.\d+\.\d+)\s+$escaped\s+(\S+)\s*$") {
+            continue
+        }
 
-    if ($line.Line -match "^\s*(\d+\.\d+\.\d+\.\d+)\s+") {
+        # Static ARP entries can survive VM power cycles and VM shape changes.
+        # They are not proof that the guest currently owns the address, and in
+        # the Hyper-V lab they can point portproxy at the wrong endpoint.
+        if ($Matches[2].ToLowerInvariant() -ne "dynamic") {
+            continue
+        }
+
         return $Matches[1]
     }
 

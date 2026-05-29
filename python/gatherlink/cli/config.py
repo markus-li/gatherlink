@@ -13,7 +13,9 @@ import typer
 from gatherlink.config.errors import ConfigValidationError
 from gatherlink.config.expansion import expand_config
 from gatherlink.config.loader import load_config_dict
+from gatherlink.config.migration import migrate_config_dict
 from gatherlink.config.validation import detect_config_format, validate_config_file
+from gatherlink.config.versions import CURRENT_SCHEMA_VERSION
 from gatherlink.persistence.store import redact_secrets
 
 app = typer.Typer(help="Validate and inspect Gatherlink configuration files.")
@@ -71,6 +73,35 @@ def validate(
         typer.echo(_validation_summary(path, as_json=as_json))
     except ConfigValidationError as exc:
         _render_error(exc, as_json=as_json)
+
+
+@app.command("migrate")
+def migrate(
+    path: Path,
+    target_version: int = typer.Option(
+        CURRENT_SCHEMA_VERSION,
+        "--to-schema-version",
+        help="Target config schema version.",
+    ),
+    dry_run: bool = typer.Option(
+        True,
+        "--dry-run/--write",
+        help="Print migrated config by default; --write replaces the input file.",
+    ),
+) -> None:
+    """Migrate a config through explicit version-to-version transforms."""
+    try:
+        data = load_config_dict(path)
+        source_format = detect_config_format(data)
+        result = migrate_config_dict(data, target_version=target_version, source_format=source_format)
+    except ConfigValidationError as exc:
+        _render_error(exc, as_json=True)
+    payload = result.export_dict()
+    if dry_run:
+        typer.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    path.write_text(json.dumps(result.config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    typer.echo(json.dumps({**payload, "written": str(path)}, indent=2, sort_keys=True))
 
 
 @app.command("show")

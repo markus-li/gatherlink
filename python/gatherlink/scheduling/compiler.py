@@ -11,7 +11,7 @@ from __future__ import annotations
 from gatherlink.config.models import GatherlinkConfig, PathConfig, SchedulerPolicy, ServicePriority
 from gatherlink.config.runtime import RuntimePathSchedulerConfig, RuntimeSchedulerConfig
 from gatherlink.scheduling.congestion import CongestionFairnessController, compile_congestion_fairness
-from gatherlink.scheduling.metrics import SchedulerTelemetrySnapshot
+from gatherlink.scheduling.metrics import PathSchedulerMetrics, SchedulerTelemetrySnapshot
 from gatherlink.scheduling.policies import compile_path_policy, rust_mode_for_policy
 from gatherlink.scheduling.scoring import score_snapshot
 from gatherlink.scheduling.service_intent import service_traffic_summary
@@ -30,6 +30,15 @@ COORDINATED_ADAPTIVE_DEFAULT_POLICY: SchedulerPolicy = "capacity_aware"
 ARRIVAL_GUARD_DEFAULT_BUDGET_US = 150_000
 ARRIVAL_GUARD_QUEUE_PACKET_US = 50
 ARRIVAL_GUARD_DRAIN_WEIGHT = 1
+ORDERED_RECEIVER_MIN_OBSERVED_PACKETS = 1_000
+ORDERED_RECEIVER_GAP_DRAIN_PPM = 5_000
+ORDERED_RECEIVER_REORDER_DEPTH_DRAIN_PACKETS = 4_096
+ORDERED_RECEIVER_BUFFER_DRAIN_PACKETS = 4_096
+ORDERED_RECEIVER_BUFFER_AGE_MULTIPLIER = 2
+ORDERED_RECEIVER_IN_FLIGHT_DRAIN_PACKETS = 8_192
+ORDERED_RECEIVER_IN_FLIGHT_DRAIN_BYTES = 8 * 1024 * 1024
+ORDERED_RECEIVER_PREDICTED_DELIVERY_MULTIPLIER = 3
+ORDERED_RECEIVER_AGE_SCORE_UNIT_US = 1_000
 
 logger = get_logger(__name__)
 
@@ -89,6 +98,8 @@ def compile_scheduler(
         paths = _apply_arrival_guard(paths)
     if selected_mode == "ordered_multipath_capacity_aware":
         paths = _apply_ordered_arrival_guard(paths)
+    if selected_mode in {"ordered_multipath", "ordered_multipath_capacity_aware"} and telemetry is not None:
+        paths = _apply_ordered_receiver_feedback_guard(paths, config=config, telemetry=telemetry)
     if selected_mode in SINGLE_PATH_POLICIES:
         paths = _apply_single_best_path(paths)
     return RuntimeSchedulerConfig(
@@ -273,6 +284,100 @@ def _apply_ordered_arrival_guard(paths: list[RuntimePathSchedulerConfig]) -> lis
     return guarded
 
 
+def _apply_ordered_receiver_feedback_guard(
+    paths: list[RuntimePathSchedulerConfig],
+    *,
+    config: GatherlinkConfig,
+    telemetry: SchedulerTelemetrySnapshot,
+) -> list[RuntimePathSchedulerConfig]:
+    """
+    Drain paths that are creating receiver-side ordered-flow pressure.
+
+    Ordered multipath is only useful for TCP-like traffic when the receiver can
+    release packets without head-of-line stalls. Rust reports cheap facts such
+    as receive gaps and reorder-buffer age; Python decides when that crosses
+    from "tighten credit" into "stop scheduling normal ordered traffic here".
+    The compiled result is still ordinary path state and weight primitives.
+    """
+    active_indexes = [index for index, path in enumerate(paths) if path.enabled and path.state == "active"]
+    if len(active_indexes) < 2:
+        return paths
+
+    pressure_scores: dict[int, int] = {}
+    severe_indexes: set[int] = set()
+    for index, (path, configured_path) in enumerate(zip(paths, config.paths, strict=True)):
+        if index not in active_indexes:
+            continue
+        metrics = telemetry.paths.get(configured_path.name)
+        if metrics is None:
+            continue
+        score = _ordered_receiver_pressure_score(path, metrics)
+        pressure_scores[index] = score
+        if _ordered_receiver_pressure_is_severe(path, metrics):
+            severe_indexes.add(index)
+
+    if not severe_indexes:
+        return paths
+
+    # If every active path is pressured, keep the least-bad path alive. The
+    # scheduler must fail soft into one usable path, not compile an empty set.
+    if severe_indexes == set(active_indexes):
+        keep_index = min(active_indexes, key=lambda index: (pressure_scores.get(index, 0), index))
+        severe_indexes.remove(keep_index)
+
+    guarded: list[RuntimePathSchedulerConfig] = []
+    for index, path in enumerate(paths):
+        if index in severe_indexes:
+            guarded.append(path.model_copy(update={"state": "drain", "weight": ARRIVAL_GUARD_DRAIN_WEIGHT}))
+        else:
+            guarded.append(path)
+    return guarded
+
+
+def _ordered_receiver_pressure_is_severe(
+    path: RuntimePathSchedulerConfig,
+    metrics: PathSchedulerMetrics,
+) -> bool:
+    """Return whether receiver feedback is bad enough to drain this path."""
+    observed_packets = metrics.observed_packets
+    if observed_packets >= ORDERED_RECEIVER_MIN_OBSERVED_PACKETS:
+        receive_gap_ppm = metrics.receive_gaps * 1_000_000 // observed_packets
+        if receive_gap_ppm >= ORDERED_RECEIVER_GAP_DRAIN_PPM:
+            return True
+    if metrics.reorder_depth_packets >= ORDERED_RECEIVER_REORDER_DEPTH_DRAIN_PACKETS:
+        return True
+    if metrics.reorder_buffer_packets >= ORDERED_RECEIVER_BUFFER_DRAIN_PACKETS:
+        return True
+    reorder_hold_us = path.reorder_hold_us or ARRIVAL_GUARD_DEFAULT_BUDGET_US
+    if metrics.scheduler_in_flight_packets >= ORDERED_RECEIVER_IN_FLIGHT_DRAIN_PACKETS:
+        return True
+    if metrics.scheduler_in_flight_bytes >= ORDERED_RECEIVER_IN_FLIGHT_DRAIN_BYTES:
+        return True
+    if metrics.scheduler_predicted_delivery_us > reorder_hold_us * ORDERED_RECEIVER_PREDICTED_DELIVERY_MULTIPLIER:
+        return True
+    return metrics.reorder_buffer_oldest_age_us > reorder_hold_us * ORDERED_RECEIVER_BUFFER_AGE_MULTIPLIER
+
+
+def _ordered_receiver_pressure_score(
+    path: RuntimePathSchedulerConfig,
+    metrics: PathSchedulerMetrics,
+) -> int:
+    """Score ordered receiver pressure so an all-pressured group keeps the least-bad path."""
+    observed_packets = metrics.observed_packets
+    receive_gap_ppm = 0
+    if observed_packets > 0:
+        receive_gap_ppm = metrics.receive_gaps * 1_000_000 // observed_packets
+    return (
+        receive_gap_ppm
+        + metrics.reorder_depth_packets
+        + metrics.reorder_buffer_packets
+        + metrics.scheduler_in_flight_packets
+        + metrics.scheduler_in_flight_bytes // 1024
+        + metrics.scheduler_predicted_delivery_us // ORDERED_RECEIVER_AGE_SCORE_UNIT_US
+        + metrics.reorder_buffer_oldest_age_us // ORDERED_RECEIVER_AGE_SCORE_UNIT_US
+    )
+
+
 def _arrival_prediction_us(path: RuntimePathSchedulerConfig) -> int | None:
     """Return a compact estimated arrival time for one path, or None if unknown."""
     if path.latency_us is None:
@@ -304,7 +409,6 @@ def _apply_single_best_path(paths: list[RuntimePathSchedulerConfig]) -> list[Run
         eligible,
         key=lambda item: (
             -(item[1].tx_capacity_bps or 0),
-            item[1].latency_us if item[1].latency_us is not None else 2**32 - 1,
             item[1].loss_ppm,
             item[0],
         ),

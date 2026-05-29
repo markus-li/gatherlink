@@ -32,13 +32,23 @@ COORDINATED_TCP_ORDERED_MAX_JITTER_US = 12_000
 COORDINATED_TCP_ORDERED_MAX_PROVEN_JITTER_US = 75_000
 COORDINATED_TCP_ORDERED_MAX_PROVEN_SPREAD_US = 100_000
 COORDINATED_TCP_ORDERED_MAX_CLOCK_ERROR_US = 75_000
+COORDINATED_TCP_ORDERED_MAX_DATA_LATENCY_US = 500_000
+COORDINATED_TCP_ORDERED_MAX_DATA_LATENCY_SPREAD_US = 250_000
 COORDINATED_TCP_ORDERED_MIN_CAPACITY_RATIO_NUMERATOR = 1
 COORDINATED_TCP_ORDERED_MIN_CAPACITY_RATIO_DENOMINATOR = 3
+COORDINATED_TCP_ORDERED_PRESSURE_ESCAPE_MIN_CAPACITY_RATIO_NUMERATOR = 1
+COORDINATED_TCP_ORDERED_PRESSURE_ESCAPE_MIN_CAPACITY_RATIO_DENOMINATOR = 8
+COORDINATED_TCP_ORDERED_PRESSURE_ESCAPE_PREDICTED_DELIVERY_US = 500_000
 COORDINATED_TCP_ORDERED_MAX_QUEUE_PACKETS = 64
+COORDINATED_TCP_ORDERED_MAX_IN_FLIGHT_PACKETS = 4_096
+COORDINATED_TCP_ORDERED_MAX_IN_FLIGHT_BYTES = 4 * 1024 * 1024
+COORDINATED_TCP_ORDERED_MAX_PREDICTED_DELIVERY_US = 150_000
+COORDINATED_TCP_ORDERED_MAX_REORDER_BUFFER_PACKETS = 2_048
 COORDINATED_TCP_ORDERED_MAX_REORDER_PACKETS = 128
 COORDINATED_TCP_ORDERED_MAX_REORDER_PPM = 5_000
 COORDINATED_TCP_ORDERED_MIN_KNOWN_PATHS = 2
 COORDINATED_TCP_ORDERED_MIN_OBSERVED_PACKETS = 1_000
+COORDINATED_TCP_ORDERED_MIN_CONTROL_PROBE_FRAMES = 20
 RESPONSIVENESS_WIRED_MAX_LATENCY_US = 25_000
 RESPONSIVENESS_WIRED_MAX_JITTER_US = 3_000
 RESPONSIVENESS_CELLULAR_MIN_LATENCY_US = 35_000
@@ -362,12 +372,30 @@ def _choose_tcp_biased_candidate(
     falls back to stickier/conservative policies instead of gambling with TCP
     ordering.
     """
-    if _has_high_reorder_pressure(metrics):
+    if _tcp_ordered_pressure_escape_is_safe(config, metrics):
+        return (
+            "ordered_multipath_capacity_aware",
+            "tcp bias: best path pressure allows bounded ordered capacity escape",
+            signals,
+        )
+    if any(_tcp_ordered_reorder_pressure_is_high(metric) for metric in metrics):
         return "single_best_path", "tcp bias: receiver reorder pressure favors best path", signals
     if _has_capacity_hints(config, metrics) and not _tcp_ordered_capacity_ratio_is_safe(config, metrics):
         return (
             "single_best_path",
             "tcp bias: skewed path capacity favors known-good fallback",
+            signals,
+        )
+    if _tcp_ordered_latency_quality_is_too_noisy(metrics):
+        return (
+            "single_best_path",
+            "tcp bias: latency uncertainty favors best path",
+            signals,
+        )
+    if _tcp_ordered_multipath_is_safe(config, metrics):
+        return (
+            "ordered_multipath_capacity_aware",
+            "tcp bias: clean proven paths allow ordered capacity aggregation",
             signals,
         )
     if _has_high_jitter(metrics) and _has_latency_spread(metrics) and _has_capacity_hints(config, metrics):
@@ -408,8 +436,7 @@ def _tcp_ordered_multipath_is_safe(config: GatherlinkConfig, metrics: list[PathS
     proven_paths = [
         metric
         for metric in known_paths
-        if metric.observed_packets >= COORDINATED_TCP_ORDERED_MIN_OBSERVED_PACKETS
-        and _tcp_ordered_path_has_latency_proof(metric)
+        if _tcp_ordered_path_has_enough_probe_activity(metric) and _tcp_ordered_path_has_latency_proof(metric)
     ]
     if len(proven_paths) < COORDINATED_TCP_ORDERED_MIN_KNOWN_PATHS:
         return False
@@ -433,6 +460,8 @@ def _tcp_ordered_reorder_pressure_is_high(metric: PathSchedulerMetrics) -> bool:
     # unresolved depth or other pressure; otherwise the buffer is doing useful
     # work and should not block promotion by itself.
     reorder_packets = metric.reorder_depth_packets
+    if metric.observed_packets <= 0 and metric.receive_gaps > COORDINATED_TCP_ORDERED_MAX_REORDER_PACKETS:
+        return True
     if reorder_packets == 0 and (
         metric.loss_ppm > 0
         or metric.local_drops > 0
@@ -466,6 +495,77 @@ def _tcp_ordered_capacity_ratio_is_safe(config: GatherlinkConfig, metrics: list[
     )
 
 
+def _tcp_ordered_pressure_escape_is_safe(config: GatherlinkConfig, metrics: list[PathSchedulerMetrics]) -> bool:
+    """
+    Return whether a saturated best path may try bounded ordered aggregation.
+
+    The normal TCP bias is intentionally conservative and avoids very skewed
+    path sets. That breaks down when the best path is clearly overloaded: doing
+    nothing means loss or deep queueing. This escape hatch is still Python-owned
+    policy and still compiles to ordinary ordered primitives. It only opens when
+    the best-capacity path is under visible pressure and at least one alternate
+    has enough configured/proven capacity plus control activity to act as a
+    relief path.
+    """
+    if not _has_capacity_hints(config, metrics) or not _capacity_confidence_is_high(metrics):
+        return False
+    known = [
+        (metric, _metric_or_config_capacity(config, metric))
+        for metric in metrics
+        if _metric_or_config_capacity(config, metric) is not None
+        and _tcp_ordered_path_has_latency_proof(metric)
+        and metric.stale_control_age_us < COORDINATED_STALE_CONTROL_US
+    ]
+    known = [(metric, capacity) for metric, capacity in known if capacity is not None and capacity > 0]
+    if len(known) < COORDINATED_TCP_ORDERED_MIN_KNOWN_PATHS:
+        return False
+
+    best_metric, best_capacity = max(known, key=lambda item: (item[1], -item[0].loss_ppm))
+    if not _tcp_ordered_best_path_is_overloaded(best_metric):
+        return False
+
+    for metric, capacity in known:
+        if metric.path_name == best_metric.path_name:
+            continue
+        if capacity * COORDINATED_TCP_ORDERED_PRESSURE_ESCAPE_MIN_CAPACITY_RATIO_DENOMINATOR < (
+            best_capacity * COORDINATED_TCP_ORDERED_PRESSURE_ESCAPE_MIN_CAPACITY_RATIO_NUMERATOR
+        ):
+            continue
+        if _tcp_ordered_alternate_path_is_clean_enough(metric):
+            return True
+    return False
+
+
+def _tcp_ordered_best_path_is_overloaded(metric: PathSchedulerMetrics) -> bool:
+    """Return whether the preferred TCP path is visibly over capacity."""
+    if metric.local_drops > 0 or metric.send_failures > 0:
+        return True
+    if metric.loss_ppm > COORDINATED_TCP_ORDERED_MAX_LOSS_PPM:
+        return True
+    if metric.queue_depth_packets > COORDINATED_TCP_ORDERED_MAX_QUEUE_PACKETS:
+        return True
+    if metric.scheduler_in_flight_packets > COORDINATED_TCP_ORDERED_MAX_IN_FLIGHT_PACKETS:
+        return True
+    if metric.scheduler_in_flight_bytes > COORDINATED_TCP_ORDERED_MAX_IN_FLIGHT_BYTES:
+        return True
+    return metric.scheduler_predicted_delivery_us > COORDINATED_TCP_ORDERED_PRESSURE_ESCAPE_PREDICTED_DELIVERY_US
+
+
+def _tcp_ordered_alternate_path_is_clean_enough(metric: PathSchedulerMetrics) -> bool:
+    """Return whether an alternate path can receive bounded escape traffic."""
+    if metric.local_drops > 0 or metric.send_failures > 0:
+        return False
+    if metric.loss_ppm > COORDINATED_TCP_ORDERED_MAX_LOSS_PPM:
+        return False
+    if metric.queue_depth_packets > COORDINATED_TCP_ORDERED_MAX_QUEUE_PACKETS:
+        return False
+    if metric.scheduler_in_flight_packets > COORDINATED_TCP_ORDERED_MAX_IN_FLIGHT_PACKETS:
+        return False
+    if metric.scheduler_in_flight_bytes > COORDINATED_TCP_ORDERED_MAX_IN_FLIGHT_BYTES:
+        return False
+    return metric.reorder_buffer_packets <= COORDINATED_TCP_ORDERED_MAX_REORDER_BUFFER_PACKETS
+
+
 def _tcp_ordered_path_has_pressure(metric: PathSchedulerMetrics) -> bool:
     """Return whether a path has pressure that should block ordered TCP promotion."""
     return (
@@ -473,6 +573,10 @@ def _tcp_ordered_path_has_pressure(metric: PathSchedulerMetrics) -> bool:
         or metric.local_drops > 0
         or metric.send_failures > 0
         or metric.queue_depth_packets > COORDINATED_TCP_ORDERED_MAX_QUEUE_PACKETS
+        or metric.scheduler_in_flight_packets > COORDINATED_TCP_ORDERED_MAX_IN_FLIGHT_PACKETS
+        or metric.scheduler_in_flight_bytes > COORDINATED_TCP_ORDERED_MAX_IN_FLIGHT_BYTES
+        or metric.scheduler_predicted_delivery_us > COORDINATED_TCP_ORDERED_MAX_PREDICTED_DELIVERY_US
+        or metric.reorder_buffer_packets > COORDINATED_TCP_ORDERED_MAX_REORDER_BUFFER_PACKETS
         or _tcp_ordered_reorder_pressure_is_high(metric)
     )
 
@@ -490,7 +594,7 @@ def _tcp_ordered_jitter_is_tolerable(metric: PathSchedulerMetrics) -> bool:
     if jitter_us <= COORDINATED_TCP_ORDERED_MAX_JITTER_US:
         return True
     return (
-        _tcp_ordered_path_has_latency_proof(metric)
+        metric.has_trusted_real_data_latency
         and not _tcp_ordered_path_has_pressure(metric)
         and jitter_us <= COORDINATED_TCP_ORDERED_MAX_PROVEN_JITTER_US
     )
@@ -521,6 +625,48 @@ def _tcp_ordered_latency_spread_is_tolerable(
     )
 
 
+def _tcp_ordered_latency_quality_is_too_noisy(metrics: list[PathSchedulerMetrics]) -> bool:
+    """
+    Return whether TCP-like opaque tunnels should avoid capacity striping.
+
+    Ordered multipath can help TCP-shaped tunnels only when Python trusts the
+    timing facts enough to compile a bounded delivery timeline. Large clock
+    uncertainty or multi-hundred-ms real-payload latency outliers mean the
+    safer policy is to stay on the best path until better samples arrive. UDP
+    bulk policy does not use this helper, so lossy multipath can still aggregate.
+    """
+    if any(
+        metric.latency_source == "clock-synced-one-way"
+        and metric.latency_clock_error_us is not None
+        and metric.latency_clock_error_us > COORDINATED_TCP_ORDERED_MAX_CLOCK_ERROR_US
+        for metric in metrics
+    ):
+        return True
+
+    data_latencies = [
+        value
+        for metric in metrics
+        if metric.has_trusted_real_data_latency
+        for value in (
+            metric.tx_latency_current_us,
+            metric.tx_latency_mean_us,
+            metric.rx_latency_current_us,
+            metric.rx_latency_mean_us,
+            metric.tx_p95_us,
+            metric.rx_p95_us,
+        )
+        if value is not None
+    ]
+    if not data_latencies:
+        return False
+    if max(data_latencies) > COORDINATED_TCP_ORDERED_MAX_DATA_LATENCY_US:
+        return True
+    return (
+        len(data_latencies) >= 2
+        and max(data_latencies) - min(data_latencies) > COORDINATED_TCP_ORDERED_MAX_DATA_LATENCY_SPREAD_US
+    )
+
+
 def _tcp_ordered_path_has_latency_proof(metric: PathSchedulerMetrics) -> bool:
     """
     Return whether latency is strong enough for TCP ordered promotion.
@@ -532,12 +678,36 @@ def _tcp_ordered_path_has_latency_proof(metric: PathSchedulerMetrics) -> bool:
     """
     if metric.has_trusted_real_data_latency:
         return True
+    if (
+        metric.latency_source == "clock-synced-one-way"
+        and metric.latency_confidence == "good"
+        and metric.control_rx_frames >= COORDINATED_TCP_ORDERED_MIN_CONTROL_PROBE_FRAMES
+        and metric.control_tx_frames >= COORDINATED_TCP_ORDERED_MIN_CONTROL_PROBE_FRAMES
+    ):
+        return True
     return (
         metric.latency_source == "clock-synced-one-way"
         and metric.latency_confidence == "good"
         and metric.latency_clock_error_us is not None
         and metric.latency_clock_error_us <= COORDINATED_TCP_ORDERED_MAX_CLOCK_ERROR_US
         and metric.observed_packets >= COORDINATED_TCP_ORDERED_MIN_OBSERVED_PACKETS
+    )
+
+
+def _tcp_ordered_path_has_enough_probe_activity(metric: PathSchedulerMetrics) -> bool:
+    """
+    Return whether the path has enough packet/control activity for TCP proof.
+
+    A protected service pinned to one path will not create user-service packet
+    counters on the other paths. Control metadata is intentionally duplicated
+    across paths, so Python can use those existing frames as low-rate probe
+    evidence without adding a special Rust behavior or extra user traffic.
+    """
+    if metric.observed_packets >= COORDINATED_TCP_ORDERED_MIN_OBSERVED_PACKETS:
+        return True
+    return (
+        metric.control_rx_frames >= COORDINATED_TCP_ORDERED_MIN_CONTROL_PROBE_FRAMES
+        and metric.control_tx_frames >= COORDINATED_TCP_ORDERED_MIN_CONTROL_PROBE_FRAMES
     )
 
 
@@ -638,6 +808,8 @@ def _choose_mixed_service_candidate(
     """
     if service_traffic.protected_degraded and (_has_queue_pressure(metrics) or _has_high_loss(metrics)):
         return "single_best_path", "mixed service: protected degradation with path pressure favors safety", signals
+    if _has_high_jitter(metrics) and _has_latency_spread(metrics) and _has_capacity_hints(config, metrics):
+        return "flowlet_adaptive", "mixed service: jitter pressure favors flowlet stickiness", signals
     if _has_latency_spread(metrics) and _has_queue_pressure(metrics):
         return (
             "arrival_guarded_capacity",
@@ -740,6 +912,15 @@ def _telemetry_signals(config: GatherlinkConfig, metrics: list[PathSchedulerMetr
         signals.append("latency_spread")
     if _has_high_jitter(metrics):
         signals.append("jitter_pressure")
+    if any(
+        metric.latency_source == "clock-synced-one-way"
+        and metric.latency_clock_error_us is not None
+        and metric.latency_clock_error_us > COORDINATED_TCP_ORDERED_MAX_CLOCK_ERROR_US
+        for metric in metrics
+    ):
+        signals.append("latency_uncertainty")
+    if _tcp_ordered_latency_quality_is_too_noisy(metrics):
+        signals.append("tcp_ordered_latency_risk")
     if _has_high_reorder_pressure(metrics):
         signals.append("reorder_pressure")
     if _has_queue_pressure(metrics):

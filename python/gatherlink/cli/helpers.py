@@ -19,7 +19,7 @@ from gatherlink.helpers.dns import DnsHelperResolver, DnsResolverPolicy, DnsUdpS
 from gatherlink.helpers.dns.policies import DnssecMode, DnsUpstreamKind
 from gatherlink.helpers.relay_fabric import discover_relays_from_file
 from gatherlink.helpers.socks5 import GatherlinkServiceExitConnector, run_lab_direct_socks5_server, run_socks5_server
-from gatherlink.helpers.status_http import StatusHttpConfig, run_status_http_server
+from gatherlink.helpers.status_http import StatusHttpConfig, hash_status_http_api_key, run_status_http_server
 from gatherlink.helpers.tcp_forward import TcpForwardConfig, run_lab_direct_tcp_forwarder, run_tcp_forwarder
 from gatherlink.helpers.traffic_split import TrafficSplitPlan, execute_traffic_split_commands, render_commands
 from gatherlink.helpers.udp_stream import GatherlinkUdpStreamTransport, run_gatherlink_udp_stream_exit
@@ -433,10 +433,26 @@ def stream_exit(
 @app.command("status-http")
 def status_http(
     listen: str = typer.Option("127.0.0.1:8765", "--listen", help="HTTP listen endpoint as host:port."),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        envvar="GATHERLINK_STATUS_HTTP_API_KEY",
+        help="API key for local REST requests. Can also be set with GATHERLINK_STATUS_HTTP_API_KEY.",
+    ),
+    api_key_file: Path | None = typer.Option(
+        None,
+        "--api-key-file",
+        help="Read the local REST API key from this file.",
+    ),
+    api_key_hash: list[str] = typer.Option(
+        None,
+        "--api-key-hash",
+        help="Stored API key hash in sha256:<hex> form. Can be passed multiple times.",
+    ),
     allow_non_loopback: bool = typer.Option(
         False,
         "--allow-non-loopback",
-        help="DANGER: allow binding the experimental helper outside loopback.",
+        help="DANGER: allow binding the local REST helper outside loopback.",
     ),
     write_window_seconds: int = typer.Option(
         3600,
@@ -449,14 +465,16 @@ def status_http(
         help="Append structured helper diagnostics events to this JSONL file.",
     ),
 ) -> None:
-    """Run the EXPERIMENTAL local HTTP helper showing Gatherlink services."""
+    """Run the local REST/status helper showing Gatherlink services."""
     listen_host, listen_port = _parse_host_port(listen)
+    key_hashes = _status_http_key_hashes(api_key=api_key, api_key_file=api_key_file, api_key_hash=api_key_hash or [])
     try:
         config = StatusHttpConfig(
             listen_host=listen_host,
             listen_port=listen_port,
             allow_non_loopback=allow_non_loopback,
             write_window_seconds=write_window_seconds,
+            api_key_hashes=key_hashes,
         )
     except ValueError as exc:
         raise typer.BadParameter(str(exc)) from exc
@@ -467,7 +485,7 @@ def status_http(
             err=True,
         )
     typer.echo(
-        f"Gatherlink EXPERIMENTAL status HTTP helper listening on http://{listen_host}:{listen_port}; "
+        f"Gatherlink local REST/status helper listening on http://{listen_host}:{listen_port}; "
         f"write window expires at {config.write_expires_at.isoformat()}"
     )
     sink = JsonlDiagnosticSink(diagnostics_jsonl) if diagnostics_jsonl is not None else None
@@ -479,6 +497,26 @@ def status_http(
             diagnostics_bus.drain()
         if sink is not None:
             sink.close()
+
+
+def _status_http_key_hashes(
+    *, api_key: str | None, api_key_file: Path | None, api_key_hash: list[str]
+) -> tuple[str, ...]:
+    """Collect status HTTP key material without exposing plaintext in runtime state."""
+    hashes = list(api_key_hash)
+    if api_key is not None:
+        hashes.append(hash_status_http_api_key(api_key))
+    if api_key_file is not None:
+        try:
+            hashes.append(hash_status_http_api_key(api_key_file.read_text(encoding="utf-8").strip()))
+        except OSError as exc:
+            raise typer.BadParameter(f"could not read API key file: {exc}") from exc
+    if not hashes:
+        raise typer.BadParameter(
+            "status HTTP requires an API key; pass --api-key, --api-key-file, --api-key-hash, "
+            "or set GATHERLINK_STATUS_HTTP_API_KEY"
+        )
+    return tuple(hashes)
 
 
 @app.command("relay-discover")

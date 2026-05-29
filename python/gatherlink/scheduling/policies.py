@@ -37,6 +37,9 @@ ORDERED_MAX_PRESSURE_CREDIT_DIVISOR = 16
 ORDERED_REORDER_PRESSURE_PACKET_STEP = 1024
 ORDERED_REORDER_BUFFER_AGE_STEP_US = 25_000
 ORDERED_QUEUE_PRESSURE_PACKET_STEP = 128
+ORDERED_IN_FLIGHT_PRESSURE_PACKET_STEP = 512
+ORDERED_IN_FLIGHT_PRESSURE_BYTE_STEP = 512 * 1024
+ORDERED_PREDICTED_DELIVERY_STEP_US = 25_000
 ORDERED_LOSS_PRESSURE_PPM_STEP = 10_000
 ORDERED_DROP_PRESSURE_PACKET_STEP = 4096
 ORDERED_SEND_FAILURE_PACKET_STEP = 16
@@ -194,9 +197,11 @@ class OrderedMultipathPolicy(SchedulerPolicyBase):
 
     def latency_us(self, context: CompiledPathContext) -> int | None:
         """Keep Rust's ordered timeline consistent with Python's credit model."""
-        configured_latency_us = _bounded_scheduler_latency_us(
-            _ordered_latency_us(context.metrics)
-        ) or super().latency_us(context)
+        configured_latency_us = _bounded_scheduler_latency_us(_ordered_latency_us(context.metrics))
+        if configured_latency_us is None:
+            configured_latency_us = _bounded_scheduler_latency_us(context.path.scheduler.latency_us)
+        if configured_latency_us is None and _ordered_latency_may_use_generic(context.metrics):
+            configured_latency_us = super().latency_us(context)
         return configured_latency_us or _ordered_reorder_hold_us(
             configured_latency_us,
             context.path.scheduler.reorder_hold_us,
@@ -485,6 +490,9 @@ def _ordered_pressure_credit_divisor(metrics: PathSchedulerMetrics | None) -> in
     score += min(4, metrics.reorder_buffer_packets // ORDERED_REORDER_PRESSURE_PACKET_STEP)
     score += min(4, metrics.reorder_buffer_oldest_age_us // ORDERED_REORDER_BUFFER_AGE_STEP_US)
     score += min(4, metrics.queue_depth_packets // ORDERED_QUEUE_PRESSURE_PACKET_STEP)
+    score += min(4, metrics.scheduler_in_flight_packets // ORDERED_IN_FLIGHT_PRESSURE_PACKET_STEP)
+    score += min(4, metrics.scheduler_in_flight_bytes // ORDERED_IN_FLIGHT_PRESSURE_BYTE_STEP)
+    score += min(4, metrics.scheduler_predicted_delivery_us // ORDERED_PREDICTED_DELIVERY_STEP_US)
     score += min(4, metrics.loss_ppm // ORDERED_LOSS_PRESSURE_PPM_STEP)
     if metrics.observed_packets > 0:
         receive_gap_ppm = metrics.receive_gaps * 1_000_000 // metrics.observed_packets
@@ -529,6 +537,8 @@ def _ordered_latency_us(metrics: PathSchedulerMetrics | None) -> int | None:
     """
     if metrics is None:
         return None
+    if not _ordered_latency_may_use_generic(metrics):
+        return None
     values = [
         value
         for value in (
@@ -542,6 +552,25 @@ def _ordered_latency_us(metrics: PathSchedulerMetrics | None) -> int | None:
         if value is not None
     ]
     return max(values) if values else None
+
+
+def _ordered_latency_may_use_generic(metrics: PathSchedulerMetrics | None) -> bool:
+    """
+    Return whether ordered mode should trust latency enough to rank paths.
+
+    Clock-synced one-way samples are useful after a path has carried real
+    packets, but startup probes can be directionally noisy. If an ordered TCP
+    path has no observed payload yet, leave latency unknown so the path can
+    prove itself with bounded credit instead of being drained by a speculative
+    arrival estimate.
+    """
+    if metrics is None:
+        return True
+    if metrics.has_trusted_real_data_latency:
+        return True
+    if metrics.latency_source != "clock-synced-one-way":
+        return True
+    return metrics.observed_packets > 0
 
 
 def _trusted_real_data_latency(metrics: PathSchedulerMetrics | None) -> bool:

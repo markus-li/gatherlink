@@ -48,15 +48,17 @@ CONTROL_TYPE_PATH_PRESSURE = 13
 CONTROL_TYPE_SCHEDULER_STATUS = 14
 CONTROL_TYPE_DATA_TRANSMIT_SAMPLE = 15
 CONTROL_TYPE_PATH_LATENCY_QUALITY = 16
+CONTROL_TYPE_PATH_LATENCY_STATS = 17
 SEQUENCE_SPACE = 1 << 64
 DEFAULT_SESSION_ID = 0
 DEFAULT_SERVICE_ID = USER_SERVICE_ID_START
 
 ServiceSchedulerPolicy = tuple[int, int, int, int, int, int]
-PathPressure = tuple[int, int, int, int, int, int, int, int, int, int, int, int, int]
+PathPressure = tuple[int, int, int, int, int, int, int, int, int, int, int, int, int, int]
 SchedulerStatus = tuple[str, str, str]
 DataTransmitSample = tuple[int, int, int, int]
 PathLatencyQuality = tuple[str | None, str | None]
+PathLatencyStats = tuple[int | None, int | None, int | None, int | None, int | None, int | None]
 
 
 @dataclass(frozen=True)
@@ -80,6 +82,7 @@ class ControlFrame:
     path_capacity_bps: dict[int, tuple[int | None, int | None]]
     path_latency_us: dict[int, tuple[int | None, int | None, int | None, int | None]]
     path_latency_quality: dict[int, PathLatencyQuality]
+    path_latency_stats: dict[int, PathLatencyStats]
     path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]]
     path_pressure: dict[int, PathPressure]
     scheduler_status: SchedulerStatus | None
@@ -175,6 +178,7 @@ def encode_control_payload(
     path_capacity_bps: dict[int, tuple[int | None, int | None]] | None = None,
     path_latency_us: dict[int, tuple[int | None, int | None, int | None, int | None]] | None = None,
     path_latency_quality: dict[int, PathLatencyQuality] | None = None,
+    path_latency_stats: dict[int, PathLatencyStats] | None = None,
     path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]] | None = None,
     path_pressure: dict[int, PathPressure] | None = None,
     scheduler_status: SchedulerStatus | None = None,
@@ -190,6 +194,7 @@ def encode_control_payload(
     path_capacity_bps = path_capacity_bps or {}
     path_latency_us = path_latency_us or {}
     path_latency_quality = path_latency_quality or {}
+    path_latency_stats = path_latency_stats or {}
     path_mtu = path_mtu or {}
     path_pressure = path_pressure or {}
     path_clock_sync = path_clock_sync or []
@@ -204,6 +209,7 @@ def encode_control_payload(
         + len(path_capacity_bps)
         + len(path_latency_us)
         + len(path_latency_quality)
+        + len(path_latency_stats)
         + len(path_mtu)
         + len(path_pressure)
         + (1 if scheduler_status is not None else 0)
@@ -224,6 +230,7 @@ def encode_control_payload(
     _encode_path_capacity(output, path_capacity_bps)
     _encode_path_latency(output, path_latency_us)
     _encode_path_latency_quality(output, path_latency_quality)
+    _encode_path_latency_stats(output, path_latency_stats)
     _encode_path_mtu(output, path_mtu)
     _encode_path_pressure(output, path_pressure)
     _encode_scheduler_status(output, scheduler_status)
@@ -254,6 +261,7 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
     path_capacity_bps: dict[int, tuple[int | None, int | None]] = {}
     path_latency_us: dict[int, tuple[int | None, int | None, int | None, int | None]] = {}
     path_latency_quality: dict[int, PathLatencyQuality] = {}
+    path_latency_stats: dict[int, PathLatencyStats] = {}
     path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]] = {}
     path_pressure: dict[int, PathPressure] = {}
     scheduler_status: SchedulerStatus | None = None
@@ -333,6 +341,12 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
                 return None
             path_id, source, confidence = decoded_latency_quality
             path_latency_quality[path_id] = (source, confidence)
+        elif message_type == CONTROL_TYPE_PATH_LATENCY_STATS:
+            decoded_latency_stats = _decode_path_latency_stats_value(value)
+            if decoded_latency_stats is None:
+                return None
+            path_id, rtt_us, clock_error_us, tx_jitter_us, rx_jitter_us, tx_p95_us, rx_p95_us = decoded_latency_stats
+            path_latency_stats[path_id] = (rtt_us, clock_error_us, tx_jitter_us, rx_jitter_us, tx_p95_us, rx_p95_us)
         elif message_type == CONTROL_TYPE_PATH_MTU:
             decoded_mtu = _decode_path_mtu_value(value)
             if decoded_mtu is None:
@@ -358,6 +372,7 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
                 scheduler_predicted_delivery_us,
                 reorder_buffer_packets,
                 reorder_buffer_oldest_age_us,
+                observed_packets,
             ) = decoded_pressure
             path_pressure[path_id] = (
                 loss_ppm,
@@ -373,6 +388,7 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
                 scheduler_predicted_delivery_us,
                 reorder_buffer_packets,
                 reorder_buffer_oldest_age_us,
+                observed_packets,
             )
         elif message_type == CONTROL_TYPE_SCHEDULER_STATUS:
             scheduler_status = _decode_scheduler_status_value(value)
@@ -404,6 +420,7 @@ def decode_control_payload(payload: bytes) -> ControlFrame | None:
         path_capacity_bps=path_capacity_bps,
         path_latency_us=path_latency_us,
         path_latency_quality=path_latency_quality,
+        path_latency_stats=path_latency_stats,
         path_mtu=path_mtu,
         path_pressure=path_pressure,
         scheduler_status=scheduler_status,
@@ -553,6 +570,21 @@ def _encode_path_latency_quality(output: bytearray, path_latency_quality: dict[i
         output.append(_encode_latency_confidence(confidence))
 
 
+def _encode_path_latency_stats(output: bytearray, path_latency_stats: dict[int, PathLatencyStats]) -> None:
+    for path_id, (rtt_us, clock_error_us, tx_jitter_us, rx_jitter_us, tx_p95_us, rx_p95_us) in path_latency_stats.items():
+        if path_id < 0 or path_id > _u16_max():
+            raise ValueError("path latency stats path id out of range")
+        output.append(CONTROL_TYPE_PATH_LATENCY_STATS)
+        _append_u16(output, 26)
+        _append_u16(output, path_id)
+        _append_u32(output, _optional_metric_u32(rtt_us))
+        _append_u32(output, _optional_metric_u32(clock_error_us))
+        _append_u32(output, _optional_metric_u32(tx_jitter_us))
+        _append_u32(output, _optional_metric_u32(rx_jitter_us))
+        _append_u32(output, _optional_metric_u32(tx_p95_us))
+        _append_u32(output, _optional_metric_u32(rx_p95_us))
+
+
 def _encode_path_mtu(
     output: bytearray,
     path_mtu: dict[int, tuple[int | None, int | None, int | None, int | None]],
@@ -593,11 +625,12 @@ def _encode_path_pressure(output: bytearray, path_pressure: dict[int, PathPressu
             scheduler_predicted_delivery_us,
             reorder_buffer_packets,
             reorder_buffer_oldest_age_us,
+            observed_packets,
         ) = pressure
         if loss_ppm > 1_000_000:
             raise ValueError("path pressure loss value out of range")
         output.append(CONTROL_TYPE_PATH_PRESSURE)
-        _append_u16(output, 54)
+        _append_u16(output, 58)
         _append_u16(output, path_id)
         _append_u32(output, _counter_u32(loss_ppm))
         _append_u32(output, _counter_u32(queue_depth_packets))
@@ -612,6 +645,7 @@ def _encode_path_pressure(output: bytearray, path_pressure: dict[int, PathPressu
         _append_u32(output, _counter_u32(scheduler_predicted_delivery_us))
         _append_u32(output, _counter_u32(reorder_buffer_packets))
         _append_u32(output, _counter_u32(reorder_buffer_oldest_age_us))
+        _append_u32(output, _counter_u32(observed_packets))
 
 
 def _encode_scheduler_status(output: bytearray, scheduler_status: SchedulerStatus | None) -> None:
@@ -800,6 +834,20 @@ def _decode_path_latency_quality_value(value: bytes) -> tuple[int, str | None, s
     return _read_u16(value, 0), source, confidence
 
 
+def _decode_path_latency_stats_value(value: bytes) -> tuple[int, int | None, int | None, int | None, int | None, int | None, int | None] | None:
+    if len(value) != 26:
+        return None
+    return (
+        _read_u16(value, 0),
+        _decode_optional_u32(_read_u32(value, 2)),
+        _decode_optional_u32(_read_u32(value, 6)),
+        _decode_optional_u32(_read_u32(value, 10)),
+        _decode_optional_u32(_read_u32(value, 14)),
+        _decode_optional_u32(_read_u32(value, 18)),
+        _decode_optional_u32(_read_u32(value, 22)),
+    )
+
+
 def _decode_path_mtu_value(value: bytes) -> tuple[int, int | None, int | None, int | None, int | None] | None:
     if len(value) != 10:
         return None
@@ -838,7 +886,7 @@ def _decode_path_pressure_value(
     ]
     | None
 ):
-    if len(value) != 54:
+    if len(value) != 58:
         return None
     loss_ppm = _read_u32(value, 2)
     if loss_ppm > 1_000_000:
@@ -858,6 +906,7 @@ def _decode_path_pressure_value(
         _read_u32(value, 42),
         _read_u32(value, 46),
         _read_u32(value, 50),
+        _read_u32(value, 54),
     )
 
 
@@ -988,6 +1037,14 @@ def _optional_u32(value: int | None) -> int:
         return 0
     if value <= 0 or value > _u32_max():
         raise ValueError("path latency value out of range")
+    return value
+
+
+def _optional_metric_u32(value: int | None) -> int:
+    if value is None:
+        return 0
+    if value < 0 or value > _u32_max():
+        raise ValueError("path metric value out of range")
     return value
 
 

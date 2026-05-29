@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import socket
 import subprocess
+import time
 from pathlib import Path
 
 from gatherlink.lab.acceptance import AcceptanceCheck, AcceptanceReport
@@ -151,6 +154,84 @@ def test_udp_pressure_tool_compiles(tmp_path) -> None:
     output = tmp_path / "udp-pressure"
 
     subprocess.run(["rustc", "--edition", "2021", "-O", str(source), "-o", str(output)], check=True)
+
+    help_text = subprocess.run(
+        [str(output)],
+        check=False,
+        text=True,
+        capture_output=True,
+    ).stderr
+    assert "--flows N" in help_text
+    assert "--workers N" in help_text
+    assert "--send-batch N" in help_text
+    assert "--recv-batch N" in help_text
+    assert "--recv-buffer-size BYTES" in help_text
+    assert "--recv-truncate" in help_text
+    assert "--udp-gso-segments N" in help_text
+    assert "--feedback-bind ADDR" in help_text
+    assert "--feedback-initial-mbit MBIT" in help_text
+    assert "--feedback-max-mbit MBIT" in help_text
+    assert "--feedback-probe-step-mbit MBIT" in help_text
+    assert "--feedback-good-ratio RATIO" in help_text
+    assert "--feedback-low-ratio RATIO" in help_text
+    assert "--feedback-backoff-ratio RATIO" in help_text
+    assert "--feedback-target ADDR" in help_text
+
+
+def test_udp_pressure_multisocket_sink_reports_active_receive_window(tmp_path) -> None:
+    """Idle worker sockets must not dilute active sink throughput."""
+    source = REPO_ROOT / "tools" / "udp_pressure.rs"
+    output = tmp_path / "udp-pressure"
+    subprocess.run(["rustc", "--edition", "2021", "-O", str(source), "-o", str(output)], check=True)
+
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        base_port = probe.getsockname()[1]
+
+    sink = subprocess.Popen(
+        [
+            str(output),
+            "sink",
+            "--bind",
+            f"127.0.0.1:{base_port}",
+            "--duration",
+            "3",
+            "--idle-after-first",
+            "0.2",
+            "--workers",
+            "2",
+            "--bind-port-stride",
+            "16",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    time.sleep(0.2)
+    subprocess.run(
+        [
+            str(output),
+            "send",
+            "--target",
+            f"127.0.0.1:{base_port}",
+            "--duration",
+            "1",
+            "--payload-size",
+            "1200",
+            "--target-mbit",
+            "20",
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    stdout, stderr = sink.communicate(timeout=5)
+
+    assert sink.returncode == 0, stderr
+    stats = json.loads(stdout)
+    assert stats["packets"] > 0
+    assert stats["elapsed_seconds"] < 1.8
+    assert stats["bits_per_second"] > 15_000_000
 
 
 def test_vm_acceptance_dry_run_does_not_contact_vms(tmp_path) -> None:

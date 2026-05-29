@@ -149,20 +149,40 @@ pressure_mbit="$(udp_rate_mbit)"
 if [[ "${UDP_PRESSURE_UNBOUNDED}" -eq 1 ]]; then
   pressure_mbit=""
 fi
+if [[ "${PERF_COLLECT_NODE_PROBES}" -eq 1 ]]; then
+  perf_start_node_probe "udp-pressure-node-a" "${PORT_A}" "$((DURATION + 5))"
+  perf_start_node_probe "udp-pressure-node-b" "${PORT_B}" "$((DURATION + 5))"
+fi
 for index in $(path_indexes); do
   label="path-${index}-udp-pressure-simultaneous"
-  perf_start_udp_pressure_sink "${label}" "${PORT_A}" "10.91.${index}.11:$((7810 + index))" "${DURATION}"
+  perf_start_udp_pressure_sink \
+    "${label}" \
+    "${PORT_A}" \
+    "10.91.${index}.11:$((7800 + index * 100))" \
+    "${DURATION}" \
+    "10.91.${index}.12:$((7900 + index * 100))"
 done
 sleep 1
 for index in $(path_indexes); do
   label="path-${index}-udp-pressure-simultaneous"
-  perf_start_udp_pressure_client_background "${label}" "${PORT_B}" "10.91.${index}.11:$((7810 + index))" "${DURATION}" "${UDP_LENGTH}" "${pressure_mbit}"
+  perf_start_udp_pressure_client_background \
+    "${label}" \
+    "${PORT_B}" \
+    "10.91.${index}.11:$((7800 + index * 100))" \
+    "${DURATION}" \
+    "${UDP_LENGTH}" \
+    "${pressure_mbit}" \
+    "10.91.${index}.12:$((7900 + index * 100))"
 done
 sleep "$((DURATION + 3))"
 for index in $(path_indexes); do
   label="path-${index}-udp-pressure-simultaneous"
   perf_fetch_udp_pressure_background "${label}" "${PORT_A}" "${PORT_B}"
 done
+if [[ "${PERF_COLLECT_NODE_PROBES}" -eq 1 ]]; then
+  perf_fetch_node_probe "udp-pressure-node-a" "${PORT_A}"
+  perf_fetch_node_probe "udp-pressure-node-b" "${PORT_B}"
+fi
 
 perf_step "Summary"
 perf_summarize_iperf_jsons | tee -a "${REPORT}"

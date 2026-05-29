@@ -53,10 +53,102 @@ def parse_args() -> argparse.Namespace:
 
 def read_cpu() -> CpuSample:
     """Read aggregate CPU counters from `/proc/stat`."""
-    fields = Path("/proc/stat").read_text(encoding="utf-8").splitlines()[0].split()[1:]
+    fields = read_cpu_rows()["cpu"].split()[1:]
     values = [int(value) for value in fields]
     idle = values[3] + (values[4] if len(values) > 4 else 0)
     return CpuSample(total=sum(values), idle=idle)
+
+
+def read_cpu_rows() -> dict[str, str]:
+    """Read aggregate and per-CPU rows from `/proc/stat`."""
+    rows = {}
+    for line in Path("/proc/stat").read_text(encoding="utf-8").splitlines():
+        name = line.split(maxsplit=1)[0]
+        if name == "cpu" or (name.startswith("cpu") and name[3:].isdigit()):
+            rows[name] = line
+    return rows
+
+
+def parse_cpu_sample(row: str) -> CpuSample:
+    """Parse one `/proc/stat` CPU row into total and idle ticks."""
+    fields = row.split()[1:]
+    values = [int(value) for value in fields]
+    idle = values[3] + (values[4] if len(values) > 4 else 0)
+    return CpuSample(total=sum(values), idle=idle)
+
+
+def read_cpu_map() -> dict[str, CpuSample]:
+    """Read aggregate and per-CPU samples."""
+    return {name: parse_cpu_sample(row) for name, row in read_cpu_rows().items()}
+
+
+def summarize_cpu_busy(start: dict[str, CpuSample], end: dict[str, CpuSample]) -> dict[str, float]:
+    """Summarize CPU busy percentage for aggregate and per-CPU rows."""
+    output: dict[str, float] = {}
+    for name in sorted(set(start) | set(end)):
+        before = start.get(name)
+        after = end.get(name)
+        if before is None or after is None:
+            continue
+        total_delta = max(after.total - before.total, 1)
+        idle_delta = max(after.idle - before.idle, 0)
+        output[name] = (1 - (idle_delta / total_delta)) * 100
+    return output
+
+
+def read_softirqs() -> dict[str, list[int]]:
+    """Read `/proc/softirqs` counters grouped by softirq name."""
+    lines = Path("/proc/softirqs").read_text(encoding="utf-8").splitlines()
+    output: dict[str, list[int]] = {}
+    for line in lines[1:]:
+        if ":" not in line:
+            continue
+        name, values = line.split(":", 1)
+        output[name.strip()] = [int(value) for value in values.split()]
+    return output
+
+
+def read_softnet() -> dict[str, dict[str, int]]:
+    """Read `/proc/net/softnet_stat` per-CPU network backlog counters."""
+    output: dict[str, dict[str, int]] = {}
+    path = Path("/proc/net/softnet_stat")
+    if not path.exists():
+        return output
+    for index, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
+        fields = [int(value, 16) for value in line.split()]
+        if len(fields) < 3:
+            continue
+        output[f"cpu{index}"] = {
+            "processed": fields[0],
+            "dropped": fields[1],
+            "time_squeeze": fields[2],
+        }
+    return output
+
+
+def delta_softirqs(end: dict[str, list[int]], start: dict[str, list[int]]) -> dict[str, dict[str, object]]:
+    """Return per-softirq total and per-CPU deltas."""
+    output: dict[str, dict[str, object]] = {}
+    for name in sorted(set(start) | set(end)):
+        before = start.get(name, [])
+        after = end.get(name, [])
+        width = max(len(before), len(after))
+        per_cpu = [(after[i] if i < len(after) else 0) - (before[i] if i < len(before) else 0) for i in range(width)]
+        output[name] = {"total": sum(per_cpu), "per_cpu": per_cpu}
+    return output
+
+
+def delta_nested_counter_map(
+    end: dict[str, dict[str, int]],
+    start: dict[str, dict[str, int]],
+) -> dict[str, dict[str, int]]:
+    """Return deltas for nested per-CPU counter dictionaries."""
+    output: dict[str, dict[str, int]] = {}
+    for name in sorted(set(start) | set(end)):
+        before = start.get(name, {})
+        after = end.get(name, {})
+        output[name] = delta_dict(after, before)
+    return output
 
 
 def read_udp_snmp() -> dict[str, int]:
@@ -181,14 +273,26 @@ def main() -> int:
     start_time = time.monotonic()
     start_wall = time.time()
     start_cpu = read_cpu()
+    start_cpu_map = read_cpu_map()
+    start_softirqs = read_softirqs()
+    start_softnet = read_softnet()
     start_udp = read_udp_snmp()
     start_netdev = read_netdev(args.netdev)
     cmdlines = matching_processes(patterns)
     start_processes = {pid: sample for pid in cmdlines if (sample := read_process(pid)) is not None}
+    last_processes = dict(start_processes)
 
     samples = []
     while time.monotonic() - start_time < args.duration:
         time.sleep(args.interval)
+        for pid, cmdline in matching_processes(patterns).items():
+            if pid not in cmdlines:
+                cmdlines[pid] = cmdline
+                if sample := read_process(pid):
+                    start_processes[pid] = sample
+                    last_processes[pid] = sample
+            elif sample := read_process(pid):
+                last_processes[pid] = sample
         cpu = read_cpu()
         udp = read_udp_snmp()
         samples.append(
@@ -202,9 +306,14 @@ def main() -> int:
 
     elapsed = time.monotonic() - start_time
     end_cpu = read_cpu()
+    end_cpu_map = read_cpu_map()
+    end_softirqs = read_softirqs()
+    end_softnet = read_softnet()
     end_udp = read_udp_snmp()
     end_netdev = read_netdev(args.netdev)
-    end_processes = {pid: sample for pid in start_processes if (sample := read_process(pid)) is not None}
+    for pid in start_processes:
+        if sample := read_process(pid):
+            last_processes[pid] = sample
     total_delta = max(end_cpu.total - start_cpu.total, 1)
     idle_delta = max(end_cpu.idle - start_cpu.idle, 0)
 
@@ -213,12 +322,15 @@ def main() -> int:
         "started_unix": start_wall,
         "elapsed_seconds": elapsed,
         "cpu_busy_percent_all_cores": (1 - (idle_delta / total_delta)) * 100,
+        "cpu_busy_percent_by_cpu": summarize_cpu_busy(start_cpu_map, end_cpu_map),
+        "softirq_delta": delta_softirqs(end_softirqs, start_softirqs),
+        "softnet_delta": delta_nested_counter_map(end_softnet, start_softnet),
         "udp_delta": delta_dict(end_udp, start_udp),
         "netdev_delta": {
             name: delta_dict(end_netdev.get(name, {}), start_netdev.get(name, {}))
             for name in sorted(set(start_netdev) | set(end_netdev))
         },
-        "processes": summarize_processes(start_processes, end_processes, cmdlines, elapsed),
+        "processes": summarize_processes(start_processes, last_processes, cmdlines, elapsed),
         "samples": samples,
     }
     args.out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")

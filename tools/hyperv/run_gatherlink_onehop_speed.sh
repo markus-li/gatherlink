@@ -25,6 +25,7 @@ APPLY_KERNEL_TUNING=1
 ACTIVE_PATHS="a,b,c"
 SCHEDULER_MODE="round_robin"
 SCHEDULER_TRAFFIC_BIAS="auto"
+SERVICE_TRAFFIC_CLASS="unknown"
 PATH_CAPACITY_MBITS=""
 FLOWLET_IDLE_US=0
 FLOWLET_MAX_HOLD_US=0
@@ -63,6 +64,8 @@ Options:
   --scheduler-mode MODE  Python-selected scheduler mode compiled for Rust. Default round_robin.
   --scheduler-traffic-bias BIAS
                         Bias coordinated_adaptive toward auto, tcp, or udp. Default auto.
+  --service-traffic-class CLASS
+                        Traffic class for the generated UDP service. Default unknown.
   --path-capacity-mbits SPEC
                         Static per-path scheduler capacity hints, for example a:300,b:500,c:700,d:220,e:210.
                         If omitted, every active path uses 5000 Mbit/s.
@@ -100,6 +103,7 @@ while [[ $# -gt 0 ]]; do
     --active-paths) ACTIVE_PATHS="$2"; shift 2 ;;
     --scheduler-mode) SCHEDULER_MODE="$2"; shift 2 ;;
     --scheduler-traffic-bias) SCHEDULER_TRAFFIC_BIAS="$2"; shift 2 ;;
+    --service-traffic-class) SERVICE_TRAFFIC_CLASS="$2"; shift 2 ;;
     --path-capacity-mbits) PATH_CAPACITY_MBITS="$2"; shift 2 ;;
     --flowlet-idle-us) FLOWLET_IDLE_US="$2"; shift 2 ;;
     --flowlet-max-hold-us) FLOWLET_MAX_HOLD_US="$2"; shift 2 ;;
@@ -297,6 +301,7 @@ cfg = {
             'listen': '0.0.0.0:0',
             'target': '127.0.0.1:19091',
             'return_mode': 'fixed',
+            'traffic_class': '${SERVICE_TRAFFIC_CLASS}',
             'scheduler_flowlet_idle_us': ${FLOWLET_IDLE_US},
             'scheduler_flowlet_max_hold_us': ${FLOWLET_MAX_HOLD_US},
             'scheduler_path_run_datagrams': ${PATH_RUN_DATAGRAMS},
@@ -359,6 +364,7 @@ cfg = {
             'listen': '127.0.0.1:55180',
             'target': '127.0.0.1:19092',
             'return_mode': 'learned-single-source',
+            'traffic_class': '${SERVICE_TRAFFIC_CLASS}',
             'scheduler_flowlet_idle_us': ${FLOWLET_IDLE_US},
             'scheduler_flowlet_max_hold_us': ${FLOWLET_MAX_HOLD_US},
             'scheduler_path_run_datagrams': ${PATH_RUN_DATAGRAMS},
@@ -466,6 +472,7 @@ record "- security_mode: ${SECURITY_MODE}"
 record "- active_paths: ${ACTIVE_PATHS}"
 record "- scheduler_mode: ${SCHEDULER_MODE}"
 record "- scheduler_traffic_bias: ${SCHEDULER_TRAFFIC_BIAS}"
+record "- service_traffic_class: ${SERVICE_TRAFFIC_CLASS}"
 record "- path_capacity_mbits: ${PATH_CAPACITY_MBITS:-default-5000}"
 record "- flowlet_idle_us: ${FLOWLET_IDLE_US}"
 record "- flowlet_max_hold_us: ${FLOWLET_MAX_HOLD_US}"

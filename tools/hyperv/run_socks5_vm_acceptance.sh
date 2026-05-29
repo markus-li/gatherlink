@@ -22,6 +22,7 @@ INVENTORY=""
 THROUGHPUT_SECONDS=0
 THROUGHPUT_TARGET_MBIT=0
 THROUGHPUT_PAYLOAD_SIZE=65536
+STATUS_API_KEY="${STATUS_API_KEY:-gatherlink-vm-acceptance-status-key}"
 OUT_DIR="${REPO_ROOT}/.gatherlink/hyperv-socks5-acceptance/$(date -u +%Y%m%dT%H%M%SZ)"
 
 usage() {
@@ -246,7 +247,7 @@ record "generated VM configs validate; SOCKS5 and TCP forward use separate Gathe
 
 step "Start"
 cleanup
-remote_b "start-status-http" "cd /home/gatherlink/src/gatherlink && (nohup .venv/bin/gatherlink helpers status-http --listen 127.0.0.1:18081 --write-window-seconds 0 >/tmp/socks5-status-http.log 2>&1 </dev/null & echo \$! >/tmp/socks5-status-http.pid)"
+remote_b "start-status-http" "cd /home/gatherlink/src/gatherlink && (nohup .venv/bin/gatherlink helpers status-http --listen 127.0.0.1:18081 --api-key '${STATUS_API_KEY}' --write-window-seconds 0 >/tmp/socks5-status-http.log 2>&1 </dev/null & echo \$! >/tmp/socks5-status-http.pid)"
 remote_b "start-stream-exit" "cd /home/gatherlink/src/gatherlink && (nohup .venv/bin/gatherlink helpers stream-exit --listen 127.0.0.1:51820 --allow-host 127.0.0.1 --allow-port 18081 --allow-port 18100 --diagnostics-jsonl /tmp/socks5-stream-exit.jsonl >/tmp/socks5-stream-exit.log 2>&1 </dev/null & echo \$! >/tmp/socks5-stream-exit.pid)"
 remote_b "start-node-b" "cd /home/gatherlink/src/gatherlink && .venv/bin/gatherlink run start /tmp/socks5-node-b.json --name socks5.vm.node-b --diagnostics-jsonl /tmp/socks5-node-b.jsonl"
 sleep 1
@@ -260,12 +261,12 @@ sleep 1
 record "status HTTP, stream exit, both core services, SOCKS5 helper, and TCP forward helper started"
 
 step "SOCKS5 HTTP Probe"
-remote_a "probe" "cd /home/gatherlink/src/gatherlink && .venv/bin/python tools/socks5_http_probe.py --socks 127.0.0.1:1081 --target 127.0.0.1:18081 --path /text --timeout 15 | tee /tmp/socks5-probe.txt"
+remote_a "probe" "cd /home/gatherlink/src/gatherlink && .venv/bin/python tools/socks5_http_probe.py --socks 127.0.0.1:1081 --target 127.0.0.1:18081 --path /text --bearer-token '${STATUS_API_KEY}' --timeout 15 | tee /tmp/socks5-probe.txt"
 remote_a "probe-verify" "grep -q 'Gatherlink local status (EXPERIMENTAL)' /tmp/socks5-probe.txt && grep -q 'socks5.vm.node-b' /tmp/socks5-probe.txt"
 record "SOCKS5 CONNECT fetched the VM B status HTTP helper through Gatherlink"
 
 step "TCP Forward HTTP Probe"
-remote_a "tcp-forward-probe" "cd /home/gatherlink/src/gatherlink && .venv/bin/python tools/http_probe.py --target 127.0.0.1:18082 --path /text --timeout 15 | tee /tmp/tcp-forward-probe.txt"
+remote_a "tcp-forward-probe" "cd /home/gatherlink/src/gatherlink && .venv/bin/python tools/http_probe.py --target 127.0.0.1:18082 --path /text --bearer-token '${STATUS_API_KEY}' --timeout 15 | tee /tmp/tcp-forward-probe.txt"
 remote_a "tcp-forward-probe-verify" "grep -q 'Gatherlink local status (EXPERIMENTAL)' /tmp/tcp-forward-probe.txt && grep -q 'socks5.vm.node-b' /tmp/tcp-forward-probe.txt"
 record "TCP forward fetched the VM B status HTTP helper through Gatherlink"
 
