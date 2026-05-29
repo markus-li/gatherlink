@@ -91,6 +91,7 @@ Suggested initial codes include:
 - `socks.exit_denied`
 - `socks.exit_unreachable`
 - `helper.status_http.started`
+- `helper.status_http.auth_failed`
 - `helper.status_http.non_loopback_bind`
 - `helper.status_http.service_closed`
 - `helper.status_http.write_denied`

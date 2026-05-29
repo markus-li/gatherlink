@@ -70,11 +70,12 @@ Every benchmark report that claims pass/fail should record:
 - scheduler mode and path capacity hints used at startup
 - whether the run was cold-cache or warm-cache
 
-Current performance ledgers, including `hyperv-performance-log.md`, must keep
-these gate fields visible whenever a row is used as pass/fail, target,
-guardrail, regression, or release evidence. Do not collapse gate status into
-prose-only readings. If a table uses more than one baseline, keep separate
-compact gate columns rather than merging the meanings.
+Current performance ledgers, including
+[`hyperv-performance-log.md`](hyperv-performance-log.md), must keep these gate
+fields visible whenever a row is used as pass/fail, target, guardrail,
+regression, or release evidence. Do not collapse gate status into prose-only
+readings. If a table uses more than one baseline, keep separate compact gate
+columns rather than merging the meanings.
 
 ## Current Notes
 

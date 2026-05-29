@@ -16,7 +16,7 @@ instead of writing one-off JSON or parsing terminal text. The bus must never
 block dataplane or control loops; if a sink is slow, diagnostics are dropped and
 the queue drop counter/event tells the operator what happened.
 
-V0.9 producer coverage includes:
+Producer coverage includes:
 
 - startup warnings for plaintext/static/manual security choices
 - service bind lifecycle events

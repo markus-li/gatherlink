@@ -6,7 +6,7 @@ The TCP forwarding helper provides simple one-to-one TCP port forwarding over
 Gatherlink. The same helper family is also the future TCP-aware proxy shape for
 TCP streams where Gatherlink should stay "in the know" at stream level without
 moving TCP semantics into Rust. It is an active helper priority and remains
-Python/control-plane owned for v0.9.
+Python/control-plane owned.
 
 Example:
 
@@ -31,7 +31,7 @@ local 127.0.0.1:8080
   denial
 - optional JSONL diagnostics sink for stream lifecycle and failure events
 
-When promoted from the v0.9.3/future pipeline, TCP-aware proxy scope must
+When promoted from the future pipeline, TCP-aware proxy scope must
 include both explicit and transparent modes from the beginning:
 
 - explicit mode: applications connect to a configured local listen endpoint,
@@ -54,7 +54,7 @@ bolted on as a separate product later.
 
 ## Future Hybrid TCP Proxy Plus WireGuard Profile
 
-A useful v0.9.3/future deployment profile is:
+A useful future deployment profile is:
 
 ```text
 TCP traffic
@@ -82,9 +82,9 @@ Boundary:
 - Gatherlink core still carries encrypted service payloads and does not inspect
   application protocols, raw TCP sequence numbers, or WireGuard payloads
 
-This is not part of the closed v0.9.2 release scope. When promoted, it should
-be tested first without transparent interception by using explicit TCP proxy
-listeners and ordinary WireGuard-over-Gatherlink for the remaining traffic.
+When promoted, this should be tested first without transparent interception by
+using explicit TCP proxy listeners and ordinary WireGuard-over-Gatherlink for
+the remaining traffic.
 Transparent interception can then be proven separately with the same TCP stream
 service.
 

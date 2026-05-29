@@ -53,8 +53,7 @@ probably drifting and should be redesigned before it spreads.
 
 ## Platform compatibility boundary
 
-V0.9 supports Debian only. The Debian backend is the only compatibility backend
-that must exist for v0.9.
+Debian is the currently supported compatibility backend.
 
 Even so, OS-specific behavior must go through compatibility interfaces instead
 of leaking through runtime, helpers, diagnostics, or protocol code. Future
@@ -303,7 +302,7 @@ Core transport must not depend on DNS helper.
 
 ## Peer failover
 
-Peer failover is a v0.9-shaped requirement, not a broad mesh feature.
+Peer failover is a near-term operational requirement, not a broad mesh feature.
 
 It must support peer priority, automatic failover, conservative failback, session-aware partial failback,
 minimum dwell windows, standby peer probing, new sessions using recovered preferred peer, and existing

@@ -36,9 +36,9 @@ The shared-sink v0.9 gate also uses:
 
 Both should have `/home/gatherlink-user/src/gatherlink` and the project virtualenv.
 
-In the current local development setup, the prepared user may be `markus`
-instead of `gatherlink-user`; keep the commands' user/home path aligned with
-the distro that was cloned.
+In a local development setup, the prepared user may differ from
+`gatherlink-user`; keep the commands' user/home path aligned with the distro
+that was cloned.
 
 ## Successful Local Setup Summary
 

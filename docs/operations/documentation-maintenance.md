@@ -23,8 +23,8 @@ If two docs disagree, prefer the more specific canonical home:
   status, and priority.
 - [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md) owns project boundaries and
   permanent ownership rules.
-- [`docs/operations/v0.9-operator-runbook.md`](v0.9-operator-runbook.md) and
-  [`docs/operations/v0.9-troubleshooting-guide.md`](v0.9-troubleshooting-guide.md) own current operator flows.
+- [`docs/operations/operator-runbook.md`](operator-runbook.md) and
+  [`docs/operations/troubleshooting-guide.md`](troubleshooting-guide.md) own current operator flows.
 - [`docs/benchmarks/README.md`](../benchmarks/README.md) and [`docs/benchmarks/hyperv-performance-log.md`](../benchmarks/hyperv-performance-log.md)
   own benchmark method and measured performance evidence. Benchmark rows should
   keep comparison percentages in the row whenever a baseline exists; use `n/a`
@@ -32,13 +32,20 @@ If two docs disagree, prefer the more specific canonical home:
 
 Reports and study notes are historical unless a canonical doc cites them or a
 release roadmap explicitly promotes their content.
+They should not track current implementation status. Put status in roadmaps,
+release notes, benchmark ledgers, or acceptance reports, and keep research notes
+as evaluation input.
 
 ## Navigation Rules
 
 - [`docs/README.md`](../README.md) should help readers find the right document quickly. It
   should not restate the full maintenance policy.
-- Directory [`README.md`](../../README.md) files should explain what belongs in that directory and
-  list likely entry points.
+- Directory README files should explain what belongs in that directory and list
+  likely entry points.
+- Directory README files should use GitHub-clickable Markdown links for
+  repository Markdown files, especially in file lists and tables. Use code font
+  for generated report filenames or filename patterns only when they are not
+  committed docs.
 - Prefer one concise canonical doc per topic.
 - Do not create companion `-full.md` copies. Expand the canonical doc or split
   by a clearer subject name.
@@ -80,6 +87,22 @@ Avoid durable copies of:
 - raw command dumps without interpretation
 - dependency popularity claims that may age
 
+## Version Mentions
+
+Keep release/version names out of durable user, helper, architecture, runtime,
+protocol, and operations docs unless the version is part of a file name or a
+specific historical evidence link. Versions belong in:
+
+- release notes
+- release roadmaps and report indexes
+- release checklists
+- dated acceptance or benchmark evidence
+
+General docs should say "current", "supported", "tested", or "future" only
+when that wording will remain true after the next tag. If a general doc needs
+release-specific facts, link to the release note or roadmap instead of copying
+the versioned statement.
+
 Record commands, scope, pass/fail status, and the canonical place to rerun or
 inspect evidence instead.
 
@@ -96,7 +119,7 @@ User documentation must stay short, step-by-step, and scenario-based.
 - Write for common real uses, not every possible feature.
 - Split usage by helper or workflow, especially SOCKS5 and WireGuard.
 - Link to [`docs/user/config-cookbook.md`](../user/config-cookbook.md) for config patterns.
-- Link to [`docs/operations/v0.9-operator-runbook.md`](v0.9-operator-runbook.md) for day-to-day operation.
+- Link to [`docs/operations/operator-runbook.md`](operator-runbook.md) for day-to-day operation.
 - Keep commands copyable and examples small.
 - Explain only what the user needs to run, check, and stop the service.
 - Put troubleshooting near the user path: status, logs, monitor, diagnostics.

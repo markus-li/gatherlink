@@ -84,7 +84,7 @@ Library posture:
 
 - prefer WireGuard's own tooling, such as `wg`, `wg-quick`, platform network
   managers, or appliance APIs
-- do not add a Python WireGuard protocol library for v0.9
+- do not add a Python WireGuard protocol library
 - Gatherlink should generate/coordinate config, not reimplement WireGuard
 
 Userspace WireGuard comparison:

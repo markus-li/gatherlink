@@ -92,6 +92,7 @@ state.
 | `helper.wireguard.plan` | WireGuard helper rendered a plan | WireGuard endpoint mapping |
 | `helper.time.set_failed` | time helper could not set system time | permissions, NTP conflict |
 | `helper.status_http.started` | status HTTP helper started | local bind and write window |
+| `helper.status_http.auth_failed` | status HTTP request failed API-key auth | missing or invalid local API key |
 | `helper.status_http.non_loopback_bind` | status helper bound outside loopback | explicit danger flag and exposure |
 | `helper.status_http.service_closed` | experimental write API closed a registered service | service name and write-window operator action |
 | `helper.status_http.write_denied` | experimental write API refused a request | expired write window or denied local action |

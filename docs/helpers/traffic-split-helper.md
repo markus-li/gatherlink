@@ -13,10 +13,10 @@ Purpose:
   Gatherlink service profile
 - optionally generate local Debian policy-routing and firewall rules that send
   UDP to the fast tunnel and non-UDP traffic to the stable tunnel
-- v0.9.3/future-pipeline work may generate narrow Debian nftables/TPROXY and
+- future work may generate narrow Debian nftables/TPROXY and
   policy-routing rules that intercept selected TCP flows for the TCP proxy
   helper while preserving the original destination
-- v0.9.3/future-pipeline work may support a hybrid profile where TCP uses the TCP-aware
+- future work may support a hybrid profile where TCP uses the TCP-aware
   Gatherlink proxy and non-TCP remains inside WireGuard-over-Gatherlink
 
 Boundary:
@@ -81,7 +81,7 @@ Current rule shape:
 - `--revert` removes only those Gatherlink-named/deterministic objects; it does
   not try to edit unrelated site firewall policy
 
-V0.9.3/future transparent TCP proxy rule shape:
+Future transparent TCP proxy rule shape:
 
 - use TPROXY-style interception rather than plain DNAT/REDIRECT when original
   destination preservation is required
@@ -96,7 +96,7 @@ V0.9.3/future transparent TCP proxy rule shape:
   mutation
 - cleanup must remove only Gatherlink-labeled objects
 
-V0.9.3/future hybrid TCP proxy plus WireGuard rule shape:
+Future hybrid TCP proxy plus WireGuard rule shape:
 
 - TCP selected by configured destination, interface, UID, mark, or CIDR enters
   the transparent TCP proxy helper

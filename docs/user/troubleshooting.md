@@ -2,7 +2,7 @@
 
 Start with these checks before reading design docs.
 
-For deeper scenario diagnosis, use [`docs/operations/v0.9-troubleshooting-guide.md`](../operations/v0.9-troubleshooting-guide.md).
+For deeper scenario diagnosis, use [`docs/operations/troubleshooting-guide.md`](../operations/troubleshooting-guide.md).
 For event and counter meanings, use [`docs/operations/diagnostics-dictionary.md`](../operations/diagnostics-dictionary.md).
 
 ## Quick Doctor Check
@@ -145,11 +145,13 @@ gatherlink run start node-a.json --name core.node-a
 gatherlink run start node-b.json --name core.node-b
 ```
 
-## Reporting Bugs
+## Reporting Bugs, Docs Issues, Or Performance Results
 
 Gatherlink is currently tested on Debian. It should work in most Linux
-environments, but there will be system-specific bugs. Please report bugs as
-GitHub issues and include:
+environments, but there will be system-specific bugs. Use the
+[GitHub issue chooser](https://github.com/markus-li/gatherlink/issues/new/choose)
+for bugs, docs problems, performance results, regressions, scheduler
+comparisons, and lab or VM reports. Include:
 
 - operating system and version
 - Gatherlink commit
@@ -157,3 +159,6 @@ GitHub issues and include:
 - config with secrets removed
 - relevant `gatherlink services logs` output
 - relevant `gatherlink services monitor --once` output
+- for performance reports: topology, path speeds, MTU, scheduler, traffic
+  shape, test duration, drops/retransmits, and the WireGuard or raw Gatherlink
+  baseline you compared against

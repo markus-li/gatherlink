@@ -16,10 +16,9 @@ WireGuard and helper traffic, but those tools keep owning their own domains.
 
 ## Status
 
-The v0.9.0, v0.9.1, and v0.9.2 baselines are closed for Debian personal/lab
-users and small sites. Active development is now v0.9.3 on `dev`; current
-release notes, evidence, remaining limits, and tag posture are tracked in the
-living assessment and v0.9.3 roadmap.
+Current release notes, evidence, remaining limits, and tag posture are tracked
+in the living assessment and release roadmaps. Keep release-specific status out
+of this README so the durable overview does not go stale after each tag.
 
 Real-world testing is still limited. So far, Gatherlink has mainly been tested
 by the developer as a practical tool for aggregating a fiber connection and a
@@ -111,10 +110,11 @@ Start here:
   looks the way it does
 - [`docs/user/README.md`](docs/user/README.md): short user guide
 - [`docs/user/config-cookbook.md`](docs/user/config-cookbook.md): common config shapes
-- [`docs/operations/v0.9-operator-runbook.md`](docs/operations/v0.9-operator-runbook.md): day-to-day v0.9 operation
-- [`docs/operations/v0.9-troubleshooting-guide.md`](docs/operations/v0.9-troubleshooting-guide.md): scenario troubleshooting
-- [`docs/operations/v0.9-release-checklist.md`](docs/operations/v0.9-release-checklist.md): release gates
+- [`docs/operations/operator-runbook.md`](docs/operations/operator-runbook.md): day-to-day operation
+- [`docs/operations/troubleshooting-guide.md`](docs/operations/troubleshooting-guide.md): scenario troubleshooting
+- [`docs/operations/release-checklist.md`](docs/operations/release-checklist.md): release gates
 - [`docs/project-living-assessment.md`](docs/project-living-assessment.md): current state and remaining work
+- [`docs/public/README.md`](docs/public/README.md): static public website landing scope
 
 For design and implementation:
 
@@ -147,8 +147,8 @@ crypto, relay, scheduler, or diagnostics changes.
 Gatherlink is security-sensitive networking software under active development.
 Do not assume it has had an external security audit.
 
-Report security issues using `SECURITY.md`. Do not publish exploit details in a
-public issue before there is a fix or mitigation.
+Report security issues using [`SECURITY.md`](SECURITY.md). Do not publish
+exploit details in a public issue before there is a fix or mitigation.
 
 ## License
 

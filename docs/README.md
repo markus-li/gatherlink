@@ -9,9 +9,9 @@ and historical reports.
 | If you are working on... | Start with | Then read |
 | --- | --- | --- |
 | Using Gatherlink | [`docs/user/README.md`](user/README.md) | [`docs/user/quickstart.md`](user/quickstart.md), [`docs/user/troubleshooting.md`](user/troubleshooting.md) |
-| Minimum setup | [`docs/user/quickstart.md`](user/quickstart.md) | [`docs/runtime/configuration.md`](runtime/configuration.md), [`docs/operations/v0.9-operator-runbook.md`](operations/v0.9-operator-runbook.md) |
+| Minimum setup | [`docs/user/quickstart.md`](user/quickstart.md) | [`docs/runtime/configuration.md`](runtime/configuration.md), [`docs/operations/operator-runbook.md`](operations/operator-runbook.md) |
 | Common config shapes | [`docs/user/config-cookbook.md`](user/config-cookbook.md) | [`docs/runtime/configuration.md`](runtime/configuration.md), [`docs/runtime/config-runtime-state.md`](runtime/config-runtime-state.md) |
-| Operating a v0.9 node | [`docs/operations/v0.9-operator-runbook.md`](operations/v0.9-operator-runbook.md) | [`docs/operations/v0.9-troubleshooting-guide.md`](operations/v0.9-troubleshooting-guide.md), [`docs/operations/diagnostics-dictionary.md`](operations/diagnostics-dictionary.md) |
+| Operating a node | [`docs/operations/operator-runbook.md`](operations/operator-runbook.md) | [`docs/operations/troubleshooting-guide.md`](operations/troubleshooting-guide.md), [`docs/operations/diagnostics-dictionary.md`](operations/diagnostics-dictionary.md) |
 | Packet layout or frame overhead | [`docs/protocol/protocol.md`](protocol/protocol.md) | [`docs/protocol/protocol-notes.md`](protocol/protocol-notes.md), [`docs/protocol/security.md`](protocol/security.md) |
 | Crypto, replay, identity, or stealth receive | [`docs/protocol/security.md`](protocol/security.md) | [`docs/future/identity-and-topology.md`](future/identity-and-topology.md), [`docs/protocol/relay-trust-model.md`](protocol/relay-trust-model.md) |
 | Relay forwarding | [`docs/protocol/relay-session-lifecycle.md`](protocol/relay-session-lifecycle.md) | [`docs/helpers/relay-fabric.md`](helpers/relay-fabric.md), [`docs/protocol/relay-trust-model.md`](protocol/relay-trust-model.md), [`docs/protocol/protocol.md`](protocol/protocol.md) |
@@ -26,11 +26,12 @@ and historical reports.
 | Maintaining docs | [`docs/operations/documentation-maintenance.md`](operations/documentation-maintenance.md) | the specific directory README |
 | Labs and demos | [`docs/labs/local-dual-path-lab.md`](labs/local-dual-path-lab.md) | [`docs/labs/wsl-two-distro-lab.md`](labs/wsl-two-distro-lab.md), [`docs/labs/real-vm-acceptance.md`](labs/real-vm-acceptance.md), [`docs/labs/lab-demo.md`](labs/lab-demo.md), [`docs/protocol/plaintext-security-mode.md`](protocol/plaintext-security-mode.md) |
 | Where code lives | [`docs/architecture/source-map.md`](architecture/source-map.md) | [`docs/architecture/architecture-contract.md`](architecture/architecture-contract.md) |
-| Future design notes | [`docs/future/README.md`](future/README.md) | [`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md), [`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md) |
-| Releasing v0.9 | [`docs/operations/v0.9-release-checklist.md`](operations/v0.9-release-checklist.md) | [`docs/operations/release-development-process.md`](operations/release-development-process.md), [`docs/reports/v0.9-roadmap.md`](reports/v0.9-roadmap.md), [`docs/labs/real-vm-acceptance.md`](labs/real-vm-acceptance.md) |
-| Release notes | [`docs/releases/v0.9.3.md`](releases/v0.9.3.md) | [`docs/releases/v0.9.2.md`](releases/v0.9.2.md), [`docs/releases/v0.9.1.md`](releases/v0.9.1.md), [`docs/releases/v0.9.0.md`](releases/v0.9.0.md), [`docs/project-living-assessment.md`](project-living-assessment.md), [`docs/operations/v0.9-release-checklist.md`](operations/v0.9-release-checklist.md) |
-| Project status and next work | [`docs/project-living-assessment.md`](project-living-assessment.md) | [`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md), [`docs/releases/v0.9.3.md`](releases/v0.9.3.md), [`docs/releases/v0.9.2.md`](releases/v0.9.2.md), [`docs/reports/README.md`](reports/README.md), [`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md), [`docs/operations/testing-strategy.md`](operations/testing-strategy.md) |
+| Future design notes | [`docs/future/README.md`](future/README.md) | [`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md), [`docs/reports/v0.9.5-roadmap.md`](reports/v0.9.5-roadmap.md) |
+| Releasing | [`docs/operations/release-checklist.md`](operations/release-checklist.md) | [`docs/operations/release-development-process.md`](operations/release-development-process.md), the active roadmap, [`docs/labs/real-vm-acceptance.md`](labs/real-vm-acceptance.md) |
+| Release notes | [`docs/releases/v0.9.4.md`](releases/v0.9.4.md) | [`docs/releases/v0.9.3.md`](releases/v0.9.3.md), [`docs/releases/v0.9.2.md`](releases/v0.9.2.md), [`docs/releases/v0.9.1.md`](releases/v0.9.1.md), [`docs/releases/v0.9.0.md`](releases/v0.9.0.md), [`docs/project-living-assessment.md`](project-living-assessment.md), [`docs/operations/release-checklist.md`](operations/release-checklist.md) |
+| Project status and next work | [`docs/project-living-assessment.md`](project-living-assessment.md) | [`docs/reports/v0.9.4-roadmap.md`](reports/v0.9.4-roadmap.md), [`docs/reports/v0.9.5-roadmap.md`](reports/v0.9.5-roadmap.md), [`docs/releases/v0.9.3.md`](releases/v0.9.3.md), [`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md), [`docs/reports/README.md`](reports/README.md), [`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md), [`docs/operations/testing-strategy.md`](operations/testing-strategy.md) |
 | Project story | [`docs/project-story.md`](project-story.md) | [`docs/architecture/architecture-contract.md`](architecture/architecture-contract.md), [`docs/project-living-assessment.md`](project-living-assessment.md) |
+| Public website copy | [`docs/public/README.md`](public/README.md) | [`docs/public/cloudflare-pages.md`](public/cloudflare-pages.md), [`docs/user/quickstart.md`](user/quickstart.md), [`docs/benchmarks/README.md`](benchmarks/README.md) |
 
 ## Canonical Docs
 
@@ -58,8 +59,16 @@ User documentation is for people running Gatherlink, not developing it.
   WireGuard-over-Gatherlink setup
 - [`docs/user/troubleshooting.md`](user/troubleshooting.md): status, logs, monitor, and bug reports
 
+## Public Website Docs
+
+- [`docs/public/README.md`](public/README.md): static public landing page scope, primary links,
+  and public caveats
+- [`docs/public/cloudflare-pages.md`](public/cloudflare-pages.md): static Cloudflare Pages notes
+  kept separate from runtime behavior
+
 ### Architecture And Boundaries
 
+- [`docs/architecture/README.md`](architecture/README.md): architecture docs index
 - [`docs/architecture/architecture-contract.md`](architecture/architecture-contract.md): ownership boundaries between Rust, Python,
   helpers, security, diagnostics, and future features
 - [`docs/architecture/architecture.md`](architecture/architecture.md): concise architecture overview
@@ -75,6 +84,7 @@ User documentation is for people running Gatherlink, not developing it.
 
 ### Protocol And Security
 
+- [`docs/protocol/README.md`](protocol/README.md): protocol docs index
 - [`docs/protocol/protocol.md`](protocol/protocol.md): packet/frame layout, v1/v2 headers, relay packet shape,
   service ids, aggregation, and fragmentation
 - [`docs/protocol/security.md`](protocol/security.md): crypto model, replay protection, handshake posture, identity,
@@ -91,6 +101,7 @@ User documentation is for people running Gatherlink, not developing it.
 
 ### Config, Runtime, And State
 
+- [`docs/runtime/README.md`](runtime/README.md): runtime docs index
 - [`docs/runtime/config-runtime-state.md`](runtime/config-runtime-state.md): human config versus compiled runtime state,
   live reload, numeric id policy, and JSON introspection
 - [`docs/runtime/configuration.md`](runtime/configuration.md): current config schema and CLI examples
@@ -109,18 +120,18 @@ User documentation is for people running Gatherlink, not developing it.
 
 ### Diagnostics, Testing, And Operations
 
+- [`docs/operations/README.md`](operations/README.md): operations docs index
 - [`docs/operations/diagnostics-events.md`](operations/diagnostics-events.md): structured events, stable event codes, JSONL first,
   helper warnings, and operator explanations
 - [`docs/operations/diagnostics-dictionary.md`](operations/diagnostics-dictionary.md): operator meaning for common counters
   and event codes
 - [`docs/operations/diagnostics.md`](operations/diagnostics.md): broader diagnostics guidance
-- [`docs/operations/v0.9-operator-runbook.md`](operations/v0.9-operator-runbook.md): day-to-day v0.9 start, inspect, stop,
+- [`docs/operations/operator-runbook.md`](operations/operator-runbook.md): day-to-day start, inspect, stop,
   and health checks
-- [`docs/operations/v0.9-troubleshooting-guide.md`](operations/v0.9-troubleshooting-guide.md): scenario-based v0.9 diagnosis
-- [`docs/operations/v0.9-release-checklist.md`](operations/v0.9-release-checklist.md): release gates before tagging
-  v0.9
-- [`docs/operations/v0.9.1-release-artifacts.md`](operations/v0.9.1-release-artifacts.md): local v0.9.1 artifact and
-  GitHub Wiki payload preparation
+- [`docs/operations/troubleshooting-guide.md`](operations/troubleshooting-guide.md): scenario-based diagnosis
+- [`docs/operations/release-checklist.md`](operations/release-checklist.md): release gates before tagging
+- [`docs/operations/release-artifacts.md`](operations/release-artifacts.md): source archive, wheel, Debian package,
+  checksums, and GitHub Wiki payload preparation
 - [`docs/operations/development-discipline.md`](operations/development-discipline.md): standing implementation rules
   for roadmap status, ownership boundaries, tests, performance evidence, and
   commit hygiene
@@ -132,6 +143,7 @@ User documentation is for people running Gatherlink, not developing it.
   test expectations
 - [`docs/operations/user-documentation.md`](operations/user-documentation.md): short user-doc style rules and
   GitHub Wiki publishing posture
+- [`docs/labs/README.md`](labs/README.md): lab docs index
 - [`docs/labs/wsl-two-distro-lab.md`](labs/wsl-two-distro-lab.md): repeatable two-distro WSL lab with three
   loopback carrier LANs, tc shaping, managed services, and acceptance checks
 - [`docs/labs/lab-bundles.md`](labs/lab-bundles.md): operator-safe v0.9.1 lab bundle generation,
@@ -153,6 +165,8 @@ User documentation is for people running Gatherlink, not developing it.
   and final gate evidence trail
 - [`docs/reports/v0.9.3-roadmap.md`](reports/v0.9.3-roadmap.md): closed v0.9.3 adaptive performance and
   real-world operation evidence trail
+- [`docs/releases/README.md`](releases/README.md): release notes index
+- [`docs/releases/v0.9.4.md`](releases/v0.9.4.md): v0.9.4 release notes
 - [`docs/reports/future-roadmap-pipeline.md`](reports/future-roadmap-pipeline.md): shaped future ideas waiting for
   promotion into the next release roadmap
 - [`docs/project-living-assessment.md`](project-living-assessment.md): current release-health assessment,
@@ -180,8 +194,8 @@ is the source of truth for what should be developed now and what is deferred.
 - [`docs/helpers/captive-portal-helper.md`](helpers/captive-portal-helper.md)
 - [`docs/helpers/ipsec-helper.md`](helpers/ipsec-helper.md)
 - [`docs/helpers/policy-advisor.md`](helpers/policy-advisor.md)
-- overlay routing, overlay naming, loop prevention, access policy, and related
-  full design notes listed below
+- overlay routing, overlay naming, access policy, and related full design notes
+  listed below
 
 Deferred docs may preserve design notes and future interface ideas, but they do
 not authorize runtime placeholder packages or implementation work unless
@@ -198,7 +212,6 @@ implementation authorization.
 - [`docs/operations/deployment-archetypes.md`](operations/deployment-archetypes.md)
 - [`docs/future/identity-and-topology.md`](future/identity-and-topology.md)
 - [`docs/helpers/ipsec-helper.md`](helpers/ipsec-helper.md)
-- [`docs/future/loop-prevention.md`](future/loop-prevention.md)
 - [`docs/future/overlay-naming.md`](future/overlay-naming.md)
 - [`docs/future/overlay-routing.md`](future/overlay-routing.md)
 - [`docs/helpers/policy-advisor.md`](helpers/policy-advisor.md)
@@ -206,8 +219,8 @@ implementation authorization.
 - [`docs/runtime/service-priority.md`](runtime/service-priority.md)
 
 Future docs are intentionally docs-only until promoted by a release roadmap.
-Avoid companion `-full.md` copies; keep one canonical file per topic unless a
-split has a clearer subject name.
+Avoid companion "full" Markdown copies; keep one canonical file per topic
+unless a split has a clearer subject name.
 
 ## Reports And Historical Notes
 

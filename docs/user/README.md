@@ -47,7 +47,6 @@ gatherlink doctor --config configs/examples/windows-two-node-a.json
   Static crypto remains an explicit lab/manual fallback.
 - SOCKS5 and WireGuard are the most useful helper paths at this stage.
 - Day-to-day operation is covered in
-  [`docs/operations/v0.9-operator-runbook.md`](../operations/v0.9-operator-runbook.md) until the next general runbook
-  replaces it; treat it as the current Debian operations guide, not as a new
-  feature roadmap.
-- Scenario troubleshooting is covered in [`docs/operations/v0.9-troubleshooting-guide.md`](../operations/v0.9-troubleshooting-guide.md).
+  [`docs/operations/operator-runbook.md`](../operations/operator-runbook.md); treat it as the current Debian
+  operations guide, not as a new feature roadmap.
+- Scenario troubleshooting is covered in [`docs/operations/troubleshooting-guide.md`](../operations/troubleshooting-guide.md).

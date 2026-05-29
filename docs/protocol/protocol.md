@@ -338,6 +338,9 @@ Initial message types:
 | 12 | `u16 service_id`, `u16 fanout`, `u32 fanout_below_bytes`, `u64 flowlet_idle_us`, `u64 flowlet_max_hold_us`, `u32 path_run_datagrams` | Python-owned service scheduler policy FYI; peer Python may compile this into local Rust receive expectations |
 | 13 | `u16 path_id`, pressure counters | Directional pressure facts: loss, queue, send failures, gaps, reorder depth/age, scheduler in-flight, predicted delivery, and local drops |
 | 14 | three `u8 len`, UTF-8 strings | This node's local TX scheduler status: configured policy, effective policy, and compiled Rust mode; diagnostic only |
+| 15 | `u16 path_id`, `u64 first_sequence`, `u32 packet_count`, `u64 transmit_us` | Sparse real-data transmit timing sample for Python-owned one-way latency matching |
+| 16 | `u16 path_id`, `u8 source`, `u8 confidence` | Path latency source and confidence; policy meaning stays in Python |
+| 17 | `u16 path_id`, `u32 rtt_us`, `u32 clock_error_us`, `u32 tx_jitter_us`, `u32 rx_jitter_us`, `u32 tx_p95_us`, `u32 rx_p95_us` | Path latency confidence statistics; zero means unknown |
 
 Rust handles reserved service ids mechanically. Any frame whose `service_id` is
 in `0..255` is never emitted to an application UDP target; Rust records cheap
@@ -404,6 +407,11 @@ This is enough for real telemetry:
   and rolling-mean latency in microseconds. Like capacity, these are peer-view
   facts on the wire; Python converts them into local `tx`/`rx` meaning before
   display or scheduler use.
+- peers can advertise `PathLatencyQuality` and `PathLatencyStats` control
+  messages alongside latency. Quality carries source/confidence, while stats
+  carry RTT, clock-error budget, directional jitter, and p95. Python reverses
+  directional jitter/p95 into local `tx`/`rx` meaning and keeps the
+  interpretation policy-side; Rust just transports the reserved service frame.
 - peers can advertise sparse `DataTransmitSample` control messages for real
   payload traffic. These samples reference the existing data-frame `path_id`
   and sequence range, plus a transmit timestamp in the sender's current shared

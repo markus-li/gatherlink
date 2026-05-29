@@ -5,8 +5,9 @@ development unless a release explicitly says otherwise.
 
 ## Supported Versions
 
-For v0.9, security fixes target the current `v0.9.x` release line and the active
-development branch. Older pre-v0.9 commits are not supported as release lines.
+Security fixes target the current release line and the active development
+branch. Older unreleased or pre-release commits are not supported as release
+lines unless a release note explicitly says otherwise.
 
 Future support windows should be documented in the matching release notes.
 
@@ -31,7 +32,7 @@ Include when possible:
 
 ## Security Maturity
 
-For v0.9, assume:
+Assume:
 
 - the project has not had an external security audit unless a release note says
   otherwise

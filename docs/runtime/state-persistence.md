@@ -47,7 +47,7 @@ start from fresh authenticated session material.
 
 ## Storage location
 
-Debian v0.9 paths:
+Debian paths:
 
 ```text
 /etc/gatherlink/        static config
@@ -93,7 +93,7 @@ Private JSON records that contain key material, such as
 world-readable. Public identity exports and trust roots are intentionally
 shareable and may be `0644`.
 
-The v0.9 sealed-secret UX is intentionally noninteractive and scriptable:
+The sealed-secret UX is intentionally noninteractive and scriptable:
 
 ```bash
 export GATHERLINK_SECRET_PASSPHRASE='replace-with-local-secret'

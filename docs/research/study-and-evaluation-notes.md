@@ -10,7 +10,7 @@ The goal is not to criticize other projects. The goal is to identify:
 - what is worth learning
 - what should be evaluated
 - what should not be copied because it does not fit Gatherlink
-- what to add to the future TODO list
+- what should be fed into future roadmaps when the idea becomes concrete
 
 Gatherlink's core remains:
 
@@ -29,7 +29,7 @@ For every adjacent project, evaluate:
 2. Which specific design idea is useful for Gatherlink?
 3. Which part does not fit Gatherlink's boundary?
 4. What operational lesson should be captured?
-5. What should be added as TODO/evaluation work?
+5. What should stay as evaluation backlog?
 
 "Does not fit" means the architecture goal is different. It is not a judgement
 about the other project.
@@ -76,7 +76,7 @@ helper-extensible
 Tailscale-level SSO, device posture, full admin console, and app-store client UX
 are product maturity work, not core architecture requirements.
 
-### TODO
+### Evaluation Backlog
 
 - Evaluate DERP behavior for relay fabric design.
 - Evaluate MagicDNS behavior for overlay naming.
@@ -107,7 +107,7 @@ certificate identity -> node/relay/exit identity lifecycle
 Gatherlink core should not become a mesh overlay protocol. Overlay routing belongs
 in a helper that generates explicit configs.
 
-### TODO
+### Evaluation Backlog
 
 - Study lighthouse discovery for bootstrap registry design.
 - Add identity lifecycle docs and trust-root model.
@@ -134,7 +134,7 @@ Gatherlink should avoid:
 - hidden dynamic routing
 - distributed routing protocol complexity
 
-### TODO
+### Evaluation Backlog
 
 - Keep graph/planner concepts in overlay helper.
 - Add hop limits, authenticated relay/session identifiers, generation IDs, and stale-topology rejection.
@@ -229,7 +229,7 @@ Gatherlink should not become:
 - endless outbound rule engine
 - configuration-heavy proxy framework
 
-### TODO
+### Evaluation Backlog
 
 - Implement carrier profiles.
 - Add WSS and QUIC carriers.
@@ -259,7 +259,7 @@ Gatherlink should not inherit:
 - MPTCP/firewall/routing gymnastics
 - generic TCP reconstruction in the UDP core
 
-### TODO
+### Evaluation Backlog
 
 - Study scheduler/path-manager concepts.
 - Keep Gatherlink UDP-first and service-oriented.
@@ -284,7 +284,7 @@ Gatherlink should not become "QUIC VPN".
 
 QUIC is a carrier, not the architecture.
 
-### TODO
+### Evaluation Backlog
 
 - Add QUIC carrier.
 - Use QUIC streams for optional TCP forwarding helper.
@@ -322,9 +322,9 @@ Gatherlink should not become:
 
 - HTTP proxy
 - L7 load balancer
-- xDS-scale dynamic config system in v0.9
+- xDS-scale dynamic config system
 
-### TODO
+### Evaluation Backlog
 
 - Add path warmup.
 - Add rise/fall windows.
@@ -341,7 +341,7 @@ Useful for:
 - route preference
 - route withdrawal
 - route policy
-- loop prevention
+- authenticated next-hop discipline
 - generation/version thinking
 - explicit next-hop modeling
 
@@ -364,9 +364,9 @@ Gatherlink should not become:
 Firewalls and routers own LAN routing. Gatherlink may expose virtual next-hops or
 generated service links.
 
-### TODO
+### Evaluation Backlog
 
-- Add authenticated relay/session identifiers for loop prevention and diagnostics.
+- Keep authenticated relay/session identifiers visible in diagnostics.
 - Add hop limits.
 - Add topology generations.
 - Add stale-topology rejection.
@@ -388,7 +388,7 @@ Useful for service-centric thinking:
 
 Gatherlink should not become a full ZTNA/application access platform.
 
-### TODO
+### Evaluation Backlog
 
 - Keep service IDs explicit.
 - Use access_policy for service-boundary restrictions.
@@ -415,7 +415,7 @@ Gatherlink is not a VPN implementation.
 WireGuard/IPsec/SOCKS helpers may exist, but the core remains virtual UDP
 transport.
 
-### TODO
+### Evaluation Backlog
 
 - Document migration/versioning early.
 - Keep helper modes optional.
@@ -443,14 +443,17 @@ Gatherlink should not become:
 - firewall/router replacement
 - MPTCP-centered product
 
-### TODO
+### Evaluation Backlog
 
 - Keep setup easier than route/firewall/MPTCP hacks.
 - Publish clear path metrics.
 - Keep self-hosting credible.
 - Keep appliance support boundary clean.
 
-## Final study TODO list
+## Evaluation Backlog
+
+This is research input, not implementation status. Track implementation in
+release roadmaps and release notes.
 
 Evaluate and capture lessons from:
 
@@ -462,7 +465,7 @@ Evaluate and capture lessons from:
 - MPTCP scheduler/path manager behavior
 - HAProxy health checks and slow start
 - Envoy observability and dynamic config caution
-- BIRD/FRR loop prevention
+- BIRD/FRR next-hop and topology-generation discipline
 - OpenZiti service identity
 - SoftEther transport adaptability
 - OpenVPN compatibility burden

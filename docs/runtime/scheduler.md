@@ -198,7 +198,7 @@ The current service-budget controller uses the signal conservatively:
 - degraded `bulk` service outcomes do not block protection of higher-priority
   services
 - when no outcome signal exists, the controller keeps using service counters
-  and the sticky hysteresis rules documented in the v0.9.2 roadmap
+  and the sticky hysteresis rules documented in the current scheduler roadmap
 
 This is not a Rust scheduler mode. Rust still only receives packet and byte
 budget primitives. Any future retransmit, UDP-loss, helper-health, or
@@ -303,9 +303,9 @@ knob to bypass.
 
 ## Feedback-Driven UDP Scheduling
 
-V0.9.3 made path selection more feedback-driven while preserving UDP semantics
-and the Python/Rust boundary. Future work should keep improving that model
-without adding hidden reliability for ordinary UDP payloads.
+Path selection is now feedback-driven while preserving UDP semantics and the
+Python/Rust boundary. Future work should keep improving that model without
+adding hidden reliability for ordinary UDP payloads.
 
 External scheduler references point to the same shape. MPTCP separates
 connection-level ordering from per-subflow delivery, keeps receiver feedback
@@ -517,23 +517,63 @@ latency into Rust primitives:
 - expose clock quality to diagnostics and service monitor so operators can see
   when latency-sensitive schedulers are using coarse RTT-derived data
 
-Current v0.9.2 code implements the first production control-plane slice of this
-model: non-sink nodes send four-timestamp sync requests on the exact path being
+Current code implements the first production control-plane slice of this model:
+non-sink nodes send four-timestamp sync requests on the exact path being
 measured, sinks answer each request on that same path, impossible exchanges are
 rejected, abrupt offset outliers are ignored after a baseline exists, and
-offsets are summarized with a robust median. Accepted samples derive directional
-TX/RX one-way estimates from the selected peer clock offset instead of blindly
-splitting RTT in half. Directional latency samples are still rejected when their
+offsets are summarized with a minimum-delay weighted median. The estimator
+keeps per-path base RTT, current RTT, uncertainty, and a simple drift estimate
+in parts per billion. Drift is estimated inside each path first, then combined
+robustly, so static path asymmetry does not masquerade as peer-clock frequency
+error. Minimum-RTT samples receive the highest weight because queueing delay
+can only increase RTT; path offset spread contributes directly to the
+uncertainty budget because unknown path asymmetry is the hard accuracy limit.
+Accepted samples derive directional TX/RX one-way estimates from the selected
+per-path peer clock offset instead of blindly splitting RTT in half or applying
+one global offset to every path.
+Directional latency samples are still rejected when their
 sum is impossible against current RTT plus the clock-error budget, and every
 sample remains tagged with source/confidence/rejection facts for scheduler and
-monitor use. `reply-rtt-half` remains visible as a coarse traffic fallback
-rather than being treated as precise one-way timing.
+monitor use. The control metadata now carries latency source/confidence plus
+RTT, clock-error budget, directional jitter, and p95 as separate Python-owned
+facts, so remote schedulers can reject or down-rank noisy clock-derived latency
+without making Rust understand the meaning of those numbers. `reply-rtt-half`
+remains visible as a coarse traffic fallback rather than being treated as
+precise one-way timing. Matched real-data samples with `warming` confidence are
+also diagnostic/bootstrap facts only; protected ordered promotion requires
+`good` real-data confidence or a separate good clock-synced proof path.
+For real-data samples, `good` means the receiving process can place both
+timestamps in the same Gatherlink clock domain: either it has a current
+peer-to-sink offset, or it is the sink-authoritative process itself. A missing
+offset on a non-sink node remains `warming` and cannot promote ordered TCP-like
+traffic.
+Fresh `data-traffic-one-way/good` provenance is stronger than later clock-sync
+probes. Clock probes can refresh numeric timing and confidence stats, but they
+must not silently relabel the row away from real-data proof while that accepted
+payload evidence is still in the rolling window.
+Rejected latency candidates are non-destructive while the path still has fresh
+accepted samples in the rolling window. The monitor keeps the latest rejection
+reason beside the accepted source/confidence, and Python can continue using the
+fresh accepted fact instead of letting one impossible probe erase path proof. If
+the accepted window has expired, the path becomes explicitly rejected until a
+new sane sample arrives.
 
 This follows the same shape as NTP and OWAMP/IPPM practice: offset, round-trip
 delay, jitter, and error/confidence are separate facts, and one-way-delay
 metrics are only meaningful when clock synchronization quality is known. Python
 owns that interpretation. Rust should receive only the compact `latency_us`,
 `reorder_hold_us`, credit, and pacing primitives that Python decides are safe.
+The logical peer clock is process-internal and monotonic: Gatherlink does not
+discipline the system clock. A future Kalman or PLL-like discipline can replace
+the Phase 1 weighted-median estimator without changing Rust packet execution.
+Unknown one-way asymmetry is still an accuracy limit, not a solvable coding
+problem; the scheduler should treat `uncertainty_us` as part of the cost of
+using clock-synced one-way latency.
+The same machinery must remain useful when only one path is configured or all
+other paths are down. In that case there is no cross-path consensus, but Python
+still keeps that path's base RTT, uncertainty, drift, and source/confidence
+facts so the service can keep running and schedulers can fall back to safe
+single-path behavior.
 
 Service monitor output should be derived from the same facts. Per-path views
 should show rate, credit/window, queue pressure, latency, jitter, reorder depth,
@@ -625,8 +665,8 @@ back gradually. Diagnostics should show when a path used fast decrease,
 queue-pressure pacing, or recovery ramp so operators can tell the difference
 between real Starlink/mobile volatility and a bad benchmark shape.
 
-Future v0.9.3 and post-v0.9.3 work may let Python infer a per-path network
-profile to select the responsiveness policy. This inference must be
+Future work may let Python infer a per-path network profile to select the
+responsiveness policy. This inference must be
 confidence-scored and slow enough to avoid chasing short-lived noise. Fixed
 operator config wins; lab profile metadata comes next; helper-provided hints
 such as Starlink stats, modem/router state, radio technology, or signal quality
@@ -691,9 +731,9 @@ bulk traffic is active, Python may compile both a bounded packet drain for the
 protected service and a bounded bulk byte budget. This protects TCP-like
 services from large self-bursts while still allowing bulk traffic to make
 progress. That is still policy, not dataplane semantics: Rust only receives the
-resulting packet and byte drain caps. The v0.9.2 Hyper-V probe for
-TCP-over-WireGuard-over-Gatherlink uses Linux TCP retransmit counters as
-benchmark-side evidence and sends only the compact service outcome payload to
+resulting packet and byte drain caps. Hyper-V probes for
+TCP-over-WireGuard-over-Gatherlink use Linux TCP retransmit counters as
+benchmark-side evidence and send only the compact service outcome payload to
 the runner.
 
 The runner status now exposes a `service_budget` block for operator visibility.

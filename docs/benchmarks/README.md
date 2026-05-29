@@ -7,13 +7,17 @@ it was measured, and what changed between runs.
 Use this collection for:
 
 - repeatable benchmark strategy and command patterns
-- current pass thresholds and performance targets in `thresholds.md`
-- current Hyper-V VM lab measurements in `hyperv-performance-log.md`
-- historical Hyper-V VM lab measurements in `hyperv-performance-history.md`
+- current pass thresholds and performance targets in
+  [`thresholds.md`](thresholds.md)
+- current Hyper-V VM lab measurements in
+  [`hyperv-performance-log.md`](hyperv-performance-log.md)
+- historical Hyper-V VM lab measurements in
+  [`hyperv-performance-history.md`](hyperv-performance-history.md)
 - current WireGuard-over-Gatherlink status and struggles in
-  `wireguard-over-gatherlink-status.md`
+  [`wireguard-over-gatherlink-status.md`](wireguard-over-gatherlink-status.md)
 - external aggregation product/user speed signals and proposed near-apples
-  comparison profiles in `external-aggregation-comparison.md`
+  comparison profiles in
+  [`external-aggregation-comparison.md`](external-aggregation-comparison.md)
 - baseline comparisons between plain LAN, WireGuard, Gatherlink, and combined
   WireGuard-over-Gatherlink scenarios
 - bottleneck notes backed by counters, CPU observations, loss, retransmits, or
@@ -66,10 +70,10 @@ The Hyper-V benchmark entrypoints are:
   draft. Treat generated profiles as reviewable drafts, not release evidence,
   until a human checks the shape and a lab/VM run proves it.
 
-Every scenario should write:
+Every generated scenario directory should write:
 
-- `report.md` for operator-readable notes
-- `report.json` or scenario JSON files for machine comparison
+- an operator-readable Markdown report
+- a machine-readable JSON report or scenario JSON files for comparison
 - command logs and node snapshots where possible
 
 Machine-readable benchmark summaries should include a `schema_version`,
@@ -133,8 +137,8 @@ Rows that are exploratory or missing a fair baseline should say so explicitly
 instead of dropping the columns. When a table has more than one useful
 baseline, use separate compact gate columns, such as `GL Gate` and `WG Gate`,
 instead of hiding one comparison in prose. The current Hyper-V log has its own
-schema contract in `hyperv-performance-log.md`; follow it when editing that
-file.
+schema contract in [`hyperv-performance-log.md`](hyperv-performance-log.md);
+follow it when editing that file.
 
 ## Strategy
 
@@ -153,9 +157,11 @@ Run benchmarks in layers:
 6. Relay variants: repeat the same layers with VM C as an untrusted transit
    node so relay work is measured separately from endpoint work.
 
-Use `wireguard-over-gatherlink-status.md` for the current interpretation of
-WireGuard-over-Gatherlink results. Keep exact run evidence in
-`hyperv-performance-log.md` or generated benchmark reports.
+Use
+[`wireguard-over-gatherlink-status.md`](wireguard-over-gatherlink-status.md)
+for the current interpretation of WireGuard-over-Gatherlink results. Keep exact
+run evidence in [`hyperv-performance-log.md`](hyperv-performance-log.md) or
+generated benchmark reports.
 
 Only compare runs with the same:
 
@@ -174,7 +180,78 @@ not the bottleneck before blaming Gatherlink.
 
 For WireGuard baselines, keep the same cross-check when possible. `iperf3`
 remains the independent reference, while `udp_pressure` proves that Gatherlink's
-own UDP generator behaves similarly after a tunnel has been added.
+own UDP generator behaves similarly after a tunnel has been added. Compare the
+simultaneous `iperf3 -u` rows with simultaneous `udp_pressure` rows; comparing a
+single-path-alone iperf row to a three-path simultaneous pressure row is not a
+valid bottleneck claim. The pressure sink uses batched Linux receives where
+available so high-rate small-packet receive measurements do not spend one syscall
+per datagram; tune that with `PERF_UDP_PRESSURE_RECV_BATCH=N` or
+`--recv-batch N`. When the receive packet shape is known, the sink buffer can be
+right-sized with `PERF_UDP_PRESSURE_RECV_BUFFER_SIZE=N` or
+`--recv-buffer-size N`; keep the default 65 KiB for generic tests, and use a
+smaller value only when proving a known near-MTU or GSO super-packet shape. For
+generator-ceiling tests where the sink only needs byte counts, Linux runs can
+use `PERF_UDP_PRESSURE_RECV_TRUNCATE=1` or `--recv-truncate` to ask the kernel
+for the datagram length without copying the full payload into user memory. Do
+not use truncate mode when validating payload contents, because it is explicitly
+a counter-only receive path. The pressure sender uses Linux `sendmmsg` batching
+where available, and can optionally use Linux UDP GSO with
+`PERF_UDP_PRESSURE_GSO_SEGMENTS=N` or `--udp-gso-segments N`. Keep GSO off
+unless that is the thing being measured; it changes the packetization shape by
+sending large UDP super-packets for kernel segmentation. `--target-mbit` and
+receiver feedback are aggregate sender targets. When `--flows N` is used, the
+sender divides the aggregate budget across flows so parallel workers do not
+multiply the offered rate accidentally.
+
+WireGuard baseline scripts can derive a near-maximum UDP payload with
+`--udp-length auto`. The derivation uses `wg_mtu - 28` for IPv4 UDP payloads.
+Add `--udp-payload-margin BYTES` when a smaller path, extra wrapper, or extra
+encapsulation overhead needs room. Prefer the explicit margin over baking a
+large payload into a benchmark command, because the safe value changes with the
+path and tunnel stack.
+
+For TCP-sized path-set ceilings, do not compare UDP pressure rows to
+`iperf3 -P` TCP rows. TCP and UDP exercise WireGuard, socket buffers, pacing, and
+receiver work differently. When the question is whether the project UDP pressure
+tool can keep up with a multi-stream UDP baseline, run `iperf3 -u -P N` beside
+`udp_pressure --flows N` and use the matching simultaneous UDP rows.
+
+`udp_pressure` also has an optional UDP feedback channel for exploratory
+receiver-paced pressure tests. Use `PERF_UDP_PRESSURE_FEEDBACK=1` in the Hyper-V
+helpers, or `--feedback-bind` on the sender with `--feedback-target` on the
+sink. Leave it off for ordinary baselines. It is a benchmark-tool control path,
+not a Gatherlink transport control path, and it should be interpreted against
+matching `iperf3 -u` rows. Feedback reports the safer maximum of interval
+receive rate and cumulative run average, so the sender can react to current sink
+capacity without letting tiny startup intervals collapse the target. Use
+`PERF_UDP_PRESSURE_FEEDBACK_INITIAL_MBIT=N` or `--feedback-initial-mbit N` when
+the path has a known approximate ceiling and the run should avoid the initial
+unbounded burst. Use `PERF_UDP_PRESSURE_FEEDBACK_MAX_MBIT=N` or
+`--feedback-max-mbit N` when the benchmark should probe near a known ceiling
+without letting one fast sample turn back into flood mode. The feedback
+controller uses structured sink delivery samples with interval and cumulative
+rates, byte counts, and packet counts. It is bounded additive probing plus
+multiplicative backoff, not a perfect congestion controller. Tune the sample
+cadence with `PERF_UDP_PRESSURE_FEEDBACK_INTERVAL_MS` or
+`--feedback-interval-ms`, and tune the probe/backoff shape with
+`PERF_UDP_PRESSURE_FEEDBACK_PROBE_STEP_MBIT`,
+`PERF_UDP_PRESSURE_FEEDBACK_GOOD_RATIO`,
+`PERF_UDP_PRESSURE_FEEDBACK_LOW_RATIO`, and
+`PERF_UDP_PRESSURE_FEEDBACK_BACKOFF_RATIO` only for investigation runs, and
+record those values with the result. The JSON output includes send/receive call
+counters and max batch sizes; use those fields to check whether the benchmark is
+syscall or batch-size limited before blaming Gatherlink.
+
+For CPU-placement investigations, the Hyper-V helpers can wrap only the
+benchmark sender or sink with Linux `taskset` through
+`PERF_UDP_PRESSURE_SEND_CPUSET` and `PERF_UDP_PRESSURE_SINK_CPUSET`. Leave these
+unset for ordinary runs. Use them only with node probes, because constraining
+the userland pressure tool can help or hurt depending on whether the current
+bottleneck is userland receive work or kernel WireGuard/softirq work.
+
+Set `PERF_COLLECT_NODE_PROBES=1` for focused Hyper-V pressure runs when CPU,
+process, or network-device pressure matters. Keep it off for final headline
+numbers unless the comparison explicitly includes probe overhead.
 
 For single-path investigations, use the matrix wrapper with `--active-paths a`
 and include `wireguard-kernel-onehop`, `wireguard-userspace-onehop`,
@@ -215,7 +292,7 @@ links where jumbo end-to-end MTU is usually not available.
 
 Cold-cache runs prove the configured/profile startup guess is good enough to
 begin safely. Warm-cache runs prove sustained traffic and auto-detected capacity
-improve the next run. The generated `report.md` shows configured path capacities
+improve the next run. The generated report shows configured path capacities
 beside observed per-path receive rates, plus both the minimum `pass_threshold`
 and the desired `performance_target`.
 

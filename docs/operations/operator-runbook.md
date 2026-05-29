@@ -1,4 +1,4 @@
-# V0.9 Operator Runbook
+# Operator Runbook
 
 Use this when running Gatherlink on Debian for a lab or small site. Keep this
 page practical: start, inspect, reload by restart when needed, and stop cleanly.
@@ -107,7 +107,7 @@ arrived and only one was delivered.
 ## Config Changes
 
 Runtime changes should be live-reloadable where the runner supports reapply.
-During v0.9 operations, the safe fallback is:
+The safe fallback is:
 
 1. Validate the changed config.
 2. Stop the affected service.
@@ -151,10 +151,10 @@ gatherlink secrets state-audit --state-dir .gatherlink/state
 
 ## Rules Operators Should Remember
 
-- Debian is the tested v0.9 platform; see [`docs/user/README.md`](../user/README.md).
+- Debian is the tested platform; see [`docs/user/README.md`](../user/README.md).
 - Security and routing posture are defined in [`docs/protocol/security.md`](../protocol/security.md) and
   [`docs/protocol/relay-session-lifecycle.md`](../protocol/relay-session-lifecycle.md).
 - Runtime/control boundaries are defined in [`docs/architecture/architecture-contract.md`](../architecture/architecture-contract.md).
-- REST/status helper behavior is experimental and local by default; see
+- REST/status helper behavior is API-key protected and local by default; see
   [`docs/architecture/api-surface.md`](../architecture/api-surface.md).
 - Report bugs as GitHub issues with redacted config, logs, and monitor output.

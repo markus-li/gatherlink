@@ -1,10 +1,10 @@
 # Future Roadmap Pipeline
 
-This is not the v0.9.2 roadmap.
+This is not an active release roadmap.
 
 It is a holding area for well-shaped work outside the active release roadmap.
-Anything promoted into v0.9.2 belongs in [`docs/reports/v0.9.2-roadmap.md`](v0.9.2-roadmap.md),
-not here. Nothing here is implementation authorization by itself.
+Anything promoted into a release belongs in that release's roadmap, not here.
+Nothing here is implementation authorization by itself.
 
 ## Promotion Rules
 
@@ -23,46 +23,39 @@ permanent boundaries except where an item needs a local release-promotion note.
 
 ## Source TODO Parking Map
 
-Searchable implementation TODOs may stay in source when they are tied to a
-roadmap home. Current parking:
+Searchable implementation TODOs may stay in source when they name a stable
+feature area and point to a roadmap or owning doc. This file should not track
+whether a TODO is currently implemented; that status belongs in release roadmaps
+and release notes. Use this parking map only to keep future-looking TODO names
+from becoming orphaned.
 
-- `scheduler-telemetry`, `adaptive-scheduler`, `queue-stats`, and
-  `rust-stats`: the narrow live queue telemetry/fairness slice is promoted to
-  v0.9.2. Larger adaptive optimization remains future-only after v0.9.2 proves
-  the telemetry.
-- `scheduler-hot-reapply`: implemented for scheduler status; broader live
-  reload remains future-only.
+Current future-looking TODO areas:
+
+- `scheduler-telemetry`, `adaptive-scheduler`, `queue-stats`, `rust-stats`,
+  and `scheduler-hot-reapply`: scheduler measurement, policy reapply, and
+  broader adaptive optimization beyond the active release scope.
 - `path-interface-discovery`, `path-transport-discovery`, and `dataplane-mtu`:
-  narrow MTU/datagram hardening is promoted to v0.9.2. Automatic path/interface
-  discovery remains future-only.
+  automatic path/interface discovery and deeper MTU handling beyond configured
+  paths.
 - `service-id-registry`, `service-scheduler-policy`, `service-return-policy`,
-  and `shared-sink-provisioning`: v0.9 production discovery/shared-sink closure
-  first, then future config/provisioning polish if needed.
-- `config-schema-migration`: future config compatibility work once persisted
-  appliance configs exist.
-- `dns-helper` and `dns-policy`: honest current DNS policy behavior belongs in
-  the released baseline; richer DNS advanced modes remain future-only.
-- `dns-doh`: current explicit DoH upstream behavior belongs in the released
-  baseline; richer DoH policy, bootstrap, and validation combinations remain
-  future-only.
-- `helper-diagnostics` and `logging-diagnostics`: the narrow doctor/operator
-  polish slice belongs in the released baseline; broader metrics/event
-  integrations remain future-only.
-- `perf`: narrow socket, pacing, queue, and scheduler execution hints may be
-  active release work only when backed by benchmarks; broader kernel, batching,
-  or hot-path relocation decisions remain future performance work.
-- `time-quality`: future time quality and authenticated time sources.
-- `status-http-helper` and `status-http-write-api`: future local REST API
-  hardening after the guarded local status endpoint has more use.
-- `traffic-split-platforms`: current helper output is Debian/nft oriented;
-  non-Debian firewall or policy-routing backends remain future compatibility
-  work.
-- `cleanup-scope`: v0.9.2 should decide whether lab bundle cleanup remains
-  plan-only or gains guarded execution; broader recovery tooling remains
-  future-only.
-- `listen-port-policy`: promoted to [`docs/reports/v0.9.2-roadmap.md`](v0.9.2-roadmap.md).
+  and `shared-sink-provisioning`: provisioning and policy polish around service
+  ids, peer-scoped replies, and shared-sink operation.
+- `config-schema-migration`: compatibility transforms and downgrade behavior
+  when a future schema revision is introduced.
+- `dns-helper`, `dns-policy`, and `dns-doh`: advanced DNS policy, bootstrap,
+  validation, and transport combinations beyond the current helper behavior.
+- `helper-diagnostics` and `logging-diagnostics`: broader helper/runtime event
+  coverage and operator reporting integrations.
+- `perf`: future performance work backed by benchmark evidence, not ad hoc
+  constant changes.
+- `time-quality`: future time quality and authenticated time-source work.
+- `status-http-helper` and `status-http-write-api`: local API hardening and
+  write-operation UX beyond the current guarded operator API.
+- `traffic-split-platforms`: non-Debian firewall or policy-routing backends.
+- `cleanup-scope`: broader recovery and cleanup tooling beyond safe lab
+  cleanup.
 - `handshake-abuse-protection`, `listen-allow-deny`, and `stealth-scan-tests`:
-  future security and DoS-resistance hardening.
+  security and DoS-resistance hardening.
 
 ## Public Distribution And Website Pipeline
 
@@ -70,9 +63,11 @@ These items are public-release infrastructure. They should be promoted into a
 release roadmap only when the release needs them, with the same evidence rules
 as runtime features.
 
-### Debian Package Build And Publishing
+### Debian Package Publishing
 
-Status: future pipeline; moved out of active v0.9.3 scope.
+Status: future pipeline. Package building and local install smoke belong to the
+active packaging docs once implemented; publishing through an apt repository or
+other distribution channel remains future until promoted by a roadmap.
 
 Why it is interesting:
 
@@ -90,15 +85,15 @@ Boundary:
 
 Promotion requirements:
 
-- reproducible package build command
-- clean Debian install smoke
-- package content audit for private/generated files
-- documented upgrade, rollback, and uninstall behavior
+- release-ready package artifact from the active packaging path
+- publishing workflow for an apt repository, GitHub release asset, or both
 - publishing decision: local `.deb`, apt repository, or both
 
 ### Cloudflare-Hosted Public Website
 
-Status: future pipeline; moved out of active v0.9.3 scope.
+Status: future pipeline. Static website copy and deployment notes may exist in
+[`docs/public/`](../public/README.md); production hosting remains future until a
+roadmap promotes it.
 
 Why it is interesting:
 
@@ -120,11 +115,11 @@ Promotion requirements:
 - security and benchmark caveats visible without marketing overreach
 - Cloudflare deployment documented separately from core runtime behavior
 
-## UDP Multipath Pipeline After V0.9.2
+## UDP Multipath Future Pipeline
 
-V0.9.2 promotes the narrow live-telemetry and scheduler-honesty work needed to
-make existing configured paths behave better. The following related items stay
-future unless a later roadmap promotes them explicitly.
+Configured-path scheduling and telemetry are active product areas. The
+following broader items stay future unless a later roadmap promotes them
+explicitly.
 
 ### Dynamic Path Discovery And Path Manager
 
@@ -185,6 +180,36 @@ Promotion requirements:
   non-VM conditions
 - clear docs showing what is UDP best-effort, what is Gatherlink metadata
   reliability, and what remains future-only
+
+### Relay Performance Optimization
+
+Status: future pipeline unless a release roadmap explicitly promotes it.
+
+Why it is interesting:
+
+- untrusted relay routing works and has proof coverage, but product-relevant
+  WireGuard-over-Gatherlink relay performance still trails raw Gatherlink and
+  direct WireGuard
+- relay tuning should be measured separately from endpoint and scheduler
+  overhead so relay work does not hide endpoint problems
+
+Boundary:
+
+- relays forward encrypted Gatherlink traffic according to authenticated relay
+  session state
+- relays do not decrypt endpoint payloads, inspect helper semantics, or own
+  endpoint policy
+- Python owns relay policy and diagnostics; Rust owns compact relay packet
+  execution, counters, sockets, queues, and crypto
+
+Promotion requirements:
+
+- repeatable raw relay and WireGuard-over-relay benchmark rows with direct
+  WireGuard and raw Gatherlink baselines
+- proof that any relay hot-path optimization does not change endpoint security
+  semantics
+- VM acceptance showing path failure, recovery, and monitor visibility through
+  the relay shape
 
 ### TCP-Aware Proxy Plus WireGuard Hybrid
 

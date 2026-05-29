@@ -93,13 +93,29 @@ gatherlink helpers wireguard-plan gatherlink-client.json
 Start the Gatherlink side:
 
 ```bash
+gatherlink doctor --config gatherlink-server.json
+gatherlink doctor --config gatherlink-client.json
 gatherlink run start gatherlink-server.json --name core.wg-server --scheduler-reapply-interval 5
 gatherlink run start gatherlink-client.json --name core.wg-client --scheduler-reapply-interval 5
+gatherlink services status core.wg-server core.wg-client
 gatherlink services monitor core.wg-server core.wg-client --once
 ```
 
 Then start WireGuard using your normal WireGuard tooling after replacing
 placeholder keys in the generated WireGuard configs.
+
+After WireGuard is up, use normal traffic as the smoke test:
+
+```bash
+ping -c 3 <wireguard-reachable-address>
+curl http://<wireguard-reachable-test-host>/
+```
+
+Stop the generated Gatherlink services explicitly:
+
+```bash
+gatherlink services close core.wg-client core.wg-server
+```
 
 ## Non-Localhost Paths
 

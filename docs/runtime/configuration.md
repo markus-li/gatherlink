@@ -18,10 +18,24 @@ Every config file must declare `schema_version`. The current schema is version
 `1`; keeping this explicit in examples avoids guessing what a future versionless
 file meant during migrations.
 
-Schema-version handling lives in `python/gatherlink/config/versions.py`. To add
-version `2`, add a v2 normalizer there, register it in `SUPPORTED_CONFIG_SCHEMAS`,
-and keep the rest of the loader/CLI path pointed at `normalize_config_for_schema`.
-That keeps migration logic in one place before the canonical Pydantic model runs.
+Schema-version parsing lives in `python/gatherlink/config/versions.py`. Explicit
+schema migration lives in `python/gatherlink/config/migration.py`.
+
+Migrations use Pydantic-backed report models and explicit version-to-version
+transform steps. Larger jumps must be chained through intermediary versions, and
+supported downgrades should be explicit reverse transforms. If a downgrade would
+lose required meaning, it must fail clearly instead of inventing unsafe defaults.
+
+The CLI entry point is:
+
+```bash
+gatherlink config migrate configs/examples/minimal-client.json
+gatherlink config migrate configs/examples/minimal-client.json --to-schema-version 1
+gatherlink config migrate configs/examples/minimal-client.json --write
+```
+
+Dry-run is the default so operators can review transformed output and warnings
+before replacing a config file.
 
 Development install:
 

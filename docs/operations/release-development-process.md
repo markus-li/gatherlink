@@ -72,7 +72,7 @@ declaring the slice done:
 
 ## Release Notes Gate
 
-Starting with v0.9.2, every release must have a matching release-note file in
+Every release must have a matching release-note file in
 `docs/releases/` before it can be tagged. Release notes should be compact and
 clean, but as complete as possible for the release scope.
 
@@ -87,7 +87,7 @@ Each release note should include:
   docs when the detail belongs there
 
 Do not duplicate long benchmark tables, roadmap prose, or policy text in the
-release note. Summarize the outcome and point to the canonical evidence docs.
+release note. Summarize the outcome and point to linked evidence docs.
 Do not tag a release while the matching release note is missing, stale, or more
 optimistic than the code and test evidence.
 
@@ -100,6 +100,9 @@ The pass must:
 
 - update [`docs/project-living-assessment.md`](../project-living-assessment.md)
   for the release being tagged
+- audit the code paths changed or relied on by the release against the docs
+  that describe them; link, structure, and stale-wording tests are required but
+  cannot replace this behavior check
 - check navigation docs, user guides, operation docs, benchmark docs, release
   notes, roadmaps, and report indexes for stale wording
 - remove or rephrase `active`, `draft`, `release candidate`, `planned`,

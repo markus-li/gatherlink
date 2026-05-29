@@ -4,7 +4,7 @@ Use this when you want the shortest path from a fresh Debian checkout to a
 working Gatherlink CLI and Rust-backed core runner.
 
 Gatherlink is currently tested on Debian. Other Linux distributions may work,
-but Debian is the supported compatibility target for the v0.9 line.
+but Debian is the supported compatibility target.
 
 ## Minimum Development Setup
 

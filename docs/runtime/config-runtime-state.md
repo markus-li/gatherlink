@@ -65,8 +65,8 @@ Live reload is the target model, but current behavior is deliberately
 narrower. Scheduler hot reapply exists for the supported scheduler/status loop.
 Broader service, helper, security-session, endpoint, and config-apply reloads
 are future work unless a concrete implementation and tests say otherwise. The
-safe v0.9 operator fallback is validate, stop the affected service, restart it
-with the same service name, and verify status.
+safe operator fallback is validate, stop the affected service, restart it with
+the same service name, and verify status.
 
 For future broader reload work, Python owns loading, validation, diffing, and
 apply order. A reload should compile a new runtime state generation, push it to

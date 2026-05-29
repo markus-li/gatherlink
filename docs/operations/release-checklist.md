@@ -1,7 +1,7 @@
-# V0.9 Release Checklist
+# Release Checklist
 
-Use this before tagging v0.9. The release is for Debian personal/lab users and
-small sites.
+Use this before tagging a release. The current product target is Debian
+personal/lab users and small sites.
 
 ## Must Be True
 
@@ -14,7 +14,7 @@ small sites.
 - OS-specific behavior runs through the Debian compatibility layer
 - REST/status helper behavior is experimental, local by default, and safe to
   leave disabled
-- v0.9 security docs state the real security posture, including that there has
+- security docs state the real security posture, including that there has
   been no external security audit unless that changes before release
 
 ## Source Checks
@@ -34,7 +34,7 @@ diagnostics.
 
 ## Lab Checks
 
-Run the relevant local labs for the changed behavior and at least these v0.9
+Run the relevant local labs for the changed behavior and at least these
 baselines:
 
 ```bash
@@ -50,7 +50,7 @@ recovery checks.
 
 ## VM Acceptance
 
-Before v0.9:
+Before release:
 
 - run real two-VM Debian acceptance
 - record config used on both VMs
@@ -71,8 +71,11 @@ Current status:
   `tools/hyperv/run_wireguard_vm_acceptance.sh`
 - the three-VM untrusted relay/routing WireGuard proof passed with
   `tools/hyperv/run_relay_wireguard_vm_acceptance.sh`
-- the one-hour operator soak passed in the Hyper-V two-VM lab with
-  `tools/hyperv/run_gatherlink_vm_soak.sh`
+- release soaks are run with `tools/hyperv/run_gatherlink_vm_soak.sh`; the
+  default release gate is a 15-minute clean/non-lossy profile and a 15-minute
+  lossy or asymmetric profile. Run 30-minute follow-up soaks for the same
+  profile class only if a 15-minute soak fails or shows instability that needs
+  a longer confirmation window.
 
 The VM tooling should be automated with simple scripts in the repo. The VMs
 themselves are provided externally; do not require repo docs to contain private
@@ -80,11 +83,11 @@ access details.
 
 ## Soak
 
-The v0.9 operator soak has passed with the one-hour Hyper-V wrapper. Future
-release soaks should still record:
+Release soaks should record:
 
-- multiple hours minimum
-- longer if scheduler, relay, or crypto changed late
+- 15 minutes for each required release profile class by default
+- 30 minutes for the same profile class if the 15-minute soak fails or is
+  inconclusive
 - path degradation and recovery during the run
 - helpers used in their intended mode
 - monitor output captured before, during, and after degradation
@@ -96,32 +99,40 @@ Review:
 - [`docs/README.md`](../README.md)
 - [`docs/user/README.md`](../user/README.md)
 - [`docs/user/troubleshooting.md`](../user/troubleshooting.md)
-- [`docs/operations/v0.9-operator-runbook.md`](v0.9-operator-runbook.md)
-- [`docs/operations/v0.9-troubleshooting-guide.md`](v0.9-troubleshooting-guide.md)
+- [`docs/operations/operator-runbook.md`](operator-runbook.md)
+- [`docs/operations/troubleshooting-guide.md`](troubleshooting-guide.md)
 - [`docs/operations/diagnostics-dictionary.md`](diagnostics-dictionary.md)
 - [`docs/user/config-cookbook.md`](../user/config-cookbook.md)
 - [`docs/reports/v0.9-code-audit-followups.md`](../reports/v0.9-code-audit-followups.md)
 - [`docs/project-living-assessment.md`](../project-living-assessment.md)
 
-Confirm [`docs/reports/v0.9-code-audit-followups.md`](../reports/v0.9-code-audit-followups.md) has no unresolved v0.9
-must-fix items before tagging v0.9.
+Confirm [`docs/reports/v0.9-code-audit-followups.md`](../reports/v0.9-code-audit-followups.md) has no unresolved
+must-fix items before tagging.
 
 Before tagging any version, run a full documentation stale-wording pass:
 
 - update [`docs/project-living-assessment.md`](../project-living-assessment.md)
   so it names the release being tagged as the current closed baseline
+- perform a periodic code-vs-doc audit for the release scope; the structural
+  Markdown tests catch navigation and hygiene drift, but they do not prove that
+  behavior described in docs still matches source behavior
 - check release notes, roadmaps, user guides, operation docs, benchmark docs,
   and report indexes for wording such as `active`, `draft`, `release
   candidate`, `planned`, `pending`, `current roadmap`, or old version numbers
   that no longer match release reality
 - keep historical documents historical, but make sure navigation docs point to
   the current release and future pipeline correctly
+- check report, research, and lab docs for stale implementation-status wording;
+  keep implementation status in roadmaps, release notes, and benchmark ledgers
+  instead of research notes or lab setup guides
+- ensure directory README files use GitHub-clickable Markdown links for
+  repository docs rather than bare code-form `.md` filenames
 - run the markdown link test and release-hygiene doctor check after the wording
   pass
 
 ## Package And Publish
 
-For v0.9.1 and later packaging work:
+For packaging work:
 
 - build packages from clean source
 - publish package artifacts through GitHub release tooling
@@ -129,6 +140,11 @@ For v0.9.1 and later packaging work:
 - verify the Wiki payload matches the committed docs source
 - write or update the matching compact release note in `docs/releases/`
 - link release notes to the matching docs commit or tag
+- before tagging, read the release note as it will appear on GitHub Releases:
+  it must make sense after the tag is pushed, avoid branch-local wording such
+  as `active on dev`, avoid stale "latest" phrasing when newer evidence is
+  listed below, and clearly separate release evidence from historical tuning
+  context
 
 Do not manually edit Wiki pages in ways that diverge from the repository docs.
 
@@ -136,7 +152,7 @@ Do not manually edit Wiki pages in ways that diverge from the repository docs.
 
 Before making the repository public:
 
-- update `SECURITY.md` so it matches the real v0.9 release posture
+- update [`SECURITY.md`](../../SECURITY.md) so it matches the real release posture
 - enable GitHub private vulnerability reporting if it is available for free on
   the repository
 - set the repository description and topics
@@ -149,7 +165,7 @@ Before making the repository public:
 
 ## Tag Conditions
 
-Tag v0.9 only after:
+Tag only after:
 
 1. source checks pass
 2. local labs pass
@@ -157,12 +173,17 @@ Tag v0.9 only after:
 4. soak has no unresolved blocking failures
 5. docs match behavior
 6. release notes say Debian is the tested platform
-7. release notes and `SECURITY.md` say whether an external audit has happened
+7. release notes and [`SECURITY.md`](../../SECURITY.md) say whether an external audit has happened
 8. any remaining limitations are explicit and not hidden in stale TODOs
 9. labs do not own features that production cannot run
-10. for v0.9.2 and later, the matching `docs/releases/` note is compact,
+10. the matching `docs/releases/` note is compact,
     complete for the release scope, and no more optimistic than the evidence
-11. committed content contains no private repository names, private remote URLs,
+11. the matching `docs/releases/` note reads correctly as tagged release text,
+    without branch-local status wording or stale "latest" language
+12. committed content contains no private repository names, private remote URLs,
     private inventories, host-local credentials, or generated local state
-12. `docs/project-living-assessment.md` has been updated for the release
-13. a full documentation stale-wording pass has been completed and checked
+13. [`docs/project-living-assessment.md`](../project-living-assessment.md) has been updated for the release
+14. a full documentation stale-wording and code-vs-doc behavior pass has been
+    completed and checked
+15. report, research, lab, and directory README docs have been checked for
+    stale status wording and non-clickable Markdown file references

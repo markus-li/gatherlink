@@ -1,4 +1,4 @@
-# V0.9 Troubleshooting Guide
+# Troubleshooting Guide
 
 Use this for scenario-based diagnosis. Start with `doctor`, then use status,
 monitor, logs, and diagnostics JSONL.
@@ -86,10 +86,10 @@ Useful event codes:
 
 ## DNS Does Not Resolve
 
-For v0.9, direct DNS upstreams and Gatherlink-tunnel DNS upstreams are
-implemented. The tunnel path was VM-proven in the v0.9 acceptance reports. If DNS
+Direct DNS upstreams and Gatherlink-tunnel DNS upstreams are implemented. If DNS
 does not resolve, check the helper process first, then the local Gatherlink UDP
-service endpoint it uses as its tunnel upstream.
+service endpoint it uses as its tunnel upstream. Historical VM proof belongs in
+the release notes and lab evidence.
 
 Check:
 
@@ -151,9 +151,12 @@ Look for rising send failures, missed packets, reorder-needed counters, or path
 capacity/latency metadata. Expected duplicates can rise during fanout without
 being a problem.
 
-## When Reporting A Bug
+## When Reporting A Bug, Docs Issue, Or Performance Result
 
-Open a GitHub issue and include:
+Open a GitHub issue through the
+[issue chooser](https://github.com/markus-li/gatherlink/issues/new/choose). The
+consolidated report form covers bugs, docs problems, performance results,
+regressions, scheduler comparisons, and lab or VM reports. Include:
 
 - Debian version or Linux distribution
 - Gatherlink commit
@@ -162,3 +165,6 @@ Open a GitHub issue and include:
 - `gatherlink doctor --json` output
 - `gatherlink services monitor ... --once` output
 - relevant service logs and diagnostics JSONL snippets
+- for performance reports: topology, path speeds, MTU, scheduler, traffic
+  shape, test duration, drops/retransmits, and the WireGuard or raw Gatherlink
+  baseline you compared against

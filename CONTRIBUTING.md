@@ -7,23 +7,24 @@ welcome, but changes need to protect the project boundaries.
 
 Read:
 
-- `docs/README.md`
-- `docs/architecture/architecture-contract.md`
-- `docs/architecture/source-map.md`
-- `docs/operations/testing-strategy.md`
+- [`docs/README.md`](docs/README.md)
+- [`docs/architecture/architecture-contract.md`](docs/architecture/architecture-contract.md)
+- [`docs/architecture/source-map.md`](docs/architecture/source-map.md)
+- [`docs/operations/testing-strategy.md`](docs/operations/testing-strategy.md)
 - the feature/helper/protocol doc for the area you are changing
 
 ## Project Laws
 
-- Rust executes compact facts; Python owns meaning and lifecycle.
-- Helpers never become core.
-- No plaintext routing.
-- Routing uses authenticated session/control context and relay-hop state.
-- Carrier wrappers must not change Gatherlink packet semantics.
-- Static crypto is lab/manual fallback; authenticated sessions are the normal
-  secure path.
-- OS-specific behavior should go through compatibility backends.
-- Operator output must come from structured facts and must redact secrets.
+Keep this file as a contributor entry point, not a second policy home. The
+standing project laws live in:
+
+- [`docs/architecture/architecture-contract.md`](docs/architecture/architecture-contract.md)
+- [`docs/architecture/source-map.md`](docs/architecture/source-map.md)
+- [`docs/operations/development-discipline.md`](docs/operations/development-discipline.md)
+- [`docs/protocol/security.md`](docs/protocol/security.md)
+
+If those docs disagree, fix the owning doc and then keep this file as a short
+pointer to it.
 
 ## Tests
 

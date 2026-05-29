@@ -67,7 +67,7 @@ The expected loop is:
 2. implement the smallest useful slice
 3. test it with unit tests and realistic labs
 4. prove important behavior in VMs
-5. update the canonical docs
+5. update the relevant docs
 6. move unfinished work to the correct roadmap
 
 This is why the repository has a strong documentation map, a living assessment,

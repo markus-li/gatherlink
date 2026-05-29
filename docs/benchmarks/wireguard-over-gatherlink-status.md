@@ -4,8 +4,9 @@ This is the canonical current-status note for WireGuard-over-Gatherlink
 performance and the known struggles around it.
 
 Use this file for interpretation and tradeoffs. Keep exact benchmark rows,
-commands, and run logs in `hyperv-performance-log.md` or generated benchmark
-reports.
+commands, and run logs in
+[`hyperv-performance-log.md`](hyperv-performance-log.md) or generated
+benchmark reports.
 
 ## Current Status
 
@@ -68,6 +69,179 @@ create dataplane churn when the compiled primitives are unchanged. The v0.9.2
 runner now skips no-op scheduler reapply calls; use live reapply for long-lived
 services and path changes, but keep direct fixed-policy rows beside it in
 benchmarks so the reapply loop itself remains visible.
+
+For TCP-biased `single_best_path`, equal-capacity paths are intentionally
+stable by configured order rather than live-latency tie-breaks. Latency samples
+are useful for many schedulers, but using noisy low-millisecond telemetry to
+move one opaque WireGuard/TCP tunnel between otherwise equal paths caused
+retransmits during live reapply. Capacity still decides the selected path when
+one path is clearly better; the stable tie-break only avoids unnecessary TCP
+path churn.
+
+For explicit ordered modes, Gatherlink now keeps protected opaque services such
+as single-profile WireGuard on a service-level `single_best_path` primitive by
+default. This is intentionally not a global path drain: other services, control
+traffic, and future probes can still use active paths. The 2026-05-28
+verification showed why this matters. Before the service-level guard, explicit
+`ordered_multipath_capacity_aware` over one WireGuard service at 900 Mbit/s
+fell to 284.75-487.46 Mbit/s with 3.7-48.4% iperf UDP loss depending on the
+path set. After syncing the guard to the VMs, the same explicit ordered command
+compiled the WireGuard service to `single_best_path` and reached
+711.16 Mbit/s with 0.00% iperf UDP loss. A raw Gatherlink UDP control row with
+the same ordered scheduler and `udp_bulk` service still delivered
+999.96 Mbit/s with zero packet delta, so the guard protects opaque ordered
+tunnels without weakening raw UDP aggregation.
+
+The same protection is now deterministic for the TCP-biased coordinator as
+well. When Python chooses an effective `single_best_path` for a protected
+service, it also compiles the selected allowed path id instead of leaving Rust
+to repeatedly infer a best path from noisy low-millisecond primitives. The
+2026-05-28 live-reapply VM check carried the WireGuard service on path-a only,
+reached 705.37 Mbit/s at 900 Mbit/s offered with 0.03% iperf UDP loss, and kept
+raw Gatherlink UDP at 1000.01 Mbit/s with zero packet delta in the paired
+guardrail. This keeps the boundary clean: Python decides the service path plan,
+Rust executes the compact primitive.
+
+The next primitive step is also in place: `inherit` can now be constrained by
+Python-selected `allowed_path_ids` without turning into single-best selection.
+That lets Python trial ordered scheduling across only a proven subset of paths
+when protected-service demand exceeds the best path. Rust still does not decide
+when this is safe; it only runs the compiled node scheduler through the allowed
+path filter. The paired 2026-05-28 guardrails stayed clean after the change:
+raw Gatherlink delivered 999.92 Mbit/s with zero packet delta, and the
+TCP-biased WG-over-GL live-reapply row delivered 707.84 Mbit/s at 900 Mbit/s
+offered with 0.00% iperf UDP loss while remaining pinned to path-a.
+
+Python now applies the subset proof instead of requiring every healthy path to
+be proven. For protected services, promotion to `inherit` requires the current
+best path to be proven, at least two proven paths, and enough capacity in that
+clean subset to cover observed service demand with headroom. Healthy but noisy
+or unproven paths are left out of the allowed set. The 2026-05-28 VM guardrails
+after this change delivered raw Gatherlink at 1000.13 Mbit/s with zero packet
+delta and WG-over-GL at 733.16 Mbit/s with 0.00% iperf UDP loss. That WG row
+still remained single-best because live safety gates did not yet prove ordered
+aggregation; treat the result as a no-regression guardrail plus a cleaner
+promotion mechanism, not as a solved ordered-TCP claim.
+
+Before trying that subset promotion, protected services now make one more
+Python-owned conservative choice: if the current low-latency path cannot cover
+observed service demand but another single healthy path can, the service moves
+to that sufficient path instead of immediately entering ordered multipath.
+This keeps opaque TCP/WireGuard on one ordered path whenever possible. A short
+2026-05-28 fiber+5G-shaped VM check after the change reached 685.93 Mbit/s TCP
+with 321 retransmits on an 800/160/80 Mbit/s profile, so the behavior remains
+in the existing useful band without claiming a new best row.
+
+The coordinator also now uses existing duplicated control frames as low-rate
+path probes. This avoids the chicken-and-egg where a protected service pinned
+to path-a could never gather user-service packet proof on path-b or path-c.
+Python consumes the per-path control counters already present in service
+status; Rust still only reports counters and executes compiled primitives. The
+2026-05-28 control-probe guardrail kept raw Gatherlink at 1000.12 Mbit/s with
+zero packet delta. WG-over-GL stayed on `single_best_path` and delivered
+692.58 Mbit/s at 900 Mbit/s offered with 0.00% iperf UDP loss because the live
+latency window still showed high jitter on the active path. That is a useful
+fail-safe result: more proof is available, but Python still refuses ordered
+promotion when latency quality is not clean enough.
+
+The follow-up latency-quality change keeps that decision better informed:
+control metadata can now carry RTT, clock-error budget, directional jitter, and
+p95 alongside latency source/confidence. Those are still Python-owned scheduler
+facts. They are not data-frame header fields, and Rust does not use them to
+make policy decisions.
+
+Current receiver-feedback status: Python can now recognize a saturated
+best-capacity path and has a bounded ordered-capacity escape candidate, but
+opaque WireGuard/TCP still defaults to service-level `single_best_path` unless
+the service explicitly opts into inheriting the node scheduler. The 2026-05-29
+asymmetric 800/150 Mbit/s VM proof shows why. With the default guard, a
+920 Mbit/s offered WG-over-GL UDP row delivered 663.10 Mbit/s by paired iperf
+UDP with 12.49% loss, while 8-flow `udp_pressure` reported 677.45 Mbit/s. When
+the same protected service was allowed to inherit ordered scheduling, it
+collapsed to 165.49 Mbit/s with 52.68% loss because the slow path took too much
+opaque WireGuard traffic. Treat ordered inherit as an experiment knob, not a
+default recommendation.
+
+`udp_pressure` is now close enough for tuning but still slightly below paired
+iperf UDP in clean WG-over-GL runs. On the same fiber+5G shape at 650 Mbit/s
+offered, iperf UDP delivered 646.24 Mbit/s with no loss while 8-flow
+`udp_pressure` delivered 621.58 Mbit/s, or 96.2% of iperf. The 30-second
+confirmation was 596.44 Mbit/s versus 618.89 Mbit/s, or 96.4%. Keep paired
+iperf rows beside pressure rows when a benchmark claim is close to a gate.
+infer TCP policy.
+
+The 2026-05-29 VM guardrails found three useful correctness issues in that
+telemetry path. First, optional latency-stat fields must accept zero as
+"unknown/not warmed yet"; rejecting zero could stop startup with
+`path latency value out of range`. Second, `data-traffic-one-way` samples are
+not trusted for TCP promotion until their confidence is `good`; warming samples
+remain diagnostic only. Third, per-path one-way latency now uses the selected
+per-path peer clock offset instead of applying the global median offset to every
+path. The paired raw Gatherlink guardrail stayed clean at 999.96 Mbit/s with
+zero packet delta. WireGuard-over-Gatherlink stayed lossless but conservative
+at 731.90, 713.31, and 639.91 Mbit/s across the three checks, all still
+compiled to `single_best_path`. The reading is intentionally sober: the
+estimator is safer and more specific, but VM timing under nested WireGuard load
+is still too noisy to justify automatic ordered promotion.
+
+A follow-up row changed rejected latency candidates to be non-destructive while
+fresh accepted samples are still in the rolling window. That improved the
+guardrail to 702.05 Mbit/s with 0.00% loss and made status more useful:
+path-b/c kept good clock-synced facts while also showing their latest rejected
+candidate reason. The scheduler still stayed on `single_best_path`, which is
+the right result because those paths did not yet have enough low-jitter,
+payload-proven evidence for one opaque WireGuard flow.
+
+The best short row from the same slice was 743.07 Mbit/s after making sink
+authoritative real-data confidence explicit. A later provenance-priority
+correctness pass was tested as well, but its short VM row fell to
+611.53 Mbit/s and did not surface real-data proof in final status, so it is
+kept as correctness groundwork rather than a speed claim.
+
+The next 2026-05-29 clock-consensus slice added minimum-delay weighted-median
+offset selection, per-path base RTT/uncertainty/drift summaries, and a
+single-path guardrail. The paired raw Gatherlink VM guardrail remained clean:
+999.99 Mbit/s generated, 1000.19 Mbit/s received, and zero application-packet
+delta. The short WireGuard-over-Gatherlink VM guardrail stayed functionally
+clean with 0.00% iperf UDP loss, but delivered 654.70 Mbit/s, or 65.5% of that
+paired raw Gatherlink guardrail. Treat this as better scheduler input and
+operator visibility, not a speed win.
+
+On the lossy `external-starlink-queue-dynamics` preset, the same clock facts
+become more obviously useful. A capacity-aware raw Gatherlink run delivered
+160.82 Mbit/s at 180M offered. WireGuard-over-Gatherlink on the same shape
+delivered 162.72 Mbit/s with 8.45% iperf UDP loss: 101.2% of the paired raw
+Gatherlink run and 97.5% of a direct kernel-WireGuard simultaneous UDP-pressure
+sink sum of 166.87 Mbit/s. The monitor/status payload showed `good` per-path
+clock confidence but large uncertainty, roughly 48/74/94 ms across the three
+paths, which is the right caution signal for high-jitter lossy scheduling.
+After the TCP latency-risk guard, the same UDP-biased profile stayed in-band at
+162.15 Mbit/s with 8.44% iperf UDP loss, and the fixed UDP-pressure sink
+reported 160.97 Mbit/s. That is the intended split: opaque/TCP services avoid
+dangerous timing evidence, while UDP/bulk services can still use capacity-aware
+striping on lossy multipath.
+
+Two additional lossy/asymmetric checks clarify scheduler choice. Raw
+Gatherlink on `realworld-starlink-plus-2x5g` delivered 346.05 Mbit/s at 350M
+offered, or 98.9% delivery, so the normal three-path lossy facsimile remains
+healthy. On `external-fiber-5g-asymmetric`, raw Gatherlink with
+`single_best_path` delivered 747.55 Mbit/s at 750M offered with zero packet
+delta. A WireGuard-over-Gatherlink capacity split on the same shape was
+rejected: it collapsed to 141.53 Mbit/s with 82.90% iperf UDP loss and
+multi-second data-latency/queue buildup. The conservative single-best run at
+650M offered reached 638.86 Mbit/s with 0.00% iperf UDP loss, or 85.5% of the
+paired raw Gatherlink baseline. This reinforces the current rule: opaque
+WireGuard should stay conservative on heavily asymmetric links until ordered
+multipath has stronger receiver-feedback control.
+
+The first UDP-pressure check on that conservative fiber+5G row under-reported
+the receiver rate because multi-worker sinks included idle worker wait time in
+the final throughput denominator. The tool now reports active receive windows
+for workers that actually saw packets. With 8 flows/workers it reached
+609.95 Mbit/s, or 94.5% of the paired iperf UDP receiver row at 645.24 Mbit/s.
+One-flow UDP-pressure still underfills this nested WireGuard path at roughly
+505 Mbit/s, so benchmark reports should keep fanout explicit and continue
+showing the paired iperf receiver row when validating WG-over-GL ceilings.
 
 The TCP-biased coordinator is now the best clean-link result in the Hyper-V
 one-hop lab: the 2026-05-24 refresh reached 952.28 Mbit/s TCP with zero
@@ -171,9 +345,24 @@ WG-over-GL best-path rows reached about 73-75 Mbit/s. That confirms the
 coordinator is choosing the right kind of policy, but queue-sensitive TCP
 behavior remains the bottleneck and can dominate even the kernel/userspace
 comparison. A smaller Gatherlink core batch size of `128` was slightly better
-than `512` or `64` only in the path-a-only contrast; the full three-path
-coordinated row did not improve. Keep it as an exploratory diagnostic knob, not
-a default.
+only in one path-a-only contrast. After the ordered idle-gap executor fix was
+rebuilt into the VM extension, the best clean three-path TCP-biased
+coordinated row used the normal `512` core batch size at 896.85 Mbit/s with
+zero retransmits. Treat `--batch-size` as an explicit diagnostic knob, not a
+universal TCP default.
+
+A follow-up live-reapply check confirmed the stable tie-break fix: the same
+clean p8 coordinated TCP shape that previously fell to 769.14 Mbit/s with
+12996 retransmits now runs at 832.92 Mbit/s with zero retransmits. The best
+no-reapply row is still faster at 896.85 Mbit/s, so this is a correctness and
+stability fix rather than proof of TCP multipath aggregation.
+
+The same pass retested clean p8 non-ordered alternatives. `arrival_guarded_capacity`
+reached 675.91 Mbit/s, `flowlet_adaptive` with a 25 ms / 100 ms service flowlet
+reached 775.38 Mbit/s, and `capacity_aware` reached 673.21 Mbit/s. All three
+were below the TCP-biased single-best row and introduced retransmits. Keep them
+available for UDP, mixed-service, and explicit scheduler research, but do not
+promote them as the safe default for one opaque WireGuard/TCP flow.
 
 Capacity/coordinated modes without flowlet stickiness can be better for raw UDP
 aggregation or some lossy/uneven profiles. They can also hurt TCP-like tunnel

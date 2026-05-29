@@ -1119,6 +1119,101 @@ Current interpretation:
   and raw WireGuard baselines so future performance claims are not based only
   on project-owned tooling.
 
+2026-05-27 UDP pressure sink correction:
+
+- A later pure-WireGuard check showed the earlier high-rate `udp_pressure`
+  small-packet receive ceiling was partly a tool artifact. The sender could
+  generate the requested rate, but the sink used one `recv_from` syscall per
+  datagram and under-reported against equivalent `iperf3 -u` receives.
+- `tools/udp_pressure.rs` now uses batched Linux `recvmmsg` receives when
+  available, with the portable `recv_from` path kept as a fallback. This keeps
+  the benchmark tool closer to the way a high-rate UDP application should read.
+- Fresh userspace-WireGuard, clean three-path simultaneous run, path MTU 1500,
+  WireGuard MTU 1380, 1200-byte UDP payloads, 2800 Mbit/s offered per path:
+  `udp_pressure` sink summed 2544.20 Mbit/s and simultaneous `iperf3 -u` summed
+  2551.68 Mbit/s. That is 99.7 percent of the independent iperf reference for
+  the same simultaneous shape. The single-path-alone iperf rows in the same
+  report are intentionally higher and are not the fair comparison for a
+  simultaneous multipath pressure run.
+- Fresh kernel-WireGuard run with the same shape: `udp_pressure` sink summed
+  3254.13 Mbit/s and simultaneous `iperf3 -u` summed 3591.67 Mbit/s, or
+  90.6 percent of the independent iperf reference. This is close enough for
+  pressure testing, but keep both rows in reports when making performance
+  claims.
+- Follow-up parallel-flow check: `udp_pressure` now supports `--flows`,
+  `--workers`, and port striping so it can be compared to multi-stream UDP
+  baselines instead of only one UDP 4-tuple per path. In a clean userspace
+  WireGuard run with `iperf3 -u -P8`, `udp_pressure --flows 8`, 1200-byte
+  payloads, path MTU 1500, and WireGuard MTU 1380, `udp_pressure` summed
+  2109.69 Mbit/s and simultaneous UDP iperf summed 2135.75 Mbit/s, or
+  98.8 percent of the matching UDP iperf reference.
+- The same run's TCP `iperf3 -P8` rows summed 8053.73 Mbit/s. That is a TCP
+  path-set ceiling, not a UDP pressure target: the matching multi-stream UDP
+  iperf result is about 2.1 Gbit/s in this userspace-WireGuard/normal-MTU lab
+  shape. Use TCP rows to compare TCP-over-WireGuard behavior, and UDP rows to
+  validate raw UDP pressure tooling.
+- Optional feedback check: with `PERF_UDP_PRESSURE_FEEDBACK=1`, eight
+  port-striped pressure flows, and eight sink workers, `udp_pressure` summed
+  2117.69 Mbit/s while matching `iperf3 -u -P8` summed 2130.43 Mbit/s, or
+  99.4 percent of the independent UDP reference. Feedback is useful as an
+  optional receiver-paced stress mode, but it does not turn UDP pressure into
+  the TCP `iperf3 -P8` ceiling. The same run's TCP rows summed
+  8156.56 Mbit/s.
+- Send batching and UDP GSO follow-up: Linux `sendmmsg` batching is now used by
+  the pressure sender, and UDP GSO is available behind
+  `--udp-gso-segments N` / `PERF_UDP_PRESSURE_GSO_SEGMENTS=N`. With eight
+  flows, eight sink workers, feedback enabled, normal MTU, and GSO at eight
+  1200-byte segments, userspace WireGuard received 6034.80 Mbit/s across the
+  three paths. Same-run TCP `iperf3 -P8` summed 8171.49 Mbit/s, so this
+  pressure shape reached 73.9 percent of the TCP path-set ceiling while greatly
+  exceeding the matching UDP iperf row. GSO at sixteen segments was lower at
+  5893.14 Mbit/s, so eight is the better tested value for this lab shape so
+  far.
+- Flow-paced near-MTU follow-up: the sender now reuses its `sendmmsg` batch
+  structures, divides aggregate feedback/target rate across flows, and exposes
+  receive-batch tuning. The WireGuard benchmark script also accepts
+  `--udp-length auto` plus `--udp-payload-margin BYTES`; with WG MTU 1420 this
+  resolves to a 1392-byte UDP payload (`wg_mtu - 28`). In the best repeat from
+  this pass, eight flows/workers, `send-batch=128`, `GSO=8`, feedback enabled,
+  normal path MTU, and auto UDP length delivered 7006.05 Mbit/s across the
+  three userspace-WireGuard paths. Same-run TCP `iperf3 -P8` summed
+  7174.39 Mbit/s, so that pressure shape reached 97.7 percent of the TCP
+  path-set ceiling. Repeat checks did not hold that ratio: the same shape
+  delivered 6594.65 Mbit/s against an 8273.01 Mbit/s TCP same-run ceiling
+  (79.7 percent), and bounded 2800 Mbit/s-per-path pressure delivered
+  6354.19 Mbit/s against an 8339.38 Mbit/s TCP same-run ceiling (76.2 percent).
+  Treat the 97.7 percent row as a useful outlier that proves the shape can get
+  close under favorable host scheduling, not as the stable expected result.
+- Follow-up probe and bounded-feedback work: `udp_pressure` gained feedback
+  initial/max caps so a run can avoid both the initial flood and feedback-driven
+  collapse. Hyper-V scripts can set `PERF_COLLECT_NODE_PROBES=1` to capture CPU,
+  process, and path-interface counters during the pressure phase. In
+  `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-userspace-probe-v2/`,
+  the near-MTU GSO pressure shape delivered 7001.34 Mbit/s against an
+  8443.61 Mbit/s same-run TCP path-set ceiling (82.9 percent). Probe data
+  showed `udp_pressure` senders at about 6-7 percent of one core each, sink
+  processes at about 22 percent of one core each, and `wireguard-go` processes
+  around 56-84 percent of one core per path. Current evidence says the benchmark
+  generator is no longer the main ceiling; userspace WireGuard and receive-side
+  processing dominate this lab shape.
+- Evidence:
+  `.gatherlink/hyperv-performance/20260527T-v094-direct-wg-userspace-clean-udp-pressure-2800m-batched-sink/`
+  and
+  `.gatherlink/hyperv-performance/20260527T-v094-direct-wg-kernel-clean-udp-pressure-2800m-batched-sink/`.
+  Parallel-flow evidence:
+  `.gatherlink/hyperv-performance/20260527T-v094-direct-wg-userspace-clean-highudp-8000m-iperfudp8-pressure8/`.
+  Feedback evidence:
+  `.gatherlink/hyperv-performance/20260527T-v094-direct-wg-userspace-clean-udp-pressure-unbounded-feedback8/`.
+  GSO evidence:
+  `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-userspace-gso8-feedback/`
+  and `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-userspace-gso16-feedback/`.
+  Flow-paced near-MTU evidence:
+  `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-userspace-gso8-auto-wgmtu1420-feedback/`
+  and
+  `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-userspace-gso8-send128-auto-wgmtu1420-feedback/`.
+  Probe evidence:
+  `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-userspace-probe-v2/`.
+
 Repeatable commands from this pass:
 
 ```bash
@@ -1931,3 +2026,187 @@ Reading:
   the two real-world WireGuard sweeps.
 - Next tuning, if pursued, should improve the arrival prediction and demotion
   thresholds rather than move policy into Rust.
+
+## 2026-05-28 UDP pressure benchmark-tool calibration
+
+Goal: make sure `udp_pressure` is not the benchmark bottleneck before using it
+to judge Gatherlink endpoint or WireGuard-over-Gatherlink performance. These
+runs compare the same high-rate pressure shape against raw private LAN and
+kernel WireGuard. All rows used normal 1500-byte path MTU, eight flows/workers,
+send/receive batching at 128, UDP GSO at eight segments, node probes enabled,
+and near-maximum payload sizes for the tested layer.
+
+| Shape | Pressure mode | Payload | UDP pressure sink total | Matching `iperf3 -u` simultaneous total | Matching kernel-WG TCP total | Reading | Evidence |
+| --- | --- | ---: | ---: | ---: | ---: | --- | --- |
+| Raw private LAN | feedback, full receive copy | 1472 | 13.88 Gbit/s | 19.07 Gbit/s | n/a | The sender was not the bottleneck; sink CPU/copy work showed up in node probes. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-raw-lan-gso8-aimd-probe/` |
+| Raw private LAN | feedback, truncate receive | 1472 | 14.08 Gbit/s | 19.15 Gbit/s | n/a | Truncate helped one path but not the aggregate; feedback remained too conservative for raw high-ceiling probing. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-raw-lan-gso8-aimd-trunc-probe/` |
+| Raw private LAN | fixed 9 Gbit/s per path, truncate receive | 1472 | 19.75 Gbit/s | 15.85 Gbit/s | n/a | This proves the generator plus truncate sink can exceed the matching raw UDP baseline; use this shape for generator-ceiling proof. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-raw-lan-gso8-fixed9g-trunc-probe/` |
+| Raw private LAN | feedback, relaxed backoff, truncate receive | 1472 | 16.56 Gbit/s | 28.65 Gbit/s | n/a | Still underfilled; receiver feedback should be treated as anti-flood control, not the raw maximum-speed proof. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-raw-lan-gso8-regression-probe-trunc/` |
+| Kernel WireGuard | feedback, full receive copy | 1392 | 7.97 Gbit/s | 5.16 Gbit/s | 8.93 Gbit/s | Kernel WireGuard changes the ceiling: pressure exceeded `iperf3 -u` and reached about 89% of kernel-WG TCP. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-aimd-probe/` |
+| Kernel WireGuard | feedback, truncate receive | 1392 | 8.10 Gbit/s | 4.87 Gbit/s | 9.17 Gbit/s | Best kernel-WG pressure row in this pass, about 88% of the matching TCP path-set total. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-aimd-trunc-probe/` |
+| Kernel WireGuard | fixed 9 Gbit/s per path, truncate receive | 1392 | 6.79 Gbit/s | 5.08 Gbit/s | 8.75 Gbit/s | Fixed target is not the winner inside kernel WireGuard; the tunnel stack benefits from bounded feedback. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed9g-trunc-probe/` |
+
+Reading:
+
+- `udp_pressure` is now capable of exceeding `iperf3 -u` on raw LAN when run
+  with explicit high fixed targets and truncate receive, so it is no longer
+  obviously too weak to drive Gatherlink tests.
+- The receiver-paced feedback controller is useful for avoiding uncontrolled
+  flood, but it is not the high-ceiling proof path. For maximum raw LAN proof,
+  use fixed targets or unbounded runs with node probes.
+- Kernel WireGuard is a better ceiling than userspace WireGuard for this
+  calibration pass. With feedback and truncate receive, `udp_pressure` reached
+  about 88% of matching kernel-WG TCP while exceeding matching kernel-WG
+  `iperf3 -u`.
+- Keep node probes enabled while tuning this tool. The useful signal in this
+  pass came from seeing sink CPU dominate raw LAN and WireGuard/kernel work
+  dominate tunneled runs.
+
+## 2026-05-28 Kernel WireGuard UDP pressure tuning pass
+
+Goal: increase UDP pressure over kernel WireGuard after proving raw LAN was not
+the generator ceiling. The test shape used three clean VM paths, normal 1500-byte
+path MTU, WireGuard MTU 1420, `--udp-length auto` resolving to 1392 bytes,
+eight flows/workers, send/receive batch 128, truncate receive, and node probes.
+Percentages compare against the simultaneous kernel-WireGuard TCP total from
+the same run unless stated otherwise.
+
+| Shape | GSO | Pressure control | UDP pressure sink total | Matching kernel-WG TCP total | % of kernel-WG TCP | Matching `iperf3 -u` total | Reading | Evidence |
+| --- | ---: | --- | ---: | ---: | ---: | ---: | --- | --- |
+| Kernel WG clean | 4 | feedback, 500ms samples | 7.34 Gbit/s | 9.03 Gbit/s | 81.3% | 5.29 Gbit/s | Too small; syscall/packet pressure is higher. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso4-structured-feedback500-probe/` |
+| Kernel WG clean | 6 | feedback, 500ms samples | 7.69 Gbit/s | 8.81 Gbit/s | 87.3% | 4.96 Gbit/s | Better, but still below GSO 8. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso6-structured-feedback500-probe/` |
+| Kernel WG clean | 8 | feedback, 500ms samples | 7.93 Gbit/s | 9.03 Gbit/s | 87.8% | 5.09 Gbit/s | Best feedback/GSO row in this sweep. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-structured-feedback500-probe/` |
+| Kernel WG clean | 10 | feedback, 500ms samples | 7.37 Gbit/s | 9.11 Gbit/s | 80.9% | 5.16 Gbit/s | Too large; burst shape hurts delivery. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso10-structured-feedback500-probe/` |
+| Kernel WG clean | 8 | fixed 2.8 Gbit/s per path | 6.83 Gbit/s | 9.13 Gbit/s | 74.8% | 5.19 Gbit/s | Under target; not enough pressure. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed2800-trunc-probe/` |
+| Kernel WG clean | 8 | fixed 3.0 Gbit/s per path | 7.99 Gbit/s | 9.05 Gbit/s | 88.2% | 5.20 Gbit/s | Similar to feedback, useful bounded baseline. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3g-trunc-probe/` |
+| Kernel WG clean | 8 | fixed 3.1 Gbit/s per path | 8.24 Gbit/s | 9.00 Gbit/s | 91.6% | 4.78 Gbit/s | First row above 90% of matching kernel-WG TCP. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3100-trunc-probe/` |
+| Kernel WG clean | 8 | fixed 3.2 Gbit/s per path | 8.48 Gbit/s | 9.05 Gbit/s | 93.6% | 5.08 Gbit/s | Best row in this pass; current kernel-WG UDP pressure recommendation. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3200-trunc-probe/` |
+| Kernel WG clean | 8 | fixed 3.3 Gbit/s per path | 8.18 Gbit/s | 8.92 Gbit/s | 91.6% | 5.25 Gbit/s | Past the local optimum; delivery falls. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3300-trunc-probe/` |
+
+Reading:
+
+- For this clean kernel-WireGuard shape, `GSO=8` is still the best tested
+  packetization. Smaller GSO raises packet/syscall pressure; larger GSO becomes
+  too bursty.
+- Receiver feedback is helpful when avoiding flood, but fixed bounded pressure
+  around the measured path ceiling is better for maximum kernel-WG UDP proof.
+- The current best UDP-pressure row is `8.48 Gbit/s`, or `93.6%` of the
+  matching kernel-WireGuard TCP path-set total. It also exceeds matching
+  `iperf3 -u` by a wide margin, so `iperf3 -u` is no longer the right ceiling
+  for this generator shape.
+- Keep node probes in this matrix. They showed the pressure tool itself was not
+  CPU-saturated at the best rows; remaining headroom is mostly in the tunnel and
+  kernel delivery behavior.
+
+## 2026-05-28 Kernel WireGuard UDP pressure 30-second confirmation
+
+Goal: check whether the short 8-second kernel-WireGuard UDP pressure optimum
+holds over 30-second windows, then try the plausible last-percent knobs:
+pressure knee, GSO neighbors, send/receive batch neighbors, and simple CPU
+affinity. All rows used three clean VM paths, normal 1500-byte path MTU,
+WireGuard MTU 1420, `--udp-length auto` resolving to 1392 bytes, eight
+flows/workers, truncate receive, and node probes.
+
+| Shape | GSO | Send batch | Recv batch | CPU set | Pressure control | UDP pressure sink total | Matching kernel-WG TCP total | % of kernel-WG TCP | Matching `iperf3 -u` total | Delivery | Reading | Evidence |
+| --- | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |
+| Kernel WG clean, 30s | 8 | 128 | 128 | default | fixed 3.20 Gbit/s per path | 7.97 Gbit/s | 8.89 Gbit/s | 89.6% | 5.19 Gbit/s | 83.1% | Longer confirmation is solid, but below the 8-second peak. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3200-trunc-30s/` |
+| Kernel WG clean, 30s | 8 | 128 | 128 | default | fixed 3.15 Gbit/s per path | 7.98 Gbit/s | 8.76 Gbit/s | 91.0% | 5.16 Gbit/s | 84.4% | Best 30s balance; slightly lower offered pressure improves delivery percentage. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3150-trunc-30s/` |
+| Kernel WG clean, 30s | 8 | 128 | 128 | default | fixed 3.25 Gbit/s per path | 7.22 Gbit/s | 8.89 Gbit/s | 81.2% | 5.28 Gbit/s | 74.1% | Past the knee; extra offered traffic becomes loss/queue churn. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3250-trunc-30s/` |
+| Kernel WG clean, 30s | 7 | 128 | 128 | default | fixed 3.15 Gbit/s per path | 7.13 Gbit/s | 8.07 Gbit/s | 88.3% | 4.81 Gbit/s | 75.5% | Lower GSO is not a win. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso7-fixed3150-trunc-30s/` |
+| Kernel WG clean, 30s | 9 | 128 | 128 | default | fixed 3.15 Gbit/s per path | 7.40 Gbit/s | 8.76 Gbit/s | 84.4% | 5.16 Gbit/s | 78.3% | Higher GSO is also not a win. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso9-fixed3150-trunc-30s/` |
+| Kernel WG clean, 30s | 8 | 96 | 128 | default | fixed 3.15 Gbit/s per path | 7.36 Gbit/s | 8.62 Gbit/s | 85.4% | 4.99 Gbit/s | 78.0% | Smaller send batch hurts. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-send96-fixed3150-trunc-30s/` |
+| Kernel WG clean, 30s | 8 | 160 | 128 | default | fixed 3.15 Gbit/s per path | 6.77 Gbit/s | 8.76 Gbit/s | 77.3% | 5.12 Gbit/s | 71.6% | Larger send batch hurts more. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-send160-fixed3150-trunc-30s/` |
+| Kernel WG clean, 30s | 8 | 128 | 128 | sender/sink 0-2 | fixed 3.15 Gbit/s per path | 6.64 Gbit/s | 8.62 Gbit/s | 77.0% | 5.04 Gbit/s | 70.6% | Simple taskset isolation hurts in the 4-vCPU VM; do not use as default. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3150-taskset0-2-trunc-30s/` |
+| Kernel WG clean, 30s | 8 | 128 | 96 | default | fixed 3.15 Gbit/s per path | 7.00 Gbit/s | 8.74 Gbit/s | 80.1% | 4.91 Gbit/s | 74.1% | Smaller receive batch hurts. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-recv96-fixed3150-trunc-30s/` |
+
+Reading:
+
+- The best 30-second row is `GSO=8`, send/receive batch 128, fixed
+  `3.15 Gbit/s` per path. It delivered `7.98 Gbit/s`, or `91.0%` of matching
+  kernel-WireGuard TCP and `154.6%` of matching `iperf3 -u`.
+- The remaining gap is unlikely to be a simple `udp_pressure` sender/sink knob.
+  Probes show no UDP receive-buffer errors and no path interface drops. Userland
+  pressure processes are not pegged, while node CPU is high enough to implicate
+  kernel WireGuard, softirq, and VM scheduling.
+- Do not chase the rejected knobs as defaults: GSO 7/9, send batch 96/160,
+  receive batch 96, and taskset `0-2` all reduced delivered throughput.
+- The likely remaining wins need a better lab or deeper host/kernel visibility:
+  CPU/IRQ/queue placement at the Hyper-V or Linux networking layer, more vCPU
+  headroom, or tracing where kernel WireGuard drops/queues packets under this
+  pressure.
+
+## 2026-05-28 Kernel WireGuard last-percent lab ceiling pass
+
+Goal: test whether the remaining UDP-pressure gap is meaningfully improved by
+host/guest shape changes rather than another sender knob. This pass kept the
+same clean three-path kernel-WireGuard shape: normal 1500-byte path MTU,
+WireGuard MTU 1420, 1392-byte UDP payloads, `GSO=8`, send/receive batch 128,
+fixed `3.15 Gbit/s` offered per path, truncate receive, and 30-second windows.
+
+| VM shape / knob | UDP pressure sink total | Matching kernel-WG TCP total | % of valid kernel-WG TCP | Matching `iperf3 -u` total | Node CPU A/B | UDP/socket errors | Reading | Evidence |
+| --- | ---: | ---: | ---: | ---: | --- | --- | --- | --- |
+| 4 vCPU, default queue | 7.97 Gbit/s | 8.93 Gbit/s | 89.2% | 4.21 Gbit/s | 82.9% / 75.5% | none | Fresh baseline with per-CPU and softirq probes; still close to the prior 30s best. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3150-probe2-30s/` |
+| 6 vCPU, default queue | 7.13 Gbit/s | invalid | n/a | 3.37 Gbit/s | 73.9% / 61.2% | none | More vCPU reduced CPU pressure but hurt throughput and destabilized the same-run TCP baseline. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3150-probe2-6vcpu-30s/` |
+| 6 vCPU, repeat | 6.10 Gbit/s | invalid | n/a | 2.59 Gbit/s | 72.9% / 65.6% | none | Repeat confirmed the 6-vCPU shape is worse in this Hyper-V lab; do not use it as the default. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3150-probe2-6vcpu-repeat-30s/` |
+| 4 vCPU, `net.core.netdev_max_backlog=250000` | 1.94 Gbit/s | invalid | n/a | 1.08 Gbit/s | 54.5% / 77.0% | none | Large backlog was a clear regression; reset to the default `1000` after the run. | `.gatherlink/hyperv-performance/20260528T-udp-pressure-wg-kernel-gso8-fixed3150-netdevbacklog250k-30s/` |
+
+Reading:
+
+- The 4-vCPU VM shape remains the best tested Hyper-V shape for this lab.
+  Raising all three VMs to 6 vCPU did not expose hidden headroom; it lowered
+  delivered UDP pressure and made the simultaneous TCP comparison unreliable.
+- Per-CPU probes show the 4-vCPU baseline is busy but balanced. UDP receive
+  buffer errors, UDP send-buffer errors, UDP memory errors, and interface drops
+  stayed at zero, so the loss is not a simple socket-buffer failure.
+- `net.core.netdev_max_backlog=250000` is a rejected tuning knob for this
+  workload. It likely adds queueing/latency pressure rather than useful
+  throughput and should not be documented as a Gatherlink lab default.
+- Current stable recommendation stays: 4 vCPU, 8GB RAM, normal 1500-byte path
+  MTU, WireGuard MTU 1420, `GSO=8`, send/receive batch 128, truncate receive,
+  fixed `3.15 Gbit/s` per path for sustained 30-second UDP-pressure validation.
+- To chase the final few percent, the next evidence layer should be host-side
+  Hyper-V/vSwitch/RSS visibility or Linux kernel tracing inside the guests. The
+  simple benchmark knobs tested here are either neutral or clearly negative.
+
+## 2026-05-28 Host and guest pressure tracing follow-up
+
+Goal: separate Hyper-V/vSwitch behavior from guest kernel WireGuard behavior
+after the last-percent lab ceiling pass. This pass added a lightweight host
+counter probe and richer guest probes for per-CPU busy time, softirq deltas, and
+`/proc/net/softnet_stat` deltas.
+
+| Shape | UDP pressure sink total | Matching TCP total | Host switch drops | Guest softnet signal | Reading | Evidence |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| Raw private LAN, 15s, 3 x 3.15 Gbit/s offered | 9.45 Gbit/s | per-path TCP 44.9-50.4 Gbit/s | host probe unavailable for this first run | no `time_squeeze`, no UDP errors | Raw Hyper-V private links were healthy at the intended pressure. | `.gatherlink/hyperv-performance/20260528T-private-lan-hostprobe-15s/` |
+| Kernel WireGuard, 15s, same offered pressure | 1.49 Gbit/s | 1.17 Gbit/s simultaneous TCP | host probe unavailable for this first run | VM A CPU2 showed `time_squeeze=8234`; no UDP socket errors | Kernel-WireGuard receive/decap, not raw LAN, was the bottleneck. | `.gatherlink/hyperv-performance/20260528T-wg-kernel-hostprobe-15s/` |
+| Kernel WireGuard, 15s, bounded host probe | 1.36 Gbit/s | 0.89 Gbit/s simultaneous TCP | path switches reported thousands/sec outgoing drops during the pressure window | VM A CPU2 showed `time_squeeze=8395`; no UDP socket errors | The bad state is visible both at Hyper-V switch egress and in one guest softnet queue. | `.gatherlink/hyperv-performance/20260528T-wg-kernel-hostprobe2-15s/` |
+| Raw private LAN, 8s, bounded host probe | 5.94 Gbit/s through `udp_pressure`; `iperf3 -u` stayed near target with 0% loss | per-path TCP 39.6-57.5 Gbit/s | near-zero path switch drops compared with the bad WG run | no `time_squeeze`, no UDP errors | Raw path behavior remains materially healthier than kernel-WG behavior. The 8s `udp_pressure` row is shorter/noisier than the earlier 15s row. | `.gatherlink/hyperv-performance/20260528T-private-lan-hostprobe2-8s/` |
+
+Reading:
+
+- The lightweight host probe now defaults to the minimal counter set. Full
+  Hyper-V switch-port and vNIC counters are still available, but the minimal
+  profile is the right default for concurrent benchmark runs.
+- Guest tracing shows a sharp difference between raw LAN and kernel WireGuard:
+  raw LAN spreads receive work without softnet squeeze, while the bad
+  WireGuard state concentrates receive work on one CPU and increments
+  `time_squeeze`.
+- RPS and larger `net.core.netdev_budget` were tried outside the table and did
+  not recover kernel-WireGuard aggregate throughput. `netdev_max_backlog`
+  remains a rejected knob.
+- A recovery reboot exposed stale Windows ARP/portproxy state. Hyper-V reported
+  the VMs restored to 4 vCPU and 8GB RAM, but the Default Switch management IPs
+  were not rediscoverable afterward and stale portproxy entries briefly landed
+  in WSL instead of the guests. Do not trust VM benchmark rows after a VM shape
+  change until SSH is proven to land on a Debian VM, not WSL, and `nproc`/memory
+  match the Hyper-V settings.
+
+Next useful work:
+
+- Repair the Hyper-V Default Switch management path before further VM benchmark
+  runs. The ARP-based resolver must reject broadcast addresses and must verify
+  that SSH lands on a non-WSL Debian guest before caching an address.
+- Keep the current performance conclusion narrow: raw Hyper-V paths are healthy;
+  kernel-WireGuard aggregate is currently degraded in this lab state; Gatherlink
+  tuning should pause until the VM management path and kernel-WG baseline are
+  trustworthy again.

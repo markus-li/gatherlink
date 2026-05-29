@@ -12,7 +12,7 @@ First scope:
 - local resolver endpoint
 - cache and serve-stale behavior
 - upstream policy that can use direct, Gatherlink-tunnel, or DNS-over-HTTPS
-  choices for v0.9.1
+  choices
 - IDNA-aware name handling
 - DNSSEC support
 - diagnostics for upstream choice, cache state, and validation failures
@@ -33,7 +33,7 @@ Implemented first slice:
 - answers are cached by TTL and may be served stale for a bounded window
 - direct upstreams execute now
 - Gatherlink tunnel upstream execution is implemented in the helper and must be
-  included in VM acceptance before a v0.9 tag
+  included in VM acceptance before tagging
 - DoH upstream execution is implemented through dnspython's HTTPS transport;
   it is optional helper behavior and does not change the core transport
 - DNSSEC policy is explicit: `off`, `allow_unsigned`, or `require_ad`; the

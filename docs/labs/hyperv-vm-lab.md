@@ -16,8 +16,8 @@ Use three Debian VMs:
 Agreed VM settings:
 
 - Generation 2
-- 2 vCPU
-- 4 GB RAM
+- 4 vCPU
+- 8 GB RAM
 - dynamic memory disabled for repeatable network tests
 - 48 GB dynamically expanding VHDX
 - VM storage rooted under an operator-chosen host-local directory outside Git
@@ -94,10 +94,9 @@ The `gatherlink` user is the normal lab login account. It has passwordless sudo
 for lab setup and traffic shaping, but Gatherlink services should still run
 unprivileged unless a specific lab setup command needs elevation.
 
-VM C uses the same specs and is prepared for later multi-source and routing
-work. The immediate v0.9 acceptance runners still use VM A and VM B; VM C exists
-so future tests can model a second source into the same sink or a transit/routing
-node without rebuilding the lab.
+VM C uses the same specs and is prepared for multi-source and routing work. VM
+A/B tests cover the common endpoint shape; VM C lets the lab model a second
+source into the same sink or a transit/routing node without rebuilding the lab.
 
 For routed performance tests, treat VM C as a first-class dataplane participant,
 not as passive infrastructure. Its UDP socket buffers and interface settings
@@ -146,8 +145,8 @@ the user-level override and open a new terminal:
 The OpenSSH config may still contain Pageant's generated `IdentityAgent` line,
 but `plink.exe -agent` is the verified Pageant path for this lab.
 
-The VM management addresses come from Hyper-V's `Default Switch` DHCP and may
-change after reboot. Resolve the current address by VM name with:
+The VM management NICs use Hyper-V's `Default Switch`. If DHCP is reliable on a
+host, the current address can still be resolved by VM name with:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\tools\hyperv\resolve_gatherlink_vm.ps1 -Name gatherlink-vm-a
@@ -163,8 +162,30 @@ ignored project state file:
 ```
 
 Delete that file, pass `--ip-a`/`--ip-b`/`--ip-c`, or set the matching
-inventory variables when a VM management address changes. The cache is only an
-operator convenience; Gatherlink data-path tests still use the private
+inventory variables when a VM management address changes. The current lab also
+supports deterministic static management addresses on the `Default Switch` when
+DHCP discovery or stale host ARP entries make unattended SSH unreliable:
+
+```text
+gatherlink-vm-a 172.26.209.11/20
+gatherlink-vm-b 172.26.209.12/20
+gatherlink-vm-c 172.26.209.13/20
+gateway         172.26.208.1
+```
+
+Apply that fallback only while the VM is stopped and its Debian root filesystem
+is mounted offline. The helper below updates only the management `internet`
+netplan stanza and disables cloud-init network regeneration so the static
+address survives reboot:
+
+```bash
+sudo python3 tools/hyperv/write_static_management_netplan.py \
+  --root /mnt/gatherlink-vm-a-root \
+  --host-index 11
+```
+
+Use host index `11` for VM A, `12` for VM B, and `13` for VM C. This is a
+management-plane repair only; Gatherlink data-path tests still use the private
 `10.91.x.x` path addresses inside the guests.
 
 Run a command through Pageant-backed `plink` with:
@@ -207,15 +228,24 @@ prepared.
 Use `-Name gatherlink-vm-c -HostKeyC "<vm-c-host-key>"` for a source-only or
 install refresh of the third VM.
 
-From the WSL development checkout, push the current branch to each VM over
-Pageant-backed PuTTY SSH. The `--%` marker keeps PowerShell from rewriting the
-quoted WSL command:
+From the WSL development checkout, prefer native Linux `ssh` with the
+Pageant-to-WSL socket bridge. The current acceptance runners support
+`--transport ssh`, optional per-VM SSH ports, and a shared portproxy IP:
 
-```powershell
-wsl -d gatherlink-dev --% bash -lc 'printf "%s\n" "#!/bin/sh" "exec /mnt/c/Program\ Files/PuTTY/plink.exe -batch -agent -hostkey <host-key-fingerprint> \"\$@\"" > /tmp/gatherlink-plink-vm-a.sh; chmod +x /tmp/gatherlink-plink-vm-a.sh; cd <wsl-gatherlink-checkout>; GIT_SSH=/tmp/gatherlink-plink-vm-a.sh git push ssh://gatherlink@<vm-a-management-ip>/home/gatherlink/repos/gatherlink.git HEAD:refs/heads/<branch>'
+```bash
+export SSH_AUTH_SOCK="$HOME/.ssh/pageant.sock"
+/usr/local/bin/start-pageant-relay
+
+tools/hyperv/run_wireguard_vm_acceptance.sh \
+  --transport ssh \
+  --ip-a 172.22.0.1 --port-a 2201 \
+  --ip-b 172.22.0.1 --port-b 2202
 ```
 
-On the VM, refresh the working tree from the pushed branch:
+For host setups where PuTTY is still the only available agent path, the runners
+also keep the older `plink` transport with explicit host-key fingerprints.
+
+On a VM, refresh the working tree from the pushed branch:
 
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\tools\hyperv\invoke_gatherlink_vm.ps1 -Name gatherlink-vm-a -HostKey "<host-key-fingerprint>" -RemoteCommand "cd /home/gatherlink/src/gatherlink && git fetch origin && git reset --hard origin/<branch> && .venv/bin/pip install -e ."
@@ -318,62 +348,18 @@ Useful interpretation:
 - if drops appear on only one path socket, check path-socket drain fairness
   before assuming the link itself is bad
 
-The v0.9.2 Hyper-V performance investigation showed this shape with a pure UDP
-C sender/receiver on the application side:
+Keep performance numbers out of this lab setup guide. Current and historical
+measurements live in [`docs/benchmarks/`](../benchmarks/README.md), especially
+[`docs/benchmarks/hyperv-performance-log.md`](../benchmarks/hyperv-performance-log.md)
+and
+[`docs/benchmarks/hyperv-performance-history.md`](../benchmarks/hyperv-performance-history.md).
+This guide only records the VM topology, tooling, and interpretation rules that
+are still needed to rerun those measurements.
 
-- normal 1500-byte VM links carried 1.2 Gbit/s cleanly with 1150-byte UDP
-  payloads after fair path-socket draining and batched carrier sends
-- increasing the small-packet path drain quantum allowed normal MTU to carry
-  1.5 Gbit/s without packet loss, though the receiver needed a short catch-up
-  window and reported about 1.45 Gbit/s active delivery rate
-- jumbo VM links plus larger UDP queues carried 2.5 Gbit/s cleanly with the
-  same payload size; after raising Rust's requested carrier socket buffers and
-  the lab sysctl caps, 3.5 Gbit/s carried cleanly
-- 4.0 Gbit/s was above this VM setup's current clean limit; Linux UDP
-  `MemErrors`, socket drops, and receiver catch-up time all indicated host
-  burst absorption rather than protocol/security drops
-- normal MTU above 1.5 Gbit/s first exposed source-side app-facing UDP socket
-  pressure; match the carrier socket buffer ceiling on service sockets before
-  interpreting that as path transport loss
-- the committed 1200-byte conservative carrier MTU is useful for compatibility
-  labs, but it is not a fair performance setting on a clean 1500-byte LAN; a
-  1472-byte carrier UDP payload budget with 1400-1420-byte app UDP payloads
-  reduced packet-rate pressure
-- native CPU builds plus the receive-side owned compact-frame decode raised
-  normal-MTU authenticated active delivery to roughly 2.25-2.28 Gbit/s against
-  a 2.5 Gbit/s offered load in this two-vCPU VM setup, while plaintext
-  Gatherlink delivered essentially the full requested 2.5 Gbit/s
-- a 60 second normal-MTU authenticated three-path run at 2.5 Gbit/s offered
-  load delivered all packets and measured about 2.45 Gbit/s active app receive,
-  so short runs should be treated as noisy until sustained runs confirm them
-- after removing avoidable hot-path payload clones, duplicate compact-frame
-  length encodes, per-frame metrics allocation, and ordinary-batch worker churn,
-  the remaining normal-MTU authenticated ceiling is packet rate plus per-packet
-  AEAD work; future speed work should use measured baselines before moving more
-  execution into Rust threads
-- jumbo tests improved from about 4.7 payloads per carrier packet to around
-  6.7 payloads per carrier packet after pressure-triggered aggregation
-- unbounded traffic generators are not useful acceptance proof by themselves;
-  use rate-limited traffic and compare Gatherlink counters with Linux UDP
-  counters
-- `iperf3 -u` is not a raw UDP-only probe for this service shape because iperf3
-  still opens a TCP control session; use a pure UDP generator for carrier-path
-  dataplane tests unless a TCP helper is intentionally part of the scenario
-
-Those numbers are lab observations, not product limits. They are included so a
-future performance run can tell whether it is seeing the same host bottleneck or
-a new Gatherlink regression.
-
-The v0.9.2 performance pass should be treated as done for this lab unless a
-profile points to a specific next bottleneck. Forward and reverse encrypted
-normal-MTU runs both cleared the local regression target against the plaintext
-Gatherlink baseline, but that should not be confused with the broader direct
-WireGuard parity goal. Short runs are noisy because receiver catch-up time and
-path reordering dominate the tail. Keep the default normal-MTU path run at the
-measured stable setting; shorter path runs improved one direction while hurting
-the other, and larger batch sizes or ordinary-batch worker spawning made the
-system burstier. Further work should start from the checklist in
-[`docs/architecture/performance-philosophy.md`](../architecture/performance-philosophy.md), not from ad hoc constant changes.
+Further performance work should start from
+[`docs/architecture/performance-philosophy.md`](../architecture/performance-philosophy.md)
+and [`docs/benchmarks/README.md`](../benchmarks/README.md), not from ad hoc
+constant changes in the lab guide.
 
 Acceptance should not require every path to carry a tiny exact-packet smoke
 burst. That check proves delivery and service lifecycle. Multipath split is

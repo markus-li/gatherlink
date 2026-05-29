@@ -59,7 +59,7 @@ Current posture:
    authenticated traffic and explicit policy.
 8. Minimal cryptographic choices: aligned. Keep one preferred modern suite and
    avoid user-selectable cipher-suite sprawl.
-9. Key rotation before limits: implemented for v0.9.3 single-initiator live
+9. Key rotation before limits: implemented for single-initiator live
    rekey. Rekey before counter exhaustion, age expiry, or volume thresholds.
 10. Replay windows per session/key: aligned. Replay state is scoped to
     traffic keys and receiver indexes and resets on replacement session facts.
@@ -80,7 +80,7 @@ The current Rust dataplane can run path transports in two modes:
 
 - `security.mode=none`: plaintext Gatherlink frames on path UDP sockets. This is
   intentionally retained for local labs and diagnostics and must log loudly.
-- `security.mode=authenticated`: the normal v0.9 config-facing secure path.
+- `security.mode=authenticated`: the normal config-facing secure path.
   Python verifies signed topology/session documents, compiles short-lived
   directional ChaCha20-Poly1305 keys plus local/remote receiver indexes, and
   hands only those packet-rate facts to Rust. Rust still sees the compact AEAD
@@ -88,7 +88,7 @@ The current Rust dataplane can run path transports in two modes:
 - `security.mode=static`: explicit lab/manual provisioning. It uses the same
   Rust AEAD executor as authenticated mode, but the operator supplied the
   directional keys directly or through static-session tooling. It must stay
-  warning-heavy and should not be treated as the normal v0.9 secure path.
+  warning-heavy and should not be treated as the normal secure path.
 
 Static mode is not the final production trust model. It exists so labs can
 exercise the production AEAD packet path before Noise handshake orchestration is
@@ -113,7 +113,7 @@ gatherlink secrets static-session --local ./local.identity.json --peer ./peer.id
 gatherlink secrets static-session --local ./peer.identity.json --peer ./local.identity.json --role responder
 ```
 
-For v0.9 provisioning, Python also creates and verifies signed topology bundles:
+For provisioning, Python also creates and verifies signed topology bundles:
 
 ```bash
 gatherlink secrets identity-create ./issuer.identity.json
@@ -200,7 +200,7 @@ primitive. Malformed, expired, tampered, wrong-peer, wrong-generation, or
 revoked inputs fail closed locally and must not produce unauthenticated network
 errors.
 
-V0.9.3 authenticated security outputs also include keyless session metadata:
+Authenticated security outputs also include keyless session metadata:
 local node id, peer node id, topology generation, initiator/responder role,
 session creation/expiry time, and rekey thresholds. Python uses that metadata
 to reconstruct authenticated-session policy for live rekey orchestration. Rust
@@ -211,7 +211,7 @@ valid packet-execution inputs, but runtime planning warns that autonomous live
 rekey cannot originate from them.
 
 The older signed ephemeral document bridge remains as a compatibility/manual
-tool while Noise IK becomes the normal v0.9 path:
+tool while Noise IK becomes the normal path:
 
 ```text
 gatherlink secrets handshake-init \
@@ -785,8 +785,8 @@ it starts replacement before expiry or configured volume limits, rejects peers
 that report a different topology generation or identity, and reports whether
 traffic must fail closed. Rust still only receives compiled AEAD/replay facts.
 
-V0.9.3 adds the first in-band rekey control payload for the reserved
-auth/crypto service. It wraps Noise IK initiation/response messages with the
+The reserved auth/crypto service supports an in-band rekey control payload. It
+wraps Noise IK initiation/response messages with the
 current receiver index, topology generation, sender, peer, and validity window
 so the receiver can reject stale or misaddressed rekeys before doing expensive
 handshake work. The payload intentionally carries no traffic keys. Successful

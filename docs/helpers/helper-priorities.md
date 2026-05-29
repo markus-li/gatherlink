@@ -62,8 +62,7 @@ First scope:
 
 - local resolver endpoint
 - cache and serve-stale behavior
-- upstream policy that can use direct, Gatherlink-tunnel, and DoH choices for
-  v0.9.1
+- upstream policy that can use direct, Gatherlink-tunnel, and DoH choices
 - diagnostics for upstream choice, cache state, and validation failures
 
 Not-yet scope:
@@ -74,12 +73,12 @@ Not-yet scope:
 
 ### 3. SOCKS5 Helper
 
-The SOCKS5 helper is Python-owned for v0.9. Use a maintained Python SOCKS5
+The SOCKS5 helper is Python-owned. Use a maintained Python SOCKS5
 server library where practical. The selected candidate is
 `asyncio-socks-server`, because it is a SOCKS5 server library with asyncio
 support and hook points suitable for integrating Gatherlink forwarding.
 
-V0.9 protocol scope is SOCKS5 TCP CONNECT. SOCKS5 UDP ASSOCIATE is deferred.
+The supported protocol scope is SOCKS5 TCP CONNECT. SOCKS5 UDP ASSOCIATE is deferred.
 When this document says SOCKS5 traffic travels "through UDP", it means the
 helper carries proxy traffic over Gatherlink's UDP service transport to a
 companion remote exit helper. It does not mean SOCKS5 UDP ASSOCIATE is part of
@@ -125,7 +124,7 @@ Not-yet scope:
 
 The TCP forwarding helper provides simple 1:1 port forwarding over Gatherlink,
 including response traffic. Example: local TCP port to a web server reachable on
-the remote side through a Gatherlink service. The v0.9.3/future TCP-aware proxy
+the remote side through a Gatherlink service. The future TCP-aware proxy
 and transparent TPROXY shape is documented in
 [`docs/helpers/tcp-forwarding-helper.md`](tcp-forwarding-helper.md) and
 [`docs/reports/future-roadmap-pipeline.md`](../reports/future-roadmap-pipeline.md); it is not part of the current
@@ -147,7 +146,7 @@ Not-yet scope:
 - L7 routing
 - shared SOCKS5 multiplexing unless later design folds them together
 - TCP semantics inside the Rust dataplane
-- transparent TCP interception until the v0.9.3/future TCP-aware proxy slice is
+- transparent TCP interception until the future TCP-aware proxy slice is
   promoted
 
 ### 6. Relay Fabric Helper

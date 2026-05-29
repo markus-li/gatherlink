@@ -7,11 +7,10 @@ authorization. Promote a topic into a release roadmap before building it.
 
 | File | Purpose |
 | --- | --- |
-| `identity-and-topology.md` | future identity, trust-root, topology lifecycle, bootstrap, and fleet-distribution ideas |
-| `overlay-routing.md` | future overlay route planning, transit behavior, exit routing, and route safety |
-| `overlay-naming.md` | future overlay naming and MagicDNS-like ideas |
-| `loop-prevention.md` | future multihop loop-prevention rules |
-| `access-policy.md` | reusable future access-policy model for helpers, exits, relays, and topology generation |
+| [`identity-and-topology.md`](identity-and-topology.md) | future identity, trust-root, topology lifecycle, bootstrap, and fleet-distribution ideas |
+| [`overlay-routing.md`](overlay-routing.md) | future overlay route planning, transit behavior, exit routing, and route safety |
+| [`overlay-naming.md`](overlay-naming.md) | future overlay naming and MagicDNS-like ideas |
+| [`access-policy.md`](access-policy.md) | reusable future access-policy model for helpers, exits, relays, and topology generation |
 
 ## Rules
 
